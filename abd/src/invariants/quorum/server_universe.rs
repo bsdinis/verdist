@@ -1,3 +1,5 @@
+#[cfg(verus_only)]
+use crate::invariants::quorum::Quorum;
 use crate::resource::monotonic_timestamp::MonotonicTimestampResource;
 #[cfg(verus_only)]
 use crate::timestamp::Timestamp;
@@ -14,13 +16,9 @@ use vstd::set_lib::*;
 
 verus! {
 
-pub struct ServerUniverse {
+pub tracked struct ServerUniverse {
     /// mapping from server id to its lower bound
     pub tracked map: Map<u64, Tracked<MonotonicTimestampResource>>,
-}
-
-pub struct Quorum {
-    pub servers: Set<u64>,
 }
 
 impl ServerUniverse {
@@ -1066,22 +1064,6 @@ impl ServerUniverse {
         other.tracked_insert(new_k, Tracked(lb));
 
         Self::duplicate_map(m, other)
-    }
-}
-
-impl Quorum {
-    pub open spec fn view(self) -> Set<u64> {
-        self.servers
-    }
-
-    pub open spec fn from_set(servers: Set<u64>) -> Self {
-        Quorum { servers }
-    }
-
-    pub open spec fn inv(self) -> bool {
-        &&& self@.finite()
-        &&& self@.len() > 0
-        &&& !self@.is_empty()
     }
 }
 

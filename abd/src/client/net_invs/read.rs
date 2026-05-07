@@ -407,12 +407,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
     /// Quorum of the first round
     pub open spec fn first_quorum(self) -> Quorum {
-        Quorum::from_set(self.spec_get_replies().map(|id: (u64, u64)| id.1))
+        self.spec_get_replies().map(|id: (u64, u64)| id.1)
     }
 
     /// Final quorum
     pub open spec fn quorum(self) -> Quorum {
-        Quorum::from_set(self.spec_agree_with_max())
+        self.spec_agree_with_max()
     }
 
     pub closed spec fn spec_agree_with_max(self) -> Set<u64> {
@@ -448,10 +448,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     // PROOF
     pub fn lemma_quorum(&self)
         ensures
-            self.quorum()@ == self.spec_agree_with_max(),
-            self.quorum()@.finite(),
-            self.quorum()@ <= self.server_locs().dom(),
-            self.quorum()@.len() == self.spec_agree_with_max().len(),
+            self.quorum().finite(),
+            self.quorum() <= self.server_locs().dom(),
     {
         proof {
             use_type_invariant(self);
@@ -460,10 +458,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
     pub fn lemma_first_quorum(&self)
         ensures
-            self.first_quorum()@ == self.spec_get_replies().map(|id: (u64, u64)| id.1),
-            self.first_quorum()@.finite(),
-            self.first_quorum()@ <= self.server_locs().dom(),
-            self.first_quorum()@.len() == self.spec_get_replies().len(),
+            self.first_quorum().len() == self.spec_get_replies().len(),
+            self.first_quorum().finite(),
+            self.first_quorum() <= self.server_locs().dom(),
     {
         proof {
             use_type_invariant(self);
@@ -485,7 +482,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             let ghost fq = self.first_quorum();
             let ghost min = self.spec_min_timestamp();
             let ghost max = self.spec_max_timestamp();
-            assert(forall|id| #[trigger] fq@.contains(id) ==> s[id]@@.timestamp() <= max);
+            assert(forall|id| #[trigger] fq.contains(id) ==> s[id]@@.timestamp() <= max);
             assert(s.quorum_timestamp(fq) >= min);
             let witness = s.lemma_quorum_timestamp_witness(fq);
             assert(min <= s[witness]@@.timestamp());
@@ -503,8 +500,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         proof {
             use_type_invariant(self);
             if self.servers().valid_quorum(self.quorum()) {
-                let quorum_map = self.servers().map.restrict(self.quorum()@);
-                assert(quorum_map.dom() == self.quorum()@);  // XXX: load bearing
+                let quorum_map = self.servers().map.restrict(self.quorum());
+                assert(quorum_map.dom() == self.quorum());  // XXX: load bearing
                 let quorum_vals = self.servers().quorum_vals(self.quorum());
                 lemma_values_finite(quorum_map);
                 quorum_map.values().lemma_map_finite(
@@ -667,7 +664,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             lbs.lemma_locs();
             let ghost quorum = self.quorum();
             let ghost max_ts = self.spec_max_timestamp();
-            assert forall|id| #[trigger] quorum@.contains(id) implies lbs[id]@@.timestamp()
+            assert forall|id| #[trigger] quorum.contains(id) implies lbs[id]@@.timestamp()
                 >= max_ts by {
                 assert(self.servers@.contains_key(id));
                 assert(lbs.contains_key(id));

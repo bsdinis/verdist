@@ -274,7 +274,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     pub open spec fn quorum(self) -> Quorum {
-        Quorum::from_set(self.replies().map(|id: (u64, u64)| id.1))
+        self.replies().map(|id: (u64, u64)| id.1)
     }
 
     pub closed spec fn replies(self) -> Set<C::Id> {
@@ -284,10 +284,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     // PROOF
     pub fn lemma_quorum(&self)
         ensures
-            self.quorum()@ == self.replies().map(|id: (u64, u64)| id.1),
-            self.quorum()@.finite(),
-            self.quorum()@ <= self.server_locs().dom(),
-            self.quorum()@.len() == self.replies().len(),
+            self.quorum().len() == self.replies().len(),
+            self.quorum().finite(),
+            self.quorum() <= self.server_locs().dom(),
     {
         proof {
             use_type_invariant(self);

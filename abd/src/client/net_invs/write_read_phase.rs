@@ -312,7 +312,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 
     pub open spec fn quorum(self) -> Quorum {
-        Quorum::from_set(self.replies().map(|id: (u64, u64)| id.1))
+        self.replies().map(|id: (u64, u64)| id.1)
     }
 
     pub closed spec fn spec_max_resp(&self) -> GetTimestampResponse
@@ -336,10 +336,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     // PROOF
     pub fn lemma_quorum(&self)
         ensures
-            self.quorum()@ == self.replies().map(|id: (u64, u64)| id.1),
-            self.quorum()@.finite(),
-            self.quorum()@ <= self.server_locs().dom(),
-            self.quorum()@.len() == self.replies().len(),
+            self.quorum().len() == self.replies().len(),
+            self.quorum().finite(),
+            self.quorum() <= self.server_locs().dom(),
     {
         proof {
             use_type_invariant(self);
@@ -361,8 +360,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             use_type_invariant(self);
             if self.servers().valid_quorum(self.quorum()) {
                 let max = self.spec_max_timestamp();
-                let quorum_map = self.servers().map.restrict(self.quorum()@);
-                assert(quorum_map.dom() == self.quorum()@);  // XXX: load bearing
+                let quorum_map = self.servers().map.restrict(self.quorum());
+                assert(quorum_map.dom() == self.quorum());  // XXX: load bearing
                 lemma_values_finite(quorum_map);
                 quorum_map.values().lemma_map_finite(
                     |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),

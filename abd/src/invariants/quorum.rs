@@ -87,11 +87,11 @@ impl ServerUniverse {
         vlib::map::lemma_map_values_dom(self.map, |r: Tracked<MonotonicTimestampResource>| r@.loc())
     }
 
-    pub proof fn lemma_locs_eq(self, other: Self)
+    pub broadcast proof fn lemma_locs_eq(self, other: Self)
         requires
             self.inv(),
             other.inv(),
-            self.locs() == other.locs(),
+            #[trigger] self.locs() == #[trigger] other.locs(),
         ensures
             forall|id: u64| #[trigger]
                 self.contains_key(id) ==> self[id]@.loc() == other[id]@.loc(),
@@ -540,13 +540,13 @@ impl ServerUniverse {
         &&& self.eq(other)
     }
 
-    pub proof fn lemma_eq_trans(a: Self, b: Self, c: Self)
+    pub broadcast proof fn lemma_eq_trans(a: Self, b: Self, c: Self)
         requires
             a.inv(),
             b.inv(),
             c.inv(),
-            a.eq(b),
-            b.eq(c),
+            #[trigger] a.eq(b),
+            #[trigger] b.eq(c),
         ensures
             a.eq(c),
     {
@@ -573,9 +573,9 @@ impl ServerUniverse {
         }
     }
 
-    pub proof fn lemma_eq_refl(a: Self)
+    pub broadcast proof fn lemma_eq_refl(a: Self)
         requires
-            a.inv(),
+            #[trigger] a.inv(),
         ensures
             a.eq(a),
     {
@@ -598,13 +598,13 @@ impl ServerUniverse {
             }
     }
 
-    pub proof fn lemma_eq_timestamp_trans(a: Self, b: Self, c: Self)
+    pub broadcast proof fn lemma_eq_timestamp_trans(a: Self, b: Self, c: Self)
         requires
             a.inv(),
             b.inv(),
             c.inv(),
-            a.eq_timestamp(b),
-            b.eq_timestamp(c),
+            #[trigger] a.eq_timestamp(b),
+            #[trigger] b.eq_timestamp(c),
         ensures
             a.eq_timestamp(c),
     {
@@ -625,13 +625,13 @@ impl ServerUniverse {
         }
     }
 
-    pub proof fn lemma_eq_timestamp_lb_is_eq(a: Self, b: Self)
+    pub broadcast proof fn lemma_eq_timestamp_lb_is_eq(a: Self, b: Self)
         requires
             a.inv(),
             b.inv(),
             a.is_lb(),
             b.is_lb(),
-            a.eq_timestamp(b),
+            #[trigger] a.eq_timestamp(b),
         ensures
             a.eq(b),
     {

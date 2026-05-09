@@ -162,6 +162,18 @@ impl RequestInner {
     {
         RequestInner::Write(WriteRequest::new(value, timestamp, commitment, servers))
     }
+
+    pub proof fn duplicate(tracked &self) -> (tracked r: Self)
+        ensures
+            self.spec_eq(r),
+    {
+        match self {
+            RequestInner::Get(get) => { RequestInner::Get(get.duplicate()) },
+            RequestInner::GetTimestamp(get_ts) => { RequestInner::GetTimestamp(get_ts.duplicate())
+            },
+            RequestInner::Write(write) => { RequestInner::Write(write.duplicate()) },
+        }
+    }
 }
 
 impl Request {

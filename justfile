@@ -10,7 +10,7 @@ verify:
     cargo verus verify; \
 
 check:
-    cargo check;
+    RUSTFLAGS="-D warnings" cargo check;
 
 [default]
 run:

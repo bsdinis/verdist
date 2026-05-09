@@ -220,6 +220,13 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         (Option<u64>, Timestamp, Tracked<RL::Completion>),
         error::ReadError<RL, RL::Completion>,
     >) {
+        proof {
+            broadcast use crate::proto::GetRequest::lemma_spec_eq;
+            broadcast use crate::proto::WriteRequest::lemma_spec_eq;
+            broadcast use ServerUniverse::lemma_eq_timestamp_trans;
+
+        }
+
         let tracked op = RegisterRead { id: Ghost(self.register_loc()) };
         // NOTE: IMPORTANT: We need to add the linearizer to the queue at this point -- see
         // discussion on `write`
@@ -245,7 +252,14 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             assert(state.inv());
         });
 
-        let req_inner = RequestInner::new_get(Tracked(server_lbs.extract_lbs()));
+        let tracked server_lbs_cpy = server_lbs.extract_lbs();
+        let req_inner = RequestInner::new_get(Tracked(server_lbs_cpy));
+        #[allow(unused_variables)]
+        let cloned_req = req_inner.clone();
+        let tracked treq = cloned_req;
+        assume(treq->Get_0.servers().inv());  // TODO(tracked_servers)
+        assume(treq->Get_0.servers().is_lb());  // TODO(tracked_servers)
+        assert(req_inner->Get_0.servers().spec_eq(treq->Get_0.servers()));  // TODO(XXX): debug
         let tracked request_proof;
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -260,7 +274,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 request_proof = state.request_map.issue_request_proof(
                     self.request_ctr_token.borrow_mut(),
                     request_id,
-                    req_inner, perm
+                    treq, perm
                 );
                 assert(state.request_map.request_ctr_map().dom() == old_dom);
             }
@@ -281,19 +295,17 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 request_proof,
             ),
         );
-        let tracked server_lbs_cpy;
+        let tracked server_lbs_cpy2;
         proof {
-            server_lbs_cpy = server_lbs.extract_lbs();
-            ServerUniverse::lemma_eq_timestamp_trans(
-                request_proof.get().servers(),
-                server_lbs,
-                server_lbs_cpy,
-            );
-            server_lbs.lemma_leq_quorums(server_lbs_cpy, read_pred@.min_timestamp);
+            assert(request_proof.get().servers().eq_timestamp(server_lbs_cpy));
+            server_lbs_cpy2 = server_lbs.extract_lbs();
+            assert(server_lbs_cpy.eq_timestamp(server_lbs));
+            assert(server_lbs.eq_timestamp(server_lbs_cpy2));
+            server_lbs.lemma_leq_quorums(server_lbs_cpy2, read_pred@.min_timestamp);
         }
         #[allow(unused_parens)]
         let accum = ReadAccumGetPhase::new(
-            Tracked(server_lbs_cpy),
+            Tracked(server_lbs_cpy2),
             Tracked(server_tokens_lb),
             Tracked(request_proof),
             read_pred,
@@ -404,13 +416,20 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         }
         // non-unanimous read: write-back
 
+        assert(replies.orig_servers().eq_timestamp(server_lbs));
         let req_inner = RequestInner::new_write(
             value,
             max_ts,
             Tracked(commitment.duplicate()),
             Tracked(server_lbs),
         );
+        #[allow(unused_variables)]
+        let cloned_req = req_inner.clone();
+        let tracked treq = cloned_req;
         let tracked request_proof;
+        assume(treq->Write_0.servers().inv());  // TODO(tracked_servers)
+        assume(treq->Write_0.servers().is_lb());  // TODO(tracked_servers)
+        assert(req_inner->Write_0.servers().spec_eq(treq->Write_0.servers()));  // TODO(XXX): debug
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
             let ghost old_dom = state.request_map.request_ctr_map().dom();
@@ -424,7 +443,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 request_proof = state.request_map.issue_request_proof(
                     self.request_ctr_token.borrow_mut(),
                     request_id,
-                    req_inner,
+                    treq,
                     perm
                 );
                 assert(state.request_map.request_ctr_map().dom() == old_dom);
@@ -432,6 +451,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             // XXX: debug assert
             assert(state.inv());
         });
+        assert(req_inner->Write_0.servers().eq_timestamp(request_proof.write().servers()));  // XXX(trigger)
 
         let req = Request::new(self.id, request_id, req_inner, Tracked(request_proof.duplicate()));
         let read_wb_pred = Ghost(
@@ -529,6 +549,12 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         Tracked<ML::Completion>,
         error::WriteError<ML, ML::Completion>,
     >) {
+        proof {
+            broadcast use crate::proto::GetTimestampRequest::lemma_spec_eq;
+            broadcast use crate::proto::WriteRequest::lemma_spec_eq;
+            broadcast use ServerUniverse::lemma_eq_timestamp_trans;
+
+        }
         let tracked op = RegisterWrite { id: Ghost(self.register_loc()), new_value: value };
         // NOTE: IMPORTANT: We need to add the linearizer to the queue at this point
         //
@@ -606,7 +632,15 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             client_ctr,
         };
 
-        let req_inner = RequestInner::new_get_timestamp(Tracked(server_lbs.extract_lbs()));
+        let tracked server_lbs_cpy = server_lbs.extract_lbs();
+        assert(server_lbs_cpy.eq_timestamp(server_lbs));
+        let req_inner = RequestInner::new_get_timestamp(Tracked(server_lbs_cpy));
+        #[allow(unused_variables)]
+        let cloned_req = req_inner.clone();
+        let tracked treq = cloned_req;
+        assume(treq->GetTimestamp_0.servers().inv());  // TODO(tracked_servers)
+        assume(treq->GetTimestamp_0.servers().is_lb());  // TODO(tracked_servers)
+        assert(req_inner->GetTimestamp_0.servers().spec_eq(treq->GetTimestamp_0.servers()));  // TODO(XXX): debug
         let tracked request_proof;
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -621,9 +655,10 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 request_proof = state.request_map.issue_request_proof(
                     self.request_ctr_token.borrow_mut(),
                     request_id,
-                    req_inner,
+                    treq,
                     perm
                 );
+                assert(request_proof.get_timestamp().servers().eq_timestamp(server_lbs_cpy));
                 request_proof.get_timestamp().servers().lemma_eq(server_lbs);
                 assert(state.request_map.request_ctr_map().dom() == old_dom);
             }
@@ -631,6 +666,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             assert(state.inv());
         });
 
+        assert(request_proof.get_timestamp().servers().eq_timestamp(server_lbs_cpy));
         let req = Request::new(self.id, request_id, req_inner, Tracked(request_proof.duplicate()));
 
         let bpool = BroadcastPool::new(&self.pool);
@@ -763,12 +799,18 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         });
 
         {
+            let tracked server_lbs_cpy = server_lbs.extract_lbs();
             let req_inner = RequestInner::new_write(
                 value,
                 exec_ts,
                 Tracked(commitment.duplicate()),
-                Tracked(server_lbs.extract_lbs()),
+                Tracked(server_lbs_cpy),
             );
+            #[allow(unused_variables)]
+            let cloned_req = req_inner.clone();
+            let tracked treq = cloned_req;
+            assume(treq->Write_0.servers().inv());  // TODO(tracked_servers)
+            assume(treq->Write_0.servers().is_lb());  // TODO(tracked_servers)
             let tracked request_proof;
             let request_id;
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -783,7 +825,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     request_proof = state.request_map.issue_request_proof(
                         self.request_ctr_token.borrow_mut(),
                         request_id,
-                        req_inner,
+                        treq,
                         perm
                     );
                     assert(state.request_map.request_ctr_map().dom() == old_dom);
@@ -803,17 +845,15 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             let write_pred = Ghost(
                 WritePred::new(state_constant, bpool.spec_channels(), self.id, request_proof),
             );
-            let tracked server_lbs_cpy;
+            let tracked server_lbs_cpy2;
             proof {
-                server_lbs_cpy = server_lbs.extract_lbs();
-                ServerUniverse::lemma_eq_timestamp_trans(
-                    request_proof.write().servers(),
-                    server_lbs,
-                    server_lbs_cpy,
-                );
+                server_lbs_cpy2 = server_lbs.extract_lbs();
+                assert(request_proof.write().servers().eq_timestamp(server_lbs_cpy));
+                assert(server_lbs_cpy.eq_timestamp(server_lbs));
+                assert(server_lbs.eq_timestamp(server_lbs_cpy2));
             }
             let accum = WriteAccumulator::new(
-                Tracked(server_lbs_cpy),
+                Tracked(server_lbs_cpy2),
                 Tracked(server_tokens_lb),
                 Tracked(request_proof),
                 write_pred,

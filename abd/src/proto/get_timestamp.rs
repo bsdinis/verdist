@@ -130,6 +130,17 @@ impl GetTimestampRequest {
             a.servers().eq(b.servers()),
     {
     }
+
+    pub proof fn duplicate(tracked &self) -> (tracked r: Self)
+        ensures
+            self.spec_eq(r),
+    {
+        let tracked new_servers;
+        use_type_invariant(self);
+        new_servers = self.servers.borrow().extract_lbs();
+        ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+        GetTimestampRequest { servers: Tracked(new_servers) }
+    }
 }
 
 #[allow(unused)]

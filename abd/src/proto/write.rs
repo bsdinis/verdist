@@ -196,6 +196,24 @@ impl WriteRequest {
             a.commitment_id() == b.commitment_id(),
     {
     }
+
+    pub proof fn duplicate(tracked &self) -> (tracked r: Self)
+        ensures
+            self.spec_eq(r),
+    {
+        let tracked new_commitment;
+        let tracked new_servers;
+        use_type_invariant(self);
+        new_commitment = self.commitment.borrow().duplicate();
+        new_servers = self.servers.borrow().extract_lbs();
+        ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+        WriteRequest {
+            value: self.value,
+            timestamp: self.timestamp,
+            commitment: Tracked(new_commitment),
+            servers: Tracked(new_servers),
+        }
+    }
 }
 
 #[allow(unused)]
@@ -333,23 +351,6 @@ impl WriteResponse {
     }
 }
 
-impl Clone for WriteResponse {
-    fn clone(&self) -> (r: Self)
-        ensures
-            self.spec_eq(r),
-            r.spec_eq(*self),
-    {
-        let tracked new_lb;
-        let tracked server_token;
-        proof {
-            use_type_invariant(self);
-            new_lb = self.lb.borrow().extract_lower_bound();
-            server_token = self.server_token.borrow().duplicate();
-        }
-        WriteResponse::new(Tracked(new_lb), Tracked(server_token))
-    }
-}
-
 impl Clone for WriteRequest {
     fn clone(&self) -> (r: Self)
         ensures
@@ -370,6 +371,23 @@ impl Clone for WriteRequest {
             commitment: Tracked(new_commitment),
             servers: Tracked(new_servers),
         }
+    }
+}
+
+impl Clone for WriteResponse {
+    fn clone(&self) -> (r: Self)
+        ensures
+            self.spec_eq(r),
+            r.spec_eq(*self),
+    {
+        let tracked new_lb;
+        let tracked server_token;
+        proof {
+            use_type_invariant(self);
+            new_lb = self.lb.borrow().extract_lower_bound();
+            server_token = self.server_token.borrow().duplicate();
+        }
+        WriteResponse::new(Tracked(new_lb), Tracked(server_token))
     }
 }
 

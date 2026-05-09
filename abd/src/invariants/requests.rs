@@ -28,10 +28,18 @@ verus! {
 /// Proof of a particular request being issued by some client
 /// The key is (client_id, request_id)
 pub tracked struct RequestProof {
-    r: GhostPersistentPointsTo<(u64, u64), RequestInner>,
+    #[allow(unused)]
+    tracked r: GhostPersistentPointsTo<(u64, u64), RequestInner>,
+    #[allow(unused)]
+    tracked inner: RequestInner,
 }
 
 impl RequestProof {
+    #[verifier::type_invariant]
+    pub closed spec fn inv(self) -> bool {
+        self.r.value().spec_eq(self.inner)
+    }
+
     pub closed spec fn view(self) -> RequestInner {
         self.r.value()
     }
@@ -75,8 +83,15 @@ impl RequestProof {
             r@ == self@,
             r.key() == self.key(),
     {
+        use_type_invariant(self);
+        assert(self.r.value().spec_eq(self.inner));
         let tracked r = self.r.duplicate();
-        RequestProof { r }
+        assert(r.value().spec_eq(self.inner));
+        let tracked inner = self.inner.duplicate();
+        assert(self.inner.spec_eq(inner));
+        RequestInner::spec_eq_trans(r.value(), self.inner, inner);
+        assert(r.value().spec_eq(inner));
+        RequestProof { r, inner }
     }
 
     pub proof fn agree(tracked &self, tracked auth: &RequestMapAuth)
@@ -97,7 +112,46 @@ impl RequestProof {
             final(self)@ == old(self)@,
             final(self).key() == other.key() ==> final(self)@ == other@,
     {
+        use_type_invariant(&*self);
+        use_type_invariant(other);
         self.r.intersection_agrees(&other.r);
+    }
+
+    pub open spec fn spec_eq(self: Self, other: Self) -> bool {
+        self@.spec_eq(other@)
+    }
+
+    pub broadcast proof fn spec_eq_refl(a: Self)
+        requires
+            a.inv(),
+        ensures
+            #[trigger] a.spec_eq(a),
+    {
+        RequestInner::spec_eq_refl(a.r.value());
+    }
+
+    pub broadcast proof fn spec_eq_symm(a: Self, b: Self)
+        requires
+            a.inv(),
+            b.inv(),
+            #[trigger] a.spec_eq(b),
+        ensures
+            b.spec_eq(a),
+    {
+        RequestInner::spec_eq_symm(a.r.value(), b.r.value());
+    }
+
+    pub broadcast proof fn spec_eq_trans(a: Self, b: Self, c: Self)
+        requires
+            a.inv(),
+            b.inv(),
+            c.inv(),
+            #[trigger] a.spec_eq(b),
+            #[trigger] b.spec_eq(c),
+        ensures
+            a.spec_eq(c),
+    {
+        RequestInner::spec_eq_trans(a.r.value(), b.r.value(), c.r.value());
     }
 }
 
@@ -337,7 +391,7 @@ impl RequestMap {
         tracked &mut self,
         tracked client_token: &mut RequestCtrToken,
         request_id: u64,
-        request: RequestInner,
+        tracked request: RequestInner,
         tracked client_perm: PermissionU64,
     ) -> (tracked r: RequestProof)
         requires
@@ -395,7 +449,7 @@ impl RequestMap {
         tracked request_auth: &mut RequestMapAuth,
         tracked client_token: &mut RequestCtrToken,
         request_id: u64,
-        request: RequestInner,
+        tracked request: RequestInner,
         tracked request_perm: PermissionU64,
     ) -> (tracked r: RequestProof)
         requires
@@ -440,8 +494,11 @@ impl RequestMap {
 
         perm_map.tracked_insert(client_token.key(), request_perm);
         *missing_perm = Ghost(None);
-        let tracked r = request_auth.insert((client_token.key(), request_id), request).persist();
-        RequestProof { r }
+        let ghost req = request;
+        RequestInner::spec_eq_refl(req);
+        assert(req.spec_eq(request));
+        let tracked r = request_auth.insert((client_token.key(), request_id), req).persist();
+        RequestProof { r, inner: request }
     }
 
     pub proof fn agree_proof(tracked &self, tracked proof: &RequestProof)

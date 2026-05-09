@@ -296,7 +296,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
         proof {
             if request_inner is Get {
                 let get_req = request_inner->Get_0;
-                let proof_get_req = request_proof@.value()->Get_0;
+                let proof_get_req = request_proof@.get();
                 assume(proof_get_req.servers().inv());  // TODO(verus): type invariants on spec items
                 assume(get_req.servers().inv());  // TODO(verus): type invariants on spec items
                 GetRequest::lemma_spec_eq(proof_get_req, get_req);
@@ -305,7 +305,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
             }
             if request_inner is GetTimestamp {
                 let get_ts_req = request_inner->GetTimestamp_0;
-                let proof_get_ts_req = request_proof@.value()->GetTimestamp_0;
+                let proof_get_ts_req = request_proof@.get_timestamp();
                 assume(proof_get_ts_req.servers().inv());  // TODO(verus): type invariants on spec items
                 assume(get_ts_req.servers().inv());  // TODO(verus): type invariants on spec items
                 GetTimestampRequest::lemma_spec_eq(proof_get_ts_req, get_ts_req);
@@ -314,7 +314,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
             }
             if request_inner is Write {
                 let write_req = request_inner->Write_0;
-                let proof_write_req = request_proof@.value()->Write_0;
+                let proof_write_req = request_proof@.write();
                 assume(proof_write_req.servers().inv());  // TODO(verus): type invariants on spec items
                 assume(write_req.servers().inv());  // TODO(verus): type invariants on spec items
                 WriteRequest::lemma_spec_eq(proof_write_req, write_req);

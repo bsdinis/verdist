@@ -285,7 +285,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             server_lbs_cpy = server_lbs.extract_lbs();
             ServerUniverse::lemma_eq_timestamp_trans(
-                request_proof.value()->Get_0.servers(),
+                request_proof.get().servers(),
                 server_lbs,
                 server_lbs_cpy,
             );
@@ -624,7 +624,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     req_inner,
                     perm
                 );
-                request_proof.value()->GetTimestamp_0.servers().lemma_eq(server_lbs);
+                request_proof.get_timestamp().servers().lemma_eq(server_lbs);
                 assert(state.request_map.request_ctr_map().dom() == old_dom);
             }
             // XXX: debug assert
@@ -807,7 +807,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             proof {
                 server_lbs_cpy = server_lbs.extract_lbs();
                 ServerUniverse::lemma_eq_timestamp_trans(
-                    request_proof.value()->Write_0.servers(),
+                    request_proof.write().servers(),
                     server_lbs,
                     server_lbs_cpy,
                 );

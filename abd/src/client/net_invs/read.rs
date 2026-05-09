@@ -53,7 +53,7 @@ impl<C: Channel<K = ChannelInv>> ReadPred<C> {
     ) -> ReadPred<C> {
         ReadPred {
             server_locs: state.server_locs,
-            orig_servers: get_request.value()->Get_0.servers(),
+            orig_servers: get_request.get().servers(),
             commitment_id: state.commitments_ids.commitment_id,
             request_map_id: state.request_map_ids.request_auth_id,
             server_tokens_id: state.server_tokens_id,
@@ -117,10 +117,10 @@ pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
     &&& request.id() == k.request_map_id
     &&& request.key().0 == k.client_id
     &&& request.key().1 == k.get_request_id
-    &&& request.value()->Get_0.servers().eq_timestamp(servers)
-    &&& request.value()->Get_0.servers() == k.orig_servers
-    &&& request.value().req_type() is Get
-    &&& server_inv(request.value()->Get_0.servers())
+    &&& request.get().servers().eq_timestamp(servers)
+    &&& request.get().servers() == k.orig_servers
+    &&& request.req_type() is Get
+    &&& server_inv(request.get().servers())
 }
 
 pub open spec fn server_inv(s: ServerUniverse) -> bool {
@@ -225,16 +225,16 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         wb_request: Option<RequestProof>,
         max_resp: Option<GetResponse>,
     ) -> bool {
-        &&& get_request.value().req_type() is Get
+        &&& get_request.req_type() is Get
         &&& wb_request is Some ==> {
             let req = wb_request->Some_0;
             &&& max_resp is Some
             &&& req.id() == get_request.id()
             &&& req.key().0 == get_request.key().0
-            &&& req.value().req_type() is Write
-            &&& req.value()->Write_0.spec_timestamp() == max_resp->Some_0.spec_timestamp()
-            &&& server_inv(req.value()->Write_0.servers())
-            &&& req.value()->Write_0.servers().eq_timestamp(get_request.value()->Get_0.servers())
+            &&& req.req_type() is Write
+            &&& req.write().spec_timestamp() == max_resp->Some_0.spec_timestamp()
+            &&& server_inv(req.write().servers())
+            &&& req.write().servers().eq_timestamp(get_request.get().servers())
         }
     }
 
@@ -371,7 +371,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     pub closed spec fn orig_servers(self) -> ServerUniverse {
-        self.get_request@.value()->Get_0.servers()
+        self.get_request@.get().servers()
     }
 
     pub closed spec fn wb_request_id(self) -> Option<u64> {
@@ -839,17 +839,17 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         requires
             resp.server_id() == id.1,
             resp.req_type() is Get,
-            resp.request() == get_request@.value(),
+            resp.request() == get_request@@,
             resp.get().spec_commitment().id() == commitment_id@,
             resp.get().server_token_id() == old(server_tokens)@.id(),
             resp.get().loc() == old(servers)@.locs()[resp.server_id()],
             old(servers)@.locs().contains_key(id.1),
             wb_replies@.is_empty(),
-            get_request@.value().req_type() is Get,
+            get_request@.req_type() is Get,
             get_request@.key().0 == id.0,
             Self::server_invs(
                 old(servers)@,
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 old(server_tokens)@@,
                 min_timestamp@,
             ),
@@ -869,7 +869,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& cid.0 == get_request@.key().0
                 } ==> {
                     old(servers)@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp()
+                        == get_request@.get().servers()[cid.1]@@.timestamp()
                 },
             *old(max_resp) is Some ==> {
                 Self::max_resp_inv(
@@ -889,7 +889,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             resp.get().spec_commitment().id() == commitment_id@,
             Self::server_invs(
                 final(servers)@,
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 final(server_tokens)@@,
                 min_timestamp@,
             ),
@@ -920,7 +920,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& cid.0 == get_request@.key().0
                 } ==> {
                     final(servers)@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp()
+                        == get_request@.get().servers()[cid.1]@@.timestamp()
                 },
         no_unwind
     {
@@ -939,7 +939,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             assert(!wb_replies@.contains(id));
             Self::update_servers(
                 servers.borrow_mut(),
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 min_timestamp@,
                 agree_with_max@,
                 &*max_resp,
@@ -954,12 +954,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& servers@.contains_key(cid.1)
                     &&& cid.0 == get_request@.key().0
                 } implies servers@[cid.1]@@.timestamp()
-                == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp() by {
+                == get_request@.get().servers()[cid.1]@@.timestamp() by {
                 if cid.1 == id.1 {
                     assert(get_replies@.insert(id).contains(cid));
                 } else {
                     assert(servers@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp());
+                        == get_request@.get().servers()[cid.1]@@.timestamp());
                 }
             }
 
@@ -990,7 +990,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             old(self).client_id() == id.0,
             resp.req_type() is Get,
             resp.get().server_id() == id.1,
-            resp.request() == old(self).get_request@.value(),
+            resp.request() == old(self).get_request@@,
             old(self).constant().server_tokens_id == resp.get().server_token_id(),
             old(self).constant().server_locs.contains_key(resp.server_id()),
             old(self).constant().server_locs[resp.server_id()] == resp.get().loc(),
@@ -1074,14 +1074,14 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             get_request@.key().0 == id.0,
             resp.server_id() == id.1,
             resp.req_type() is Write,
-            resp.request() == wb_request@->Some_0.value(),
+            resp.request() == wb_request@->Some_0@,
             resp.write().server_token_id() == old(server_tokens)@.id(),
             resp.write().loc() == old(servers)@.locs()[resp.server_id()],
             old(servers)@.locs().contains_key(id.1),
             !get_replies@.is_empty(),
             Self::server_invs(
                 old(servers)@,
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 old(server_tokens)@@,
                 min_timestamp@,
             ),
@@ -1117,7 +1117,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& cid.0 == get_request@.key().0
                 } ==> {
                     old(servers)@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp()
+                        == get_request@.get().servers()[cid.1]@@.timestamp()
                 },
         ensures
             final(servers)@.locs() == old(servers)@.locs(),
@@ -1126,7 +1126,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             final(wb_replies)@.finite(),
             Self::server_invs(
                 final(servers)@,
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 final(server_tokens)@@,
                 min_timestamp@,
             ),
@@ -1162,7 +1162,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& cid.0 == get_request@.key().0
                 } ==> {
                     final(servers)@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp()
+                        == get_request@.get().servers()[cid.1]@@.timestamp()
                 },
         no_unwind
     {
@@ -1193,7 +1193,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             assert(!wb_replies@.contains(id));
             Self::update_servers_on_wb(
                 servers.borrow_mut(),
-                get_request@.value()->Get_0.servers(),
+                get_request@.get().servers(),
                 min_timestamp@,
                 agree_with_max@,
                 max_resp->Some_0,
@@ -1208,12 +1208,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     &&& servers@.contains_key(cid.1)
                     &&& cid.0 == get_request@.key().0
                 } implies servers@[cid.1]@@.timestamp()
-                == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp() by {
+                == get_request@.get().servers()[cid.1]@@.timestamp() by {
                 if cid.1 == id.1 {
                     assert(wb_replies@.insert(id).contains(cid));
                 } else {
                     assert(servers@[cid.1]@@.timestamp()
-                        == get_request@.value()->Get_0.servers()[cid.1]@@.timestamp());
+                        == get_request@.get().servers()[cid.1]@@.timestamp());
                 }
             }
         }
@@ -1229,7 +1229,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             old(self).client_id() == id.0,
             resp.req_type() is Write,
             resp.write().server_id() == id.1,
-            resp.request() == old(self).wb_request@->Some_0.value(),
+            resp.request() == old(self).wb_request@->Some_0@,
             old(self).constant().server_tokens_id == resp.write().server_token_id(),
             old(self).constant().server_locs.contains_key(resp.server_id()),
             old(self).constant().server_locs[resp.server_id()] == resp.write().loc(),
@@ -1384,11 +1384,11 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
             accum.spec_wb_replies().is_empty(),
             wb_request@.key().0 == accum.client_id(),
             wb_request@.id() == accum.constant().request_map_id,
-            wb_request@.value().req_type() is Write,
-            wb_request@.value()->Write_0.spec_timestamp() == accum.spec_max_timestamp(),
-            wb_request@.value()->Write_0.servers().inv(),
-            wb_request@.value()->Write_0.servers().is_lb(),
-            wb_request@.value()->Write_0.servers().eq_timestamp(accum.orig_servers()),
+            wb_request@.req_type() is Write,
+            wb_request@.write().spec_timestamp() == accum.spec_max_timestamp(),
+            wb_request@.write().servers().inv(),
+            wb_request@.write().servers().is_lb(),
+            wb_request@.write().servers().eq_timestamp(accum.orig_servers()),
         ensures
             r.spec_request_tag() == wb_request@.key().1,
             r.replies().is_empty(),

@@ -11,7 +11,15 @@ use vstd::resource::map::GhostPersistentSubmap;
 use vstd::resource::map::GhostPointsTo;
 use vstd::resource::Loc;
 
+#[cfg(verus_only)]
+use crate::proto::GetRequest;
+#[cfg(verus_only)]
+use crate::proto::GetTimestampRequest;
+#[cfg(verus_only)]
+use crate::proto::ReqType;
 use crate::proto::RequestInner;
+#[cfg(verus_only)]
+use crate::proto::WriteRequest;
 
 use vstd::prelude::*;
 
@@ -19,7 +27,79 @@ verus! {
 
 /// Proof of a particular request being issued by some client
 /// The key is (client_id, request_id)
-pub type RequestProof = GhostPersistentPointsTo<(u64, u64), RequestInner>;
+pub tracked struct RequestProof {
+    r: GhostPersistentPointsTo<(u64, u64), RequestInner>,
+}
+
+impl RequestProof {
+    pub closed spec fn view(self) -> RequestInner {
+        self.r.value()
+    }
+
+    pub closed spec fn key(self) -> (u64, u64) {
+        self.r.key()
+    }
+
+    pub closed spec fn id(self) -> Loc {
+        self.r.id()
+    }
+
+    pub open spec fn req_type(self) -> ReqType {
+        self@.req_type()
+    }
+
+    pub open spec fn get(self) -> GetRequest
+        recommends
+            self.req_type() is Get,
+    {
+        self@->Get_0
+    }
+
+    pub open spec fn get_timestamp(self) -> GetTimestampRequest
+        recommends
+            self.req_type() is GetTimestamp,
+    {
+        self@->GetTimestamp_0
+    }
+
+    pub open spec fn write(self) -> WriteRequest
+        recommends
+            self.req_type() is Write,
+    {
+        self@->Write_0
+    }
+
+    pub proof fn duplicate(tracked &self) -> (tracked r: Self)
+        ensures
+            r.id() == self.id(),
+            r@ == self@,
+            r.key() == self.key(),
+    {
+        let tracked r = self.r.duplicate();
+        RequestProof { r }
+    }
+
+    pub proof fn agree(tracked &self, tracked auth: &RequestMapAuth)
+        requires
+            self.id() == auth.id(),
+        ensures
+            auth@.contains_pair(self.key(), self@),
+    {
+        self.r.agree(auth)
+    }
+
+    pub proof fn intersection_agrees(tracked &mut self, tracked other: &Self)
+        requires
+            old(self).id() == other.id(),
+        ensures
+            final(self).id() == old(self).id(),
+            final(self).key() == old(self).key(),
+            final(self)@ == old(self)@,
+            final(self).key() == other.key() ==> final(self)@ == other@,
+    {
+        self.r.intersection_agrees(&other.r);
+    }
+}
 
 pub type RequestMapAuth = GhostMapAuth<(u64, u64), RequestInner>;
 
@@ -289,8 +369,8 @@ impl RequestMap {
             final(client_token).value().0 == client_perm.value(),
             final(client_token).value().1 == client_perm.id(),
             r.key() == (final(client_token).key(), request_id),
-            r.value() == request,
-            r.value().spec_eq(request),
+            r@ == request,
+            r@.spec_eq(request),
             r.id() == final(self).request_map_id(),
     {
         use_type_invariant(&*self);
@@ -304,7 +384,7 @@ impl RequestMap {
             request,
             client_perm,
         );
-        RequestInner::spec_eq_refl(proof.value());
+        RequestInner::spec_eq_refl(proof@);
         proof
     }
 
@@ -349,7 +429,7 @@ impl RequestMap {
             final(client_token).value().0 == request_perm.value(),
             final(client_token).value().1 == request_perm.id(),
             r.key() == (final(client_token).key(), request_id),
-            r.value() == request,
+            r@ == request,
             r.id() == final(request_auth).id(),
     {
         client_token.agree(&*ctr_auth);
@@ -360,7 +440,8 @@ impl RequestMap {
 
         perm_map.tracked_insert(client_token.key(), request_perm);
         *missing_perm = Ghost(None);
-        request_auth.insert((client_token.key(), request_id), request).persist()
+        let tracked r = request_auth.insert((client_token.key(), request_id), request).persist();
+        RequestProof { r }
     }
 
     pub proof fn agree_proof(tracked &self, tracked proof: &RequestProof)
@@ -368,7 +449,7 @@ impl RequestMap {
             proof.id() == self.request_map_id(),
         ensures
             self.issued().contains_key(proof.key()),
-            self.issued()[proof.key()] == proof.value(),
+            self.issued()[proof.key()] == proof@,
     {
         use_type_invariant(self);
         proof.agree(&self.request_auth);

@@ -50,12 +50,12 @@ impl<C: Channel<K = ChannelInv>> WritePred<C> {
     ) -> WritePred<C> {
         WritePred {
             server_locs: state.server_locs,
-            orig_servers: request.value()->Write_0.servers(),
+            orig_servers: request.write().servers(),
             commitment_id: state.commitments_ids.commitment_id,
             request_map_id: state.request_map_ids.request_auth_id,
             server_tokens_id: state.server_tokens_id,
             channels,
-            timestamp: request.value()->Write_0.spec_timestamp(),
+            timestamp: request.write().spec_timestamp(),
             client_id,
             request_id: request.key().1,
         }
@@ -96,10 +96,10 @@ pub open spec fn request_inv<C: Channel<K = ChannelInv>>(
     &&& request.id() == pred.request_map_id
     &&& request.key().0 == pred.client_id
     &&& request.key().1 == pred.request_id
-    &&& request.value().req_type() is Write
-    &&& request.value()->Write_0.commitment_id() == pred.commitment_id
-    &&& request.value()->Write_0.spec_timestamp() == pred.timestamp
-    &&& server_inv(request.value()->Write_0.servers())
+    &&& request.req_type() is Write
+    &&& request.write().commitment_id() == pred.commitment_id
+    &&& request.write().spec_timestamp() == pred.timestamp
+    &&& server_inv(request.write().servers())
 }
 
 pub open spec fn server_inv(s: ServerUniverse) -> bool {
@@ -131,8 +131,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             server_tokens@@ <= servers@.locs(),
             server_inv(servers@),
             request_inv(request@, pred@),
-            request@.value()->Write_0.servers().eq_timestamp(servers@),
-            request@.value()->Write_0.servers() == pred@.orig_servers,
+            request@.write().servers().eq_timestamp(servers@),
+            request@.write().servers() == pred@.orig_servers,
             forall|c_id| #[trigger]
                 pred@.channels.contains_key(c_id) ==> {
                     let c = pred@.channels[c_id];
@@ -142,7 +142,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         ensures
             r.constant() == pred@,
             r.replies().is_empty(),
-            r.spec_timestamp() == request@.value()->Write_0.spec_timestamp(),
+            r.spec_timestamp() == request@.write().spec_timestamp(),
             r.server_locs() == servers@.locs(),
             r.server_tokens_id() == server_tokens@.id(),
     {
@@ -215,7 +215,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             self.replies@,
             self.client_id(),
         )
-        &&& self.request@.value().req_type() is Write
+        &&& self.request@.req_type() is Write
     }
 
     // SPEC
@@ -242,7 +242,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     pub closed spec fn orig_servers(self) -> ServerUniverse {
-        self.request@.value()->Write_0.servers()
+        self.request@.write().servers()
     }
 
     pub closed spec fn servers(self) -> ServerUniverse {
@@ -254,7 +254,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     pub closed spec fn commitment_id(self) -> Loc {
-        self.request@.value()->Write_0.commitment_id()
+        self.request@.write().commitment_id()
     }
 
     pub closed spec fn request_map_id(self) -> Loc {
@@ -270,7 +270,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     pub closed spec fn spec_timestamp(self) -> Timestamp {
-        self.request@.value()->Write_0.spec_timestamp()
+        self.request@.write().spec_timestamp()
     }
 
     pub open spec fn quorum(self) -> Quorum {
@@ -404,50 +404,32 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         requires
             resp.server_id() == id.1,
             resp.req_type() is Write,
-            resp.request() == request@.value(),
+            resp.request() == request@@,
             resp.write().server_token_id() == old(server_tokens)@.id(),
             resp.write().loc() == old(servers)@.locs()[resp.server_id()],
             old(servers)@.locs().contains_key(id.1),
-            request@.value().req_type() is Write,
+            request@.req_type() is Write,
             request@.key().0 == id.0,
-            Self::server_invs(
-                old(servers)@,
-                request@.value()->Write_0.servers(),
-                old(server_tokens)@@,
-            ),
+            Self::server_invs(old(servers)@, request@.write().servers(), old(server_tokens)@@),
             Self::replies_inv(
                 old(replies)@,
                 old(servers)@,
-                request@.value()->Write_0.spec_timestamp(),
+                request@.write().spec_timestamp(),
                 id.0,
             ),
-            Self::unchanged_inv(
-                old(servers)@,
-                request@.value()->Write_0.servers(),
-                old(replies)@,
-                id.0,
-            ),
+            Self::unchanged_inv(old(servers)@, request@.write().servers(), old(replies)@, id.0),
         ensures
             final(servers)@.locs() == old(servers)@.locs(),
             final(server_tokens)@.id() == old(server_tokens)@.id(),
             final(replies)@ == old(replies)@.insert(id),
-            Self::server_invs(
-                final(servers)@,
-                request@.value()->Write_0.servers(),
-                final(server_tokens)@@,
-            ),
+            Self::server_invs(final(servers)@, request@.write().servers(), final(server_tokens)@@),
             Self::replies_inv(
                 final(replies)@,
                 final(servers)@,
-                request@.value()->Write_0.spec_timestamp(),
+                request@.write().spec_timestamp(),
                 id.0,
             ),
-            Self::unchanged_inv(
-                final(servers)@,
-                request@.value()->Write_0.servers(),
-                final(replies)@,
-                id.0,
-            ),
+            Self::unchanged_inv(final(servers)@, request@.write().servers(), final(replies)@, id.0),
         no_unwind
     {
         if replies.contains(&id) {
@@ -462,12 +444,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         assert(lb@ is LowerBound);
 
         proof {
-            Self::update_servers(
-                servers.borrow_mut(),
-                request@.value()->Write_0.servers(),
-                id.1,
-                lb,
-            );
+            Self::update_servers(servers.borrow_mut(), request@.write().servers(), id.1, lb);
         }
 
         replies.insert(id);
@@ -479,7 +456,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             old(self).client_id() == id.0,
             resp.req_type() is Write,
             resp.write().server_id() == id.1,
-            resp.request() == old(self).request@.value(),
+            resp.request() == old(self).request@@,
             old(self).constant().server_tokens_id == resp.write().server_token_id(),
             old(self).constant().server_locs.contains_key(resp.server_id()),
             old(self).constant().server_locs[resp.server_id()] == resp.write().loc(),

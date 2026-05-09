@@ -50,7 +50,7 @@ impl<C: Channel<K = ChannelInv>> GetTimestampPred<C> {
     ) -> GetTimestampPred<C> {
         GetTimestampPred {
             server_locs: state.server_locs,
-            orig_servers: request.value()->GetTimestamp_0.servers(),
+            orig_servers: request.get_timestamp().servers(),
             request_map_id: state.request_map_ids.request_auth_id,
             server_tokens_id: state.server_tokens_id,
             channels,
@@ -100,8 +100,8 @@ pub open spec fn request_inv(
     &&& request.id() == request_map_id
     &&& request.key().0 == client_id
     &&& request.key().1 == request_id
-    &&& request.value().req_type() is GetTimestamp
-    &&& server_inv(request.value()->GetTimestamp_0.servers())
+    &&& request.req_type() is GetTimestamp
+    &&& server_inv(request.get_timestamp().servers())
 }
 
 pub open spec fn server_inv(s: ServerUniverse) -> bool {
@@ -132,8 +132,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             server_tokens@@ <= servers@.locs(),
             server_inv(servers@),
             request_inv(request@, pred@.request_map_id, pred@.client_id, pred@.request_id),
-            request@.value()->GetTimestamp_0.servers().eq_timestamp(servers@),
-            request@.value()->GetTimestamp_0.servers() == pred@.orig_servers,
+            request@.get_timestamp().servers().eq_timestamp(servers@),
+            request@.get_timestamp().servers() == pred@.orig_servers,
             forall|c_id| #[trigger]
                 pred@.channels.contains_key(c_id) ==> {
                     let c = pred@.channels[c_id];
@@ -263,7 +263,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 self.server_tokens@.id(),
             )
         }
-        &&& self.request@.value().req_type() is GetTimestamp
+        &&& self.request@.req_type() is GetTimestamp
     }
 
     // SPEC
@@ -288,7 +288,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 
     pub closed spec fn orig_servers(self) -> ServerUniverse {
-        self.request@.value()->GetTimestamp_0.servers()
+        self.request@.get_timestamp().servers()
     }
 
     pub closed spec fn servers(self) -> ServerUniverse {
@@ -571,15 +571,15 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         requires
             resp.server_id() == id.1,
             resp.req_type() is GetTimestamp,
-            resp.request() == request@.value(),
+            resp.request() == request@@,
             resp.get_timestamp().server_token_id() == old(server_tokens)@.id(),
             resp.get_timestamp().loc() == old(servers)@.locs()[resp.server_id()],
             old(servers)@.locs().contains_key(id.1),
-            request@.value().req_type() is GetTimestamp,
+            request@.req_type() is GetTimestamp,
             request@.key().0 == id.0,
             Self::server_invs(
                 old(servers)@,
-                request@.value()->GetTimestamp_0.servers(),
+                request@.get_timestamp().servers(),
                 old(server_tokens)@@,
             ),
             Self::replies_inv(old(replies)@, old(servers)@, id.0),
@@ -591,7 +591,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             ),
             Self::unchanged_inv(
                 old(servers)@,
-                request@.value()->GetTimestamp_0.servers(),
+                request@.get_timestamp().servers(),
                 old(replies)@,
                 id.0,
             ),
@@ -610,7 +610,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             final(replies)@ == old(replies)@.insert(id),
             Self::server_invs(
                 final(servers)@,
-                request@.value()->GetTimestamp_0.servers(),
+                request@.get_timestamp().servers(),
                 final(server_tokens)@@,
             ),
             Self::replies_inv(final(replies)@, final(servers)@, id.0),
@@ -622,7 +622,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             ),
             Self::unchanged_inv(
                 final(servers)@,
-                request@.value()->GetTimestamp_0.servers(),
+                request@.get_timestamp().servers(),
                 final(replies)@,
                 id.0,
             ),
@@ -651,7 +651,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         proof {
             Self::update_servers(
                 servers.borrow_mut(),
-                request@.value()->GetTimestamp_0.servers(),
+                request@.get_timestamp().servers(),
                 agree_with_max@,
                 &*max_resp,
                 id.1,
@@ -664,12 +664,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                     &&& servers@.contains_key(cid.1)
                     &&& cid.0 == request@.key().0
                 } implies servers@[cid.1]@@.timestamp()
-                == request@.value()->GetTimestamp_0.servers()[cid.1]@@.timestamp() by {
+                == request@.get_timestamp().servers()[cid.1]@@.timestamp() by {
                 if cid.1 == id.1 {
                     assert(replies@.insert(id).contains(cid));
                 } else {
                     assert(servers@[cid.1]@@.timestamp()
-                        == request@.value()->GetTimestamp_0.servers()[cid.1]@@.timestamp());
+                        == request@.get_timestamp().servers()[cid.1]@@.timestamp());
                 }
             }
 
@@ -693,7 +693,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             old(self).client_id() == id.0,
             resp.req_type() is GetTimestamp,
             resp.get_timestamp().server_id() == id.1,
-            resp.request() == old(self).request@.value(),
+            resp.request() == old(self).request@@,
             old(self).constant().server_tokens_id == resp.get_timestamp().server_token_id(),
             old(self).constant().server_locs.contains_key(resp.server_id()),
             old(self).constant().server_locs[resp.server_id()] == resp.get_timestamp().loc(),

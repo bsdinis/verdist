@@ -43,25 +43,25 @@ impl Response {
     pub fn new(request_id: u64, inner: ResponseInner, request: Tracked<RequestProof>) -> (r: Self)
         requires
             request@.key().1 == request_id,
-            request@.value().req_type() is Get <==> inner is Get,
-            request@.value().req_type() is GetTimestamp <==> inner is GetTimestamp,
-            request@.value().req_type() is Write <==> inner is Write,
-            request@.value().req_type() is Get ==> {
-                let get_req = request@.value()->Get_0;
+            request@.req_type() is Get <==> inner is Get,
+            request@.req_type() is GetTimestamp <==> inner is GetTimestamp,
+            request@.req_type() is Write <==> inner is Write,
+            request@.req_type() is Get ==> {
+                let get_req = request@.get();
                 let get_resp = inner->Get_0;
                 &&& get_req.servers().contains_key(get_resp.server_id())
                 &&& get_req.servers()[get_resp.server_id()]@@.timestamp()
                     <= get_resp.spec_timestamp()
             },
-            request@.value().req_type() is GetTimestamp ==> {
-                let get_ts_req = request@.value()->GetTimestamp_0;
+            request@.req_type() is GetTimestamp ==> {
+                let get_ts_req = request@.get_timestamp();
                 let get_ts_resp = inner->GetTimestamp_0;
                 &&& get_ts_req.servers().contains_key(get_ts_resp.server_id())
                 &&& get_ts_req.servers()[get_ts_resp.server_id()]@@.timestamp()
                     <= get_ts_resp.spec_timestamp()
             },
-            request@.value().req_type() is Write ==> {
-                let write_req = request@.value()->Write_0;
+            request@.req_type() is Write ==> {
+                let write_req = request@.write();
                 let write_resp = inner->Write_0;
                 &&& write_req.servers().contains_key(write_resp.server_id())
                 &&& write_req.servers()[write_resp.server_id()]@@.timestamp()
@@ -72,7 +72,7 @@ impl Response {
             r.spec_tag() == request_id,
             r.request_id() == request.id(),
             r.request_key() == request@.key(),
-            r.request() == request@.value(),
+            r.request() == request@@,
             inner is Get ==> {
                 &&& r.req_type() is Get
                 &&& inner->Get_0 == r.get()
@@ -133,7 +133,7 @@ impl Response {
     }
 
     pub closed spec fn request(self) -> RequestInner {
-        self.request@.value()
+        self.request@@
     }
 
     pub closed spec fn req_type(self) -> ReqType {
@@ -246,6 +246,7 @@ impl Response {
         &&& self.request_id == other.request_id
         &&& self.inner.spec_eq(other.inner)
         &&& self.request@.id() == other.request@.id()
+        &&& self.request@.key() == other.request@.key()
         &&& self.request@@ == other.request@@
     }
 
@@ -302,9 +303,10 @@ impl Response {
             self.request_id() == old(request_proof)@.id(),
         ensures
             final(request_proof)@.id() == old(request_proof)@.id(),
+            final(request_proof)@.key() == old(request_proof)@.key(),
             final(request_proof)@@ == old(request_proof)@@,
             self.request_key() == final(request_proof)@.key() ==> self.request()
-                == final(request_proof)@.value(),
+                == final(request_proof)@@,
         no_unwind
     {
         proof { request_proof.borrow_mut().intersection_agrees(self.request.borrow()) }
@@ -321,9 +323,10 @@ impl Response {
         ensures
             final(request_proof)@ is Some,
             final(request_proof)@->Some_0.id() == old(request_proof)@->Some_0.id(),
+            final(request_proof)@->Some_0.key() == old(request_proof)@->Some_0.key(),
             final(request_proof)@->Some_0@ == old(request_proof)@->Some_0@,
             self.request_key() == final(request_proof)@->Some_0.key() ==> self.request()
-                == final(request_proof)@->Some_0.value(),
+                == final(request_proof)@->Some_0@,
         no_unwind
     {
         proof {

@@ -174,7 +174,7 @@ impl Request {
     }
 
     pub closed spec fn request(self) -> RequestInner {
-        self.request@.value()
+        self.request@@
     }
 
     pub closed spec fn req_type(self) -> ReqType {
@@ -209,7 +209,7 @@ impl Request {
     #[verifier::type_invariant]
     spec fn inv(self) -> bool {
         &&& self.request@.key().1 == self.request_id
-        &&& self.request@.value().spec_eq(self.inner)
+        &&& self.request@@.spec_eq(self.inner)
     }
 
     pub fn new(
@@ -221,7 +221,7 @@ impl Request {
     ) -> (r: Self)
         requires
             request_proof@.key() == (client_id, request_id),
-            request_proof@.value().spec_eq(request_inner),
+            request_proof@@.spec_eq(request_inner),
         ensures
             r.req_type() == request_inner.req_type(),
             r.request_key() == (r.client_id(), r.spec_tag()),
@@ -238,13 +238,13 @@ impl Request {
     pub fn destruct(self) -> (r: (u64, RequestInner, Tracked<RequestProof>))
         ensures
             r.0 == self.spec_tag(),
-            r.2@.value().spec_eq(r.1),
+            r.2@@.spec_eq(r.1),
             r.2@.id() == self.request_id(),
-            r.2@.value() == self.request(),
-            r.2@.value().req_type() == self.req_type(),
+            r.2@@ == self.request(),
+            r.2@.req_type() == self.req_type(),
             r.2@.key() == self.request_key(),
             r.2@.key() == (self.client_id(), self.spec_tag()),
-            r.2@.value().spec_eq(r.1),
+            r.2@@.spec_eq(r.1),
             r.1 is Get <==> self.req_type() is Get,
             r.1 is GetTimestamp <==> self.req_type() is GetTimestamp,
             r.1 is Write <==> self.req_type() is Write,
@@ -308,8 +308,8 @@ impl Clone for Request {
         }
         let inner = self.inner.clone();
         assert(inner.spec_eq(self.inner));
-        assert(self.request@.value().spec_eq(self.inner));
-        assert(self.request@.value().spec_eq(inner));
+        assert(self.request@@.spec_eq(self.inner));
+        assert(self.request@@.spec_eq(inner));
         let request = Tracked(self.request.borrow().duplicate());
         Request { request_id: self.request_id, inner, request }
     }

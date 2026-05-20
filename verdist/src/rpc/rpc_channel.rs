@@ -40,7 +40,7 @@ impl<C> RpcChannel<C> where
         self.channel().constant()
     }
 
-    pub fn async_invoke<'a>(&'a self, req: &C::S) -> (r: Result<RpcContext<'a, C>, SendError<C::S>>)
+    pub fn async_invoke<'a>(&'a self, req: &C::S) -> (r: Result<RpcContext<'a, C>, SendError>)
         requires
             C::K::send_inv(self.channel().constant(), self.channel().spec_id(), *req),
         ensures
@@ -54,7 +54,7 @@ impl<C> RpcChannel<C> where
         Ok(RpcContext { channel: &self.channel, tag: req.tag() })
     }
 
-    pub fn invoke(&self, req: &C::S) -> (r: Result<C::R, InvokeError<C::S>>)
+    pub fn invoke(&self, req: &C::S) -> (r: Result<C::R, InvokeError>)
         requires
             C::K::send_inv(self.channel().constant(), self.channel().spec_id(), *req),
         ensures

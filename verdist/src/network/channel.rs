@@ -90,7 +90,7 @@ pub trait Channel {
     // in our case X can be a more specific set of locations
     type K: ChannelInvariant<Self::K, Self::Id, Self::R, Self::S>;
 
-    fn send(&self, s: &Self::S) -> Result<(), SendError<Self::S>>
+    fn send(&self, s: &Self::S) -> Result<(), SendError>
         requires
             Self::K::send_inv(self.constant(), self.spec_id(), *s),
     ;
@@ -224,10 +224,8 @@ impl<C> BufChannel<C> where C: Channel, C::R: TaggedMessage, C::Id: std::fmt::De
                 handle.release_write(guard);
                 Ok(None)
             },
-            Err(crate::network::error::TryRecvError::Disconnected) => Err(
-                TryRecvError::Disconnected,
-            ),
             Err(crate::network::error::TryRecvError::Empty) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -257,7 +255,7 @@ impl<C> Channel for BufChannel<C> where C: Channel, C::R: TaggedMessage {
         self.channel.try_recv()
     }
 
-    fn send(&self, v: &Self::S) -> Result<(), SendError<Self::S>> {
+    fn send(&self, v: &Self::S) -> Result<(), SendError> {
         self.channel.send(v)
     }
 

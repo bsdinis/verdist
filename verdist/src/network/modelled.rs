@@ -154,18 +154,18 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
     }
 
     #[verifier::external_body]
-    fn try_recv(&self) -> Result<R, crate::network::error::TryRecvError> {
+    fn try_recv(&self) -> Result<R, TryRecvError> {
         if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
             self.wait();
             let r = self.rx.try_recv()?;
             Ok(r)
         } else {
-            Err(crate::network::error::TryRecvError::Empty)
+            Err(TryRecvError::Empty)
         }
     }
 
     #[verifier::external_body]
-    fn send(&self, v: &S) -> Result<(), crate::network::error::SendError<S>> {
+    fn send(&self, v: &S) -> Result<(), SendError> {
         if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
             self.wait();
             self.tx.send(v.clone())?;
@@ -213,17 +213,17 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
     }
 
     #[verifier::external_body]
-    fn try_recv(&self) -> Result<R, crate::network::error::TryRecvError> {
+    fn try_recv(&self) -> Result<R, TryRecvError> {
         if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
             self.wait();
             self.rx.try_recv().map_err(|e| e.into())
         } else {
-            Err(crate::network::error::TryRecvError::Empty)
+            Err(TryRecvError::Empty)
         }
     }
 
     #[verifier::external_body]
-    fn send(&self, v: &S) -> Result<(), crate::network::error::SendError<S>> {
+    fn send(&self, v: &S) -> Result<(), SendError> {
         if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
             self.wait();
             self.tx.send(v.clone())?;
@@ -298,8 +298,8 @@ impl<K, R, S> Connector<ServerChannel<K, R, S>> for ModelledConnector<R, S> wher
         vlib::veprintln!(
             "[client|{:>3}]: connecting to server", local_id,
         );
-        self.registering_tx.send(local_id).map_err(|_e| ConnectError)?;
-        let (server_id, tx, rx) = self.connection_rx.recv().map_err(|_e| ConnectError)?;
+        self.registering_tx.send(local_id).map_err(|_e| ConnectError::Failed)?;
+        let (server_id, tx, rx) = self.connection_rx.recv().map_err(|_e| ConnectError::Failed)?;
         let pred = gen_pred(self, local_id);
         let chan = ServerChannel::new(server_id, local_id, pred, tx, rx);
         vlib::veprintln!(
@@ -321,28 +321,3 @@ pub fn listen_channel<R, S>(server_id: u64) -> (ModelledListener<R, S>, Modelled
 }
 
 } // verus!
-impl From<crossbeam_channel::TryRecvError> for TryListenError {
-    fn from(value: crossbeam_channel::TryRecvError) -> Self {
-        if value.is_empty() {
-            TryListenError::Empty
-        } else {
-            TryListenError::Disconnected
-        }
-    }
-}
-
-impl From<crossbeam_channel::TryRecvError> for TryRecvError {
-    fn from(value: crossbeam_channel::TryRecvError) -> Self {
-        if value.is_empty() {
-            TryRecvError::Empty
-        } else {
-            TryRecvError::Disconnected
-        }
-    }
-}
-
-impl<S> From<crossbeam_channel::SendError<S>> for SendError<S> {
-    fn from(value: crossbeam_channel::SendError<S>) -> Self {
-        SendError(value.into_inner())
-    }
-}

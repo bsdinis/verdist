@@ -162,16 +162,32 @@ impl<L, C> EchoServer<L, C> where
         while i > 0
             decreases i,
         {
+            use verdist::network::error::TryListenError;
             match self.listener.try_accept(Ghost(|l| self.connected.pred().channel_inv)) {
                 Ok(channel) => {
                     assert(channel.constant() == self.connected.pred().channel_inv);
                     self.accept(channel)
                 },
-                Err(verdist::network::error::TryListenError::Empty) => {
+                Err(TryListenError::Empty) => {
                     break;
                 },
-                Err(verdist::network::error::TryListenError::Disconnected) => {
+                Err(TryListenError::Disconnected | TryListenError::NoFreePorts) => {
                     return false;
+                },
+                Err(TryListenError::Io(io)) => {
+                    match io.kind() {
+                        std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::HostUnreachable
+                        | std::io::ErrorKind::NetworkUnreachable
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::AddrNotAvailable
+                        | std::io::ErrorKind::NetworkDown => { return false },
+                        _ => {
+                            break;
+                        },
+                    }
                 },
             }
 
@@ -198,6 +214,7 @@ impl<L, C> EchoServer<L, C> where
                         &&& connected_pred.server_id == chan.spec_id().0
                     },
         {
+            use verdist::network::error::TryRecvError;
             match channel.try_recv() {
                 Ok(req) => {
                     assert(C::K::recv_inv(channel.constant(), channel.spec_id(), req));
@@ -207,8 +224,8 @@ impl<L, C> EchoServer<L, C> where
                         drop.insert(channel.id());
                     }
                 },
-                Err(verdist::network::error::TryRecvError::Empty) => {},
-                Err(verdist::network::error::TryRecvError::Disconnected) => {
+                Err(TryRecvError::Empty) => {},
+                Err(_) => {
                     drop.insert(channel.id());
                 },
             }

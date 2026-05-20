@@ -10,6 +10,8 @@ version = { workspace = true }
 
 [dependencies]
 vstd = { workspace = true }
+serde = { workspace = true }
+flexbuffers = { workspace = true }
 
 [lints]
 workspace = true

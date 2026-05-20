@@ -29,6 +29,10 @@ verus! {
 
 #[allow(unused)]
 #[verifier::external_type_specification]
+pub(crate) struct ExNetworkType(crate::cli::NetworkType);
+
+#[allow(unused)]
+#[verifier::external_type_specification]
 pub(crate) struct ExArgs(crate::cli::Args);
 
 } // verus!

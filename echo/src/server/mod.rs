@@ -13,9 +13,6 @@ use verdist::network::channel::Channel;
 #[cfg(verus_only)]
 use verdist::network::channel::ChannelInvariant;
 use verdist::network::channel::Listener;
-use verdist::network::modelled::ModelledConnector;
-#[cfg(verus_only)]
-use verdist::network::modelled::ModelledListener;
 #[cfg(verus_only)]
 use verdist::rpc::proto::TaggedMessage;
 
@@ -254,22 +251,18 @@ fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> where
 // Why is this unverified:
 // - minor: no support for tracing
 // - major: verus does not support threads
-pub fn run_modelled_server(server_id: u64) -> ModelledConnector<Response, Request>
-// requires
-    // server_ids@.contains(server_id),
+pub fn run_modelled_server<L, C>(server_id: u64, listener: L)
+where
+    L: Listener<C> + Send + Sync + 'static,
+    C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync + 'static,
 {
-    let (listener, connector) = verdist::network::modelled::listen_channel(server_id);
+    let server = Arc::new(create_server::<_, _>(server_id, listener));
+    // let (listener, connector) = verdist::network::modelled::listen_channel(server_id);
     std::thread::spawn(move || {
-        let server = Arc::new(create_server::<_, _>(server_id, listener));
         vlib::veprintln!("[server|{:>3}]: starting", server.id);
 
         std::thread::scope(|s| {
-            for _ in 0..5 {
-                let serv = server.clone();
-                s.spawn(move || while serv.poll() {});
-            }
+            s.spawn(move || while server.poll() {});
         });
     });
-
-    connector
 }

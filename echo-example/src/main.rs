@@ -127,7 +127,17 @@ fn generate_string(len: usize) -> String {
 fn main() {
     let args = Args::parse();
 
-    let connector = run_modelled_server(42);
-
-    run_client(args, &connector).expect("error");
+    match args.network {
+        cli::NetworkType::Modelled => {
+            let (listener, connector) = verdist::network::modelled::listen_channel(42);
+            run_modelled_server(42, listener);
+            run_client(args, &connector).expect("error");
+        }
+        cli::NetworkType::Tcp => {
+            unimplemented!()
+        }
+        cli::NetworkType::Udp => {
+            unimplemented!()
+        }
+    }
 }

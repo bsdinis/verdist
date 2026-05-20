@@ -1,6 +1,14 @@
 use clap::Parser;
 use vstd::prelude::*;
 
+#[derive(clap::ValueEnum, Clone, Copy, Default, Debug)]
+pub(crate) enum NetworkType {
+    #[default]
+    Modelled,
+    Tcp,
+    Udp,
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about=None)]
 pub(crate) struct Args {
@@ -12,6 +20,9 @@ pub(crate) struct Args {
 
     #[arg(long, default_value_t = 1)]
     pub(crate) client_id: u64,
+
+    #[arg(long, value_enum, default_value_t)]
+    pub(crate) network: NetworkType,
 }
 
 verus! {

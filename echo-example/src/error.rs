@@ -15,7 +15,7 @@ impl From<echo::client::error::EchoError> for Error {
 }
 
 impl std::error::Error for Error {
-    fn cause(&self) -> Option<&dyn std::error::Error> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Connection(e) => Some(e),
             Error::EchoError(e) => Some(e),
@@ -46,12 +46,6 @@ verus! {
 pub(crate) enum Error {
     Connection(ConnectError),
     EchoError(echo::client::error::EchoError),
-}
-
-#[allow(unused)]
-#[verifier::external_trait_specification]
-pub trait ExError: std::fmt::Debug + std::fmt::Display {
-    type ExternalTraitSpecificationFor: std::error::Error;
 }
 
 } // verus!

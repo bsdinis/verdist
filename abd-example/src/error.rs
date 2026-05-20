@@ -93,10 +93,4 @@ pub(crate) enum Error<ML, MC, RL, RC> {
     AbdWrite(abd::client::error::WriteError<ML, MC>),
 }
 
-#[allow(unused)]
-#[verifier::external_trait_specification]
-pub trait ExError: std::fmt::Debug + std::fmt::Display {
-    type ExternalTraitSpecificationFor: std::error::Error;
-}
-
 } // verus!

@@ -10,8 +10,10 @@ version = { workspace = true }
 
 [dependencies]
 crossbeam-channel = { workspace = true }
-rand = { workspace = true }
+flexbuffers = { workspace = true }
 rand_distr = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
 
 vlib = { workspace = true }
 vstd = { workspace = true }

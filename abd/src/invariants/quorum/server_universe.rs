@@ -354,6 +354,8 @@ impl ServerUniverse {
             old(self).leq(*final(self)),
     {
         let ghost orig_map = *self;
+        self.lemma_locs();
+        orig_map.lemma_locs();
 
         let tracked old_r = self.tracked_remove_lb(server_id);
         let ghost unchanged_map = *self;
@@ -363,16 +365,26 @@ impl ServerUniverse {
         assert forall|id| #[trigger] self.contains_key(id) implies {
             &&& id != server_id ==> self[id]@@.timestamp() == orig_map[id]@@.timestamp()
             &&& id == server_id ==> self[id]@@.timestamp() == r@.timestamp()
+            &&& self[id]@.loc() == orig_map[id]@.loc()
         } by {
             if id != server_id {
                 assert(unchanged_map.contains_key(id));
             }
         }
 
-        assert forall|id| #[trigger] orig_map.contains_key(id) implies orig_map[id]@@.timestamp()
-            <= self[id]@@.timestamp() by {
+        self.lemma_locs();
+        assert forall|id| #[trigger] orig_map.contains_key(id) implies {
+            &&& orig_map[id]@@.timestamp() <= self[id]@@.timestamp()
+        } by {
             assert(self.contains_key(id));
         }
+
+        assert forall|id| #[trigger] orig_map.contains_key(id) implies {
+            self[id]@.loc() == orig_map[id]@.loc()
+        } by {
+            assert(self.contains_key(id));
+        }
+        assert(orig_map.locs() == self.locs());
     }
 
     proof fn lemma_vals(self, q: Quorum) -> (r: (Set<Timestamp>, Timestamp))

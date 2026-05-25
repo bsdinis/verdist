@@ -1,9 +1,8 @@
-use std::collections::HashSet;
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
-use std::sync::Mutex;
 
 use crate::network::channel::Channel;
 use crate::network::channel::ChannelInvariant;
@@ -33,6 +32,7 @@ pub struct TypedUdpSocket<R, S> {
 
 impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     pub fn new(socket: UdpSocket) -> Self {
+        socket.set_nonblocking(true).expect("this should never fail");
         TypedUdpSocket { inner: socket, _marker: PhantomData }
     }
 
@@ -59,26 +59,44 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
     }
 
     #[verifier::external_body]
-    pub fn try_recv(&self) -> Result<R, std::io::Error> {
+    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
         let mut buf = [0;BUF_SIZE];
-        let r = self.inner.recv(&mut buf)?;
+        let res = self.inner.recv(&mut buf);
+        let r = match res {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(None);
+            },
+            Err(e) => {
+                return Err(e);
+            },
+        };
         if r == BUF_SIZE {
             vlib::veprintln!("[udp:{:?}]: warning: receiving {:x} bytes from {:?} may have exhausted the buffer, message may have been truncated",
-                self.inner.local_addr(), BUF_SIZE, self.inner.peer_addr());
+                self.local_addr(), BUF_SIZE, self.peer_addr());
         }
-        Self::deserialize(&buf)
+        let res = Self::deserialize(&buf[..r])?;
+        Ok(Some(res))
     }
 
     #[verifier::external_body]
-    pub fn try_recv_from(&self) -> Result<(R, SocketAddr), std::io::Error> {
+    pub fn try_recv_from(&self) -> Result<Option<(R, SocketAddr)>, std::io::Error> {
         let mut buf = [0;BUF_SIZE];
-        let (r, addr) = self.inner.recv_from(&mut buf)?;
+        let (r, addr) = match self.inner.recv_from(&mut buf) {
+            Ok(x) => x,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(None);
+            },
+            Err(e) => {
+                return Err(e);
+            },
+        };
         if r == BUF_SIZE {
             vlib::veprintln!("[udp:{:?}]: warning: receiving {:x} bytes from {:?} may have exhausted the buffer, message may have been truncated",
-                self.inner.local_addr(), BUF_SIZE, self.inner.peer_addr());
+                self.local_addr(), BUF_SIZE, self.peer_addr());
         }
-        let v = Self::deserialize(&buf)?;
-        Ok((v, addr))
+        let v = Self::deserialize(&buf[..r])?;
+        Ok(Some((v, addr)))
     }
 
     fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
@@ -117,52 +135,26 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(())
     }
 
-    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.inner.local_addr()
+    pub fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr().expect("local addr should be set")
     }
 
-    pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
-        self.inner.peer_addr()
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.inner.peer_addr().expect("peer addr should be set")
     }
 }
 
 #[verifier::external_body]
 pub struct UdpListener {
-    listening_socket: TypedUdpSocket<u64, (u64, SocketAddr)>,
-    port_range: (u16, u16),
-    used_ports: Mutex<HashSet<u16>>,
+    listening_socket: TypedUdpSocket<(u64, SocketAddr), (u64, SocketAddr)>,
     id: u64,
 }
 
 impl UdpListener {
     #[verifier::external_body]
-    pub fn listen<A: ToSocketAddrs>(
-        addr: A,
-        id: u64,
-        start_port: u16,
-        end_port: u16,
-    ) -> std::io::Result<Self> {
+    pub fn listen<A: ToSocketAddrs>(addr: A, id: u64) -> std::io::Result<Self> {
         let listening_socket = TypedUdpSocket::new(UdpSocket::bind(addr)?);
-        Ok(
-            UdpListener {
-                listening_socket,
-                port_range: (start_port, end_port),
-                used_ports: Mutex::new(HashSet::new()),
-                id,
-            },
-        )
-    }
-
-    #[verifier::external_body]
-    pub fn allocate_port(&self) -> Option<u16> {
-        let mut guard = self.used_ports.lock().unwrap();
-        for port in self.port_range.0..self.port_range.1 {
-            if !guard.contains(&port) {
-                guard.insert(port);
-                return Some(port);
-            }
-        }
-        None
+        Ok(UdpListener { listening_socket, id })
     }
 }
 
@@ -170,16 +162,13 @@ impl UdpListener {
 #[verifier::reject_recursive_types(A)]
 pub struct UdpConnector<A: ToSocketAddrs> {
     listening_addr: A,
-    local_addr: SocketAddr,
+    local_ip: IpAddr,
 }
 
 impl<A: ToSocketAddrs> UdpConnector<A> {
     #[verifier::external_body]
-    pub fn new<A2: ToSocketAddrs>(listening_addr: A, local_addr: A2) -> std::io::Result<Self> {
-        let local_addr = local_addr.to_socket_addrs()?.next().ok_or_else(
-            || std::io::Error::other("no address found"),
-        )?;
-        Ok(UdpConnector { listening_addr, local_addr })
+    pub fn new(listening_addr: A, local_ip: IpAddr) -> std::io::Result<Self> {
+        Ok(UdpConnector { listening_addr, local_ip })
     }
 }
 
@@ -265,7 +254,11 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
 
     #[verifier::external_body]
     fn try_recv(&self) -> Result<R, crate::network::error::TryRecvError> {
-        self.socket.try_recv().map_err(|e| e.into())
+        match self.socket.try_recv() {
+            Ok(Some(x)) => Ok(x),
+            Ok(None) => Err(crate::network::error::TryRecvError::Empty),
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[verifier::external_body]
@@ -304,7 +297,11 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
 
     #[verifier::external_body]
     fn try_recv(&self) -> Result<R, crate::network::error::TryRecvError> {
-        self.socket.try_recv().map_err(|e| e.into())
+        match self.socket.try_recv() {
+            Ok(Some(x)) => Ok(x),
+            Ok(None) => Err(crate::network::error::TryRecvError::Empty),
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[verifier::external_body]
@@ -335,21 +332,27 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
         ClientChannel<K, R, S>,
         TryListenError,
     >) {
-        let (client_id, addr) = self.listening_socket.try_recv_from()?;
-        vlib::veprintln!(
-            "[server|{:>3}]: accepting a connection from client {} id={client_id}", self.id, &addr,
-        );
-
-        let Some(port) = self.allocate_port() else {
-            return Err(TryListenError::Empty);  // TODO: change to full ports
+        let ((client_id, connect_addr), addr) = match self.listening_socket.try_recv_from() {
+            Ok(Some(x)) => { x },
+            Ok(None) => {
+                return Err(TryListenError::Empty);
+            },
+            Err(e) => {
+                return Err(e.into());
+            },
         };
 
-        let local_ip = self.listening_socket.local_addr().unwrap().ip();
-        self.listening_socket.send_to(&(self.id, SocketAddr::new(local_ip, port)), addr)?;
+        let local_ip = self.listening_socket.local_addr().ip();
+        let socket = UdpSocket::bind((local_ip, 0))?;
+
+        vlib::veprintln!(
+            "[server|{:>3}]: accepting a connection from client {} id={client_id}, local addr is {:?}", self.id, &addr, socket.local_addr().unwrap()
+        );
+
+        self.listening_socket.send_to(&(self.id, socket.local_addr().unwrap()), addr)?;
 
         let pred = Ghost(gen_pred@(self));
-        let socket = UdpSocket::bind((local_ip, port))?;
-        socket.connect(addr)?;
+        socket.connect(connect_addr)?;
         let tsocket = TypedUdpSocket::new(socket);
 
         let chan = ClientChannel::new(pred, self.id, client_id, tsocket);
@@ -374,26 +377,29 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
         vlib::veprintln!(
             "[client|{:>3}]: connecting to server", local_id,
         );
-        let socket = UdpSocket::bind(&self.local_addr)?;
-        socket.connect(&self.listening_addr)?;
-        let tsocket = TypedUdpSocket::<(u64, SocketAddr), u64>::new(socket);
+        let addr = SocketAddr::new(self.local_ip.clone(), 0);
+        let connect_socket = UdpSocket::bind(&addr)?;
+        let channel_socket = UdpSocket::bind(&addr)?;
+        connect_socket.connect(&self.listening_addr)?;
+        let connect_tsocket = TypedUdpSocket::<(u64, SocketAddr), (u64, SocketAddr)>::new(
+            connect_socket,
+        );
 
-        tsocket.send(&local_id)?;
+        connect_tsocket.send(&(local_id, channel_socket.local_addr().unwrap()))?;
         loop {
-            match tsocket.try_recv() {
-                Ok((server_id, addr)) => {
-                    let socket = UdpSocket::bind(self.local_addr)?;
-                    socket.connect(addr)?;
-                    let tsocket = TypedUdpSocket::new(socket);
+            match connect_tsocket.try_recv() {
+                Ok(Some((server_id, addr))) => {
+                    channel_socket.connect(addr)?;
+                    let tsocket = TypedUdpSocket::new(channel_socket);
                     let pred = gen_pred(self, local_id);
 
                     let chan = ServerChannel::new(pred, server_id, local_id, tsocket);
                     vlib::veprintln!(
-                        "[client|{:>3}]: connected to server {server_id}  (channel_id: {:?})", local_id, chan.id()
+                        "[client|{:>3}]: connected to server {server_id} (channel_id: {:?}, server addr: {addr:?})", local_id, chan.id()
                     );
                     return Ok(chan);
                 },
-                Err(_) => {},
+                _ => {},
             }
         }
     }

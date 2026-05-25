@@ -29,5 +29,9 @@ path = "src/lib.rs"
 name = "echo_client"
 path = "src/client.rs"
 
+[[bin]]
+name = "echo_server"
+path = "src/server.rs"
+
 [package.metadata.verus]
 verify = true

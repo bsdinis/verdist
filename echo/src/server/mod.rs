@@ -176,7 +176,8 @@ impl<L, C> EchoServer<L, C> where
             decreases i,
         {
             use verdist::network::error::TryListenError;
-            match self.listener.try_accept(Ghost(|l| self.connected.pred().channel_inv)) {
+            let accept_res = self.listener.try_accept(Ghost(|l| self.connected.pred().channel_inv));
+            match accept_res {
                 Ok(channel) => {
                     assert(channel.constant() == self.connected.pred().channel_inv);
                     self.accept(channel)
@@ -238,7 +239,8 @@ impl<L, C> EchoServer<L, C> where
                     }
                 },
                 Err(TryRecvError::Empty) => {},
-                Err(_) => {
+                Err(e) => {
+                    vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.id);
                     drop.insert(channel.id());
                 },
             }

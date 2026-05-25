@@ -7,8 +7,8 @@ pub struct EchoRequest {
     message: String,
 }
 
-#[allow(unused)]
 pub struct EchoResponse {
+    #[allow(unused)]
     message: String,
 }
 
@@ -160,5 +160,209 @@ impl std::fmt::Debug for EchoResponse {
         f.debug_struct("EchoResponse")
             .field("message", &self.message)
             .finish()
+    }
+}
+
+mod serde_impls {
+    use super::EchoRequest;
+    use super::EchoResponse;
+    use serde;
+    use serde::ser::SerializeStruct;
+
+    impl serde::Serialize for EchoRequest {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut state = serializer.serialize_struct("EchoRequest", 1)?;
+            state.serialize_field("message", &self.message)?;
+            state.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for EchoRequest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            const FIELDS: &'static [&'static str] = &["message"];
+
+            enum Field {
+                Message,
+            }
+
+            struct FieldVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                type Value = Field;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("`message`")
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                where
+                    E: serde::de::Error,
+                {
+                    match value {
+                        "message" => Ok(Field::Message),
+                        _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for Field {
+                fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    deserializer.deserialize_identifier(FieldVisitor)
+                }
+            }
+
+            struct StructVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for StructVisitor {
+                type Value = EchoRequest;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("struct EchoRequest")
+                }
+
+                fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::SeqAccess<'de>,
+                {
+                    let message = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                    Ok(EchoRequest { message })
+                }
+
+                fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+                {
+                    let mut message = None;
+                    loop {
+                        if let Some(key) = map.next_key()? {
+                            match key {
+                                Field::Message => {
+                                    if message.is_some() {
+                                        return Err(serde::de::Error::duplicate_field("message"));
+                                    }
+                                    message = Some(map.next_value()?);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    let message =
+                        message.ok_or_else(|| serde::de::Error::missing_field("message"))?;
+                    Ok(EchoRequest { message })
+                }
+            }
+
+            deserializer.deserialize_struct("EchoRequest", FIELDS, StructVisitor)
+        }
+    }
+
+    impl serde::Serialize for EchoResponse {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut state = serializer.serialize_struct("EchoResponse", 1)?;
+            state.serialize_field("message", &self.message)?;
+            state.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for EchoResponse {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            const FIELDS: &'static [&'static str] = &["message"];
+
+            enum Field {
+                Message,
+            }
+
+            struct FieldVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                type Value = Field;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("`message`")
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                where
+                    E: serde::de::Error,
+                {
+                    match value {
+                        "message" => Ok(Field::Message),
+                        _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for Field {
+                fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    deserializer.deserialize_identifier(FieldVisitor)
+                }
+            }
+
+            struct StructVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for StructVisitor {
+                type Value = EchoResponse;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("struct EchoResponse")
+                }
+
+                fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::SeqAccess<'de>,
+                {
+                    let message = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                    Ok(EchoResponse { message })
+                }
+
+                fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+                {
+                    let mut message = None;
+                    loop {
+                        if let Some(key) = map.next_key()? {
+                            match key {
+                                Field::Message => {
+                                    if message.is_some() {
+                                        return Err(serde::de::Error::duplicate_field("message"));
+                                    }
+                                    message = Some(map.next_value()?);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    let message =
+                        message.ok_or_else(|| serde::de::Error::missing_field("message"))?;
+                    Ok(EchoResponse { message })
+                }
+            }
+            deserializer.deserialize_struct("EchoResponse", FIELDS, StructVisitor)
+        }
     }
 }

@@ -21,6 +21,9 @@ pub struct Args {
     #[arg(long, default_value_t = 1)]
     pub client_id: u64,
 
+    #[arg(long, default_value_t = 42)]
+    pub server_id: u64,
+
     #[arg(long, value_enum, default_value_t)]
     pub network: NetworkType,
 }

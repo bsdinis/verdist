@@ -1,9 +1,11 @@
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rand::{
-    distr::{Alphanumeric, SampleString},
-    rng,
-};
+use rand::distr::Alphanumeric;
+use rand::distr::SampleString;
+use rand::rng;
 
 use vstd::atomic::PAtomicU64;
 use vstd::prelude::*;
@@ -21,11 +23,12 @@ use echo::client::EchoClient;
 pub mod cli;
 pub mod error;
 pub mod invariant;
-pub mod server;
 
 use cli::Args;
 use error::Error;
 use invariant::get_invariant_state;
+
+pub const LISTEN_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6432);
 
 verus! {
 
@@ -104,10 +107,15 @@ pub fn run_client<C, Conn, 'a>(args: Args, connector: &Conn) -> Result<(), Error
     for _ in 0..args.n_ops {
         let input = generate_string(32);
         vlib::veprintln!("[client|{:>3}]: sending {input}", args.client_id);
-        let output_res = client.echo(input);
-        if let Ok(output) = output_res {
-            assert(input == output);
-            vlib::vprintln!("output == input: {output}");
+        match client.echo(input) {
+            Ok(output) => {
+                assert(input == output);
+                vlib::vprintln!("[client|{:>3}]: output == input {output}", args.client_id);
+            },
+            Err(e) => {
+                vlib::vprintln!("echo failed: {e:?}");
+                return Err(e.into());
+            },
         }
     }
 
@@ -120,3 +128,45 @@ fn generate_string(len: usize) -> String {
 }
 
 } // verus!
+pub mod server {
+    use echo::channel::ChannelInv;
+    use echo::proto::Request;
+    use echo::proto::Response;
+    use echo::server::create_server;
+
+    use std::sync::Arc;
+    use verdist::network::channel::Channel;
+    use verdist::network::channel::Listener;
+
+    // Why is this unverified:
+    // - minor: no support for tracing
+    // - major: verus does not support threads
+    pub fn spawn_server<L, C>(server_id: u64, listener: L)
+    where
+        L: Listener<C> + Send + Sync + 'static,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let server = Arc::new(create_server::<_, _>(server_id, listener));
+        std::thread::spawn(move || {
+            vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
+
+            std::thread::scope(|s| {
+                s.spawn(move || while server.poll() {});
+            });
+        });
+    }
+
+    pub fn run_server<L, C>(server_id: u64, listener: L)
+    where
+        L: Listener<C>,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
+    {
+        let server = create_server::<_, _>(server_id, listener);
+        vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
+
+        while server.poll() {}
+    }
+}

@@ -4,7 +4,7 @@ verified_crates := "abd abd-example echo echo-example echo-trivial specs verdist
 runnable_crates := "abd-example echo-example"
 
 fmt:
-    verusfmt (fd '.rs'); \
+    verusfmt (fd '.rs$' -E third_party); \
 
 check:
     RUSTFLAGS="-D warnings" cargo check;

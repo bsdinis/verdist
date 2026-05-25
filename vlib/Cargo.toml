@@ -9,9 +9,10 @@ rust-version = { workspace = true }
 version = { workspace = true }
 
 [dependencies]
-vstd = { workspace = true }
-serde = { workspace = true }
+crossbeam-channel = { workspace = true }
 flexbuffers = { workspace = true }
+serde = { workspace = true }
+vstd = { workspace = true }
 
 [lints]
 workspace = true

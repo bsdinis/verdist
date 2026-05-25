@@ -15,3 +15,7 @@ run:
         cargo run -p $crate -- --no-delay; \
     end
 
+verify:
+    cargo verus verify
+
+pre-commit: fmt check verify run

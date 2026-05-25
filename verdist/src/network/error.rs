@@ -299,21 +299,6 @@ impl FromSpecImpl<std::io::Error> for ConnectError {
     }
 }
 
-#[verifier::external_type_specification]
-#[allow(dead_code)]
-pub struct ExTryRecvError(crossbeam_channel::TryRecvError);
-
-pub assume_specification[ crossbeam_channel::TryRecvError::is_empty ](
-    err: &crossbeam_channel::TryRecvError,
-) -> (b: bool)
-    no_unwind
-;
-
-#[verifier::external_type_specification]
-#[verifier::reject_recursive_types(S)]
-#[allow(dead_code)]
-pub struct ExSendError<S>(crossbeam_channel::SendError<S>);
-
 } // verus!
 //=======
 // Display impls (unverified)

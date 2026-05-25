@@ -13,26 +13,23 @@ use rand_distr::{Distribution, Normal};
 use vstd::prelude::*;
 use vstd::rwlock::RwLock;
 
+verus! {
+
+#[verifier::external_body]
 fn park_thread(mean: Duration, std_dev: Duration) {
-    let normal = Normal::new(mean.as_secs_f64(), std_dev.as_secs_f64())
-        .expect("should be able to construct normal distribution");
+    let normal = Normal::new(mean.as_secs_f64(), std_dev.as_secs_f64()).expect(
+        "should be able to construct normal distribution",
+    );
     let wait = normal.sample(&mut rand::rng());
     if wait.is_sign_positive() {
         std::thread::sleep(Duration::from_secs_f64(wait));
     }
 }
 
+#[verifier::external_body]
 fn default_delay() -> (Duration, Duration) {
     Default::default()
 }
-
-verus! {
-
-pub assume_specification[ park_thread ](mean: Duration, std_dev: Duration)
-;
-
-pub assume_specification[ default_delay ]() -> (a: (Duration, Duration))
-;
 
 pub trait ChannelInvariant<K, Id, R, S> {
     spec fn recv_inv(k: K, id: Id, r: R) -> bool;

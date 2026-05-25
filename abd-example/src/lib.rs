@@ -35,9 +35,6 @@ use invariant::get_invariant_state;
 
 verus! {
 
-pub assume_specification[ std::time::Duration::from_millis ](millis: u64) -> std::time::Duration
-;
-
 const REQUEST_LATENCY_DEFAULT_MS: u64 = 1000;
 
 const REQUEST_STDDEV_DEFAULT_MS: u64 = 2000;

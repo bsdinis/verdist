@@ -17,18 +17,6 @@ use vstd::prelude::*;
 
 verus! {
 
-#[verifier::external_type_specification]
-#[verifier::external_body]
-#[verifier::reject_recursive_types_in_ground_variants(T)]
-#[allow(dead_code)]
-pub struct ExReceiver<T>(Receiver<T>);
-
-#[verifier::external_type_specification]
-#[verifier::external_body]
-#[verifier::reject_recursive_types_in_ground_variants(T)]
-#[allow(dead_code)]
-pub struct ExSender<T>(Sender<T>);
-
 #[verifier::external_body]
 #[verifier::reject_recursive_types(R)]
 #[verifier::reject_recursive_types(S)]

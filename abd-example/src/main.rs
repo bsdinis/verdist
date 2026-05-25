@@ -23,11 +23,11 @@ use specs::register::RegisterWrite;
 
 use abd::channel::ChannelInv;
 use abd::client::AbdPool;
-use abd::server::run_modelled_server;
 
 mod cli;
 mod error;
 mod invariant;
+mod server;
 mod trace;
 
 use cli::Args;
@@ -207,7 +207,9 @@ fn main() {
         return;
     }
 
-    let connectors: Vec<_> = (0..args.n_servers).map(run_modelled_server).collect();
+    let connectors: Vec<_> = (0..args.n_servers)
+        .map(server::modelled::run_server)
+        .collect();
 
     run_client(args, &connectors).expect("error");
 

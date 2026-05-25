@@ -18,11 +18,11 @@ use specs::echo::EchoClient as _;
 
 use echo::channel::ChannelInv;
 use echo::client::EchoClient;
-use echo::server::run_modelled_server;
 
 mod cli;
 mod error;
 mod invariant;
+mod server;
 
 use cli::Args;
 use error::Error;
@@ -130,7 +130,7 @@ fn main() {
     match args.network {
         cli::NetworkType::Modelled => {
             let (listener, connector) = verdist::network::modelled::listen_channel(42);
-            run_modelled_server(42, listener);
+            server::modelled::run_server(42, listener);
             run_client(args, &connector).expect("error");
         }
         cli::NetworkType::Tcp => {

@@ -67,6 +67,8 @@ impl<L, C> EchoServer<L, C> where
     pub fn new(listener: L, id: u64, state_inv: Tracked<Arc<StateInvariant>>) -> (r: Self)
         requires
             state_inv@.namespace() == invariants::state_inv_id(),
+        ensures
+            r.spec_server_id() == id,
     {
         let empty = Vec::new();
         let ghost channel_inv = ChannelInv::from_state_pred(state_inv@.constant());
@@ -75,9 +77,20 @@ impl<L, C> EchoServer<L, C> where
         EchoServer { id, connected: RwLock::new(empty, Ghost(server_inv)), listener }
     }
 
+    pub closed spec fn spec_server_id(self) -> u64 {
+        self.id
+    }
+
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.connected.pred().server_id == self.id
+    }
+
+    pub fn server_id(&self) -> (r: u64)
+        ensures
+            r == self.spec_server_id(),
+    {
+        self.id
     }
 
     fn accept(&self, channel: C)
@@ -150,7 +163,7 @@ impl<L, C> EchoServer<L, C> where
         r
     }
 
-    fn poll(&self) -> bool {
+    pub fn poll(&self) -> bool {
         proof {
             use_type_invariant(self);
             broadcast use vstd::seq_lib::group_filter_ensures;
@@ -253,7 +266,7 @@ impl<L, C> EchoServer<L, C> where
     }
 }
 
-fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> where
+pub fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
  {
@@ -265,21 +278,3 @@ fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> where
 }
 
 } // verus!
-// Why is this unverified:
-// - minor: no support for tracing
-// - major: verus does not support threads
-pub fn run_modelled_server<L, C>(server_id: u64, listener: L)
-where
-    L: Listener<C> + Send + Sync + 'static,
-    C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync + 'static,
-{
-    let server = Arc::new(create_server::<_, _>(server_id, listener));
-    // let (listener, connector) = verdist::network::modelled::listen_channel(server_id);
-    std::thread::spawn(move || {
-        vlib::veprintln!("[server|{:>3}]: starting", server.id);
-
-        std::thread::scope(|s| {
-            s.spawn(move || while server.poll() {});
-        });
-    });
-}

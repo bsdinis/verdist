@@ -31,40 +31,30 @@ pub struct TypedUdpSocket<R, S> {
     _marker: PhantomData<(R, S)>,
 }
 
-impl<R, S> TypedUdpSocket<R, S> where
-    for<'de> R: serde::Deserialize<'de>,
-    S: serde::Serialize,
-{
-    pub fn new(
-        socket: UdpSocket,
-    ) -> Self {
-        TypedUdpSocket {
-            inner: socket,
-            _marker: PhantomData,
-        }
+impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
+    pub fn new(socket: UdpSocket) -> Self {
+        TypedUdpSocket { inner: socket, _marker: PhantomData }
     }
 
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
-        let root = flexbuffers::Reader::get_root(buf).map_err(|e| {
-            #[cfg(not(verus_only))]
-            {
-            std::io::Error::other(format!("failed to deserialize: {e:?}"))
-            }
-            #[cfg(verus_only)]
-            {
-            std::io::Error::from_raw_os_error(-1)
-            }
-        })?;
-        let value = R::deserialize(root).map_err(|e| {
-            #[cfg(not(verus_only))]
-            {
-            std::io::Error::other(format!("failed to deserialize: {e:?}"))
-            }
-            #[cfg(verus_only)]
-            {
-            std::io::Error::from_raw_os_error(-1)
-            }
-        })?;
+        let root = flexbuffers::Reader::get_root(buf).map_err(
+            |e|
+                {
+                    #[cfg(not(verus_only))]
+                    { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
+                    #[cfg(verus_only)]
+                    { std::io::Error::from_raw_os_error(-1) }
+                },
+        )?;
+        let value = R::deserialize(root).map_err(
+            |e|
+                {
+                    #[cfg(not(verus_only))]
+                    { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
+                    #[cfg(verus_only)]
+                    { std::io::Error::from_raw_os_error(-1) }
+                },
+        )?;
         Ok(value)
     }
 
@@ -89,21 +79,19 @@ impl<R, S> TypedUdpSocket<R, S> where
         }
         let v = Self::deserialize(&buf)?;
         Ok((v, addr))
-
     }
 
     fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
         let mut s = flexbuffers::FlexbufferSerializer::new();
-        v.serialize(&mut s).map_err(|e| {
-            #[cfg(not(verus_only))]
-            {
-            std::io::Error::other(format!("failed to serialize: {e:?}"))
-            }
-            #[cfg(verus_only)]
-            {
-            std::io::Error::from_raw_os_error(-1)
-            }
-        })?;
+        v.serialize(&mut s).map_err(
+            |e|
+                {
+                    #[cfg(not(verus_only))]
+                    { std::io::Error::other(format!("failed to serialize: {e:?}")) }
+                    #[cfg(verus_only)]
+                    { std::io::Error::from_raw_os_error(-1) }
+                },
+        )?;
         Ok(s)
     }
 
@@ -139,16 +127,14 @@ impl<R, S> TypedUdpSocket<R, S> where
 }
 
 #[verifier::external_body]
-pub struct UdpListener
-{
+pub struct UdpListener {
     listening_socket: TypedUdpSocket<u64, (u64, SocketAddr)>,
     port_range: (u16, u16),
     used_ports: Mutex<HashSet<u16>>,
     id: u64,
 }
 
-impl UdpListener
-{
+impl UdpListener {
     #[verifier::external_body]
     pub fn listen<A: ToSocketAddrs>(
         addr: A,
@@ -156,9 +142,7 @@ impl UdpListener
         start_port: u16,
         end_port: u16,
     ) -> std::io::Result<Self> {
-        let listening_socket = TypedUdpSocket::new(
-            UdpSocket::bind(addr)?,
-        );
+        let listening_socket = TypedUdpSocket::new(UdpSocket::bind(addr)?);
         Ok(
             UdpListener {
                 listening_socket,
@@ -204,8 +188,7 @@ impl<A: ToSocketAddrs> UdpConnector<A> {
 #[verifier::reject_recursive_types(K)]
 #[verifier::reject_recursive_types(R)]
 #[verifier::reject_recursive_types(S)]
-pub struct ClientChannel<K, R, S>
-{
+pub struct ClientChannel<K, R, S> {
     #[allow(dead_code)]
     pred: Ghost<K>,
     socket: TypedUdpSocket<R, S>,
@@ -218,8 +201,7 @@ pub struct ClientChannel<K, R, S>
 #[verifier::reject_recursive_types(K)]
 #[verifier::reject_recursive_types(R)]
 #[verifier::reject_recursive_types(S)]
-pub struct ServerChannel<K, R, S>
-{
+pub struct ServerChannel<K, R, S> {
     #[allow(dead_code)]
     pred: Ghost<K>,
     socket: TypedUdpSocket<R, S>,
@@ -227,8 +209,7 @@ pub struct ServerChannel<K, R, S>
     client_id: u64,
 }
 
-impl<K, R, S> ClientChannel<K, R, S>
-{
+impl<K, R, S> ClientChannel<K, R, S> {
     #[verifier::external_body]
     pub fn new(
         pred: Ghost<K>,
@@ -240,8 +221,7 @@ impl<K, R, S> ClientChannel<K, R, S>
     }
 }
 
-impl<K, R, S> ServerChannel<K, R, S>
-{
+impl<K, R, S> ServerChannel<K, R, S> {
     #[verifier::external_body]
     pub fn new(
         pred: Ghost<K>,
@@ -267,7 +247,7 @@ impl<Id, R, S> ChannelInvariant<EmptyChanInv, Id, R, S> for EmptyChanInv {
 
 impl<K, R, S> Channel for ClientChannel<K, R, S> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
-    for<'de> R: serde::Deserialize<'de>,
+    for <'de>R: serde::Deserialize<'de>,
     S: Clone + serde::Serialize,
  {
     type R = R;
@@ -306,7 +286,7 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
 
 impl<K, R, S> Channel for ServerChannel<K, R, S> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
-    for<'de> R: serde::Deserialize<'de>,
+    for <'de>R: serde::Deserialize<'de>,
     S: Clone + serde::Serialize,
  {
     type R = R;
@@ -346,13 +326,12 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
 // TODO: this is where we create the ghost map and the channel invariant
 impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
     K: ChannelInvariant<K, (u64, u64), R, S>,
-    for<'de> R: serde::Deserialize<'de>,
+    for <'de>R: serde::Deserialize<'de>,
     S: Clone + serde::Serialize,
  {
     #[allow(unused_variables)]
     #[verifier::external_body]
-    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>
-        ) -> (r: Result<
+    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
         ClientChannel<K, R, S>,
         TryListenError,
     >) {
@@ -383,7 +362,7 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
 
 impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
-    for<'de> R: serde::Deserialize<'de>,
+    for <'de>R: serde::Deserialize<'de>,
     S: Clone + serde::Serialize,
     A: ToSocketAddrs,
  {

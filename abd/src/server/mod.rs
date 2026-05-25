@@ -22,8 +22,6 @@ use crate::server::register::MonotonicRegisterInner;
 #[cfg(verus_only)]
 use crate::timestamp::Timestamp;
 
-use specs::register::OwnedReadPerm;
-use specs::register::OwnedWritePerm;
 use specs::register::RegisterRead;
 use specs::register::RegisterWrite;
 
@@ -31,7 +29,6 @@ use verdist::network::channel::Channel;
 #[cfg(verus_only)]
 use verdist::network::channel::ChannelInvariant;
 use verdist::network::channel::Listener;
-use verdist::network::modelled::ModelledConnector;
 #[cfg(verus_only)]
 use verdist::network::modelled::ModelledListener;
 #[cfg(verus_only)]
@@ -126,6 +123,10 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
         }
     }
 
+    pub closed spec fn spec_server_id(self) -> u64 {
+        self.id
+    }
+
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.register.id() == self.id
@@ -134,6 +135,13 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
         &&& self.connected.pred().server_id == self.id
         &&& self.server_locs().contains_key(self.id)
         &&& self.server_locs()[self.id] == self.register.resource_loc()
+    }
+
+    pub fn server_id(&self) -> (r: u64)
+        ensures
+            r == self.spec_server_id(),
+    {
+        self.id
     }
 
     closed spec fn commitment_id(self) -> Loc {
@@ -331,7 +339,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
         r
     }
 
-    fn poll(&self) -> bool {
+    pub fn poll(&self) -> bool {
         proof {
             use_type_invariant(self);
             broadcast use vstd::seq_lib::group_filter_ensures;
@@ -438,7 +446,12 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
     }
 }
 
-fn create_server<L, C, ML, RL>(server_id: u64, listener: L) -> RegisterServer<L, C, ML, RL> where
+pub fn create_server<L, C, ML, RL>(server_id: u64, listener: L) -> RegisterServer<
+    L,
+    C,
+    ML,
+    RL,
+> where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
     ML: MutLinearizer<RegisterWrite>,
@@ -455,27 +468,3 @@ fn create_server<L, C, ML, RL>(server_id: u64, listener: L) -> RegisterServer<L,
 }
 
 } // verus!
-// Why is this unverified:
-// - minor: no support for tracing
-// - major: verus does not support threads
-pub fn run_modelled_server(server_id: u64) -> ModelledConnector<Response, Request>
-// requires
-    // server_ids@.contains(server_id),
-{
-    let (listener, connector) = verdist::network::modelled::listen_channel(server_id);
-    std::thread::spawn(move || {
-        let server = Arc::new(create_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
-            server_id, listener,
-        ));
-        vlib::veprintln!("[server|{:>3}]: starting", server.id);
-
-        std::thread::scope(|s| {
-            for _ in 0..5 {
-                let serv = server.clone();
-                s.spawn(move || while serv.poll() {});
-            }
-        });
-    });
-
-    connector
-}

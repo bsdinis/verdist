@@ -86,7 +86,7 @@ where
 
 verus! {
 
-pub(crate) enum Error<ML, MC, RL, RC> {
+pub enum Error<ML, MC, RL, RC> {
     Empty,
     Connection(ConnectError),
     AbdRead(abd::client::error::ReadError<RL, RC>),

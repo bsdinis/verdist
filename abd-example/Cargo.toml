@@ -20,5 +20,13 @@ vstd = { workspace = true }
 [lints]
 workspace = true
 
+[lib]
+name = "abd_example"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abd_client"
+path = "src/client.rs"
+
 [package.metadata.verus]
 verify = true

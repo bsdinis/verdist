@@ -43,7 +43,7 @@ impl std::fmt::Debug for Error {
 
 verus! {
 
-pub(crate) enum Error {
+pub enum Error {
     Connection(ConnectError),
     EchoError(echo::client::error::EchoError),
 }

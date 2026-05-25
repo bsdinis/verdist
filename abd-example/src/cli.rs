@@ -3,27 +3,27 @@ use vstd::prelude::*;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about=None)]
-pub(crate) struct Args {
+pub struct Args {
     #[arg(short, long, default_value_t = 5)]
-    pub(crate) n_servers: u64,
+    pub n_servers: u64,
 
     #[arg(long, default_value_t = 3)]
-    pub(crate) n_reads: u64,
+    pub n_reads: u64,
 
     #[arg(long, default_value_t = 2)]
-    pub(crate) n_writes: u64,
+    pub n_writes: u64,
 
     #[arg(long)]
-    pub(crate) no_delay: bool,
+    pub no_delay: bool,
 
     #[arg(long, default_value_t = 1)]
-    pub(crate) client_id: u64,
+    pub client_id: u64,
 }
 
 verus! {
 
 #[allow(unused)]
 #[verifier::external_type_specification]
-pub(crate) struct ExArgs(crate::cli::Args);
+pub struct ExArgs(crate::cli::Args);
 
 } // verus!

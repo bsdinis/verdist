@@ -1,4 +1,3 @@
-use clap::Parser;
 use vstd::atomic::PAtomicU64;
 #[cfg(verus_only)]
 use vstd::logatom::ReadLinearizer;
@@ -24,11 +23,11 @@ use specs::register::RegisterWrite;
 use abd::channel::ChannelInv;
 use abd::client::AbdPool;
 
-mod cli;
-mod error;
-mod invariant;
-mod server;
-mod trace;
+pub mod cli;
+pub mod error;
+pub mod invariant;
+pub mod server;
+pub mod trace;
 
 use cli::Args;
 use error::Error;
@@ -99,7 +98,7 @@ fn connect_all<C, Conn>(args: &Args, connectors: &[Conn], client_id: u64) -> (r:
     Ok(v)
 }
 
-fn run_client<C, Conn, 'a>(args: Args, connectors: &[Conn]) -> Result<
+pub fn run_client<C, Conn, 'a>(args: Args, connectors: &[Conn]) -> Result<
     (),
     Error<OwnedWritePerm, GhostVar<Option<u64>>, OwnedReadPerm, GhostVar<Option<u64>>>,
 > where
@@ -199,28 +198,3 @@ fn run_client<C, Conn, 'a>(args: Args, connectors: &[Conn]) -> Result<
 }
 
 } // verus!
-fn main() {
-    let args = Args::parse();
-
-    if args.n_servers == 0 {
-        eprintln!("need at least one server");
-        return;
-    }
-
-    let connectors: Vec<_> = (0..args.n_servers)
-        .map(server::modelled::run_server)
-        .collect();
-
-    run_client(args, &connectors).expect("error");
-
-    // let realtime_order = realtime(&trace);
-    // println!("realtime ordering:\n{realtime_order:?}");
-    // let part_order = partial(&trace);
-    // println!("implied partial ordering:\n{part_order:?}");
-
-    // if orders_agree(&realtime_order, &part_order) {
-    // println!("partial orderings agree");
-    // } else {
-    // println!("partial orderings do not agree");
-    // }
-}

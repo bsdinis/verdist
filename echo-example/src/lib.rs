@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use clap::Parser;
 use rand::{
     distr::{Alphanumeric, SampleString},
     rng,
@@ -19,10 +18,10 @@ use specs::echo::EchoClient as _;
 use echo::channel::ChannelInv;
 use echo::client::EchoClient;
 
-mod cli;
-mod error;
-mod invariant;
-mod server;
+pub mod cli;
+pub mod error;
+pub mod invariant;
+pub mod server;
 
 use cli::Args;
 use error::Error;
@@ -80,7 +79,7 @@ fn connect<C, Conn>(
     Ok(BufChannel::new(channel))
 }
 
-fn run_client<C, Conn, 'a>(args: Args, connector: &Conn) -> Result<(), Error> where
+pub fn run_client<C, Conn, 'a>(args: Args, connector: &Conn) -> Result<(), Error> where
     Conn: Connector<C> + Send + Sync,
     C: Channel<
         K = echo::channel::ChannelInv,
@@ -124,20 +123,3 @@ fn generate_string(len: usize) -> String {
 }
 
 } // verus!
-fn main() {
-    let args = Args::parse();
-
-    match args.network {
-        cli::NetworkType::Modelled => {
-            let (listener, connector) = verdist::network::modelled::listen_channel(42);
-            server::modelled::run_server(42, listener);
-            run_client(args, &connector).expect("error");
-        }
-        cli::NetworkType::Tcp => {
-            unimplemented!()
-        }
-        cli::NetworkType::Udp => {
-            unimplemented!()
-        }
-    }
-}

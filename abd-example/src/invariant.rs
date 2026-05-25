@@ -19,7 +19,7 @@ use abd::invariants::StateInvariant;
 verus! {
 
 #[allow(unused)]
-pub(crate) fn get_invariant_state<Pool, C, ML, RL>(
+pub fn get_invariant_state<Pool, C, ML, RL>(
     pool: &Pool,
     client_id: u64,
     client_perm: Tracked<PermissionU64>,

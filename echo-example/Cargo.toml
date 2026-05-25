@@ -21,5 +21,13 @@ vstd = { workspace = true }
 [lints]
 workspace = true
 
+[lib]
+name = "echo_example"
+path = "src/lib.rs"
+
+[[bin]]
+name = "echo_client"
+path = "src/client.rs"
+
 [package.metadata.verus]
 verify = true

@@ -82,6 +82,10 @@ pub proof fn lemma_channel_seq_to_map<C: Channel>(s: Seq<C>, m: Map<C::Id, C>)
     }
 }
 
+pub type ChanPollResult<Resp, E> = Result<Option<Resp>, E>;
+
+pub type PollResult<C, Resp, E> = (<C as Channel>::Id, ChanPollResult<Resp, E>);
+
 pub trait ConnectionPool {
     type R: TaggedMessage;
 
@@ -90,6 +94,11 @@ pub trait ConnectionPool {
     fn len(&self) -> (r: usize)
         ensures
             r == self.spec_len(),
+    ;
+
+    fn is_empty(&self) -> (r: bool)
+        ensures
+            r <==> self.spec_len() == 0,
     ;
 
     spec fn spec_len(self) -> nat;
@@ -103,10 +112,7 @@ pub trait ConnectionPool {
     spec fn spec_channels(&self) -> Map<<Self::C as Channel>::Id, Self::C>;
 
     fn poll(&self, request_tag: u64) -> (r: Vec<
-        (
-            <Self::C as Channel>::Id,
-            Result<Option<ChannelResp<Self>>, crate::network::error::TryRecvError>,
-        ),
+        PollResult<Self::C, ChannelResp<Self>, crate::network::error::TryRecvError>,
     >)
         ensures
             forall|idx|
@@ -227,6 +233,10 @@ impl<C> ConnectionPool for FlawlessPool<BufChannel<C>> where
 
     fn len(&self) -> usize {
         self._len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self._len() == 0
     }
 
     closed spec fn spec_len(self) -> nat {

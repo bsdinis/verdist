@@ -397,9 +397,9 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
         vlib::veprintln!(
             "[client|{:>3}]: connecting to server", local_id,
         );
-        let addr = SocketAddr::new(self.local_ip.clone(), 0);
-        let connect_socket = UdpSocket::bind(&addr)?;
-        let channel_socket = UdpSocket::bind(&addr)?;
+        let addr = SocketAddr::new(self.local_ip, 0);
+        let connect_socket = UdpSocket::bind(addr)?;
+        let channel_socket = UdpSocket::bind(addr)?;
         connect_socket.connect(&self.listening_addr)?;
         let connect_tsocket = TypedUdpSocket::<(u64, SocketAddr), (u64, SocketAddr)>::new(
             connect_socket,
@@ -407,19 +407,16 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
 
         connect_tsocket.send(&(local_id, channel_socket.local_addr().unwrap()))?;
         loop {
-            match connect_tsocket.try_recv() {
-                Ok(Some((server_id, addr))) => {
-                    channel_socket.connect(addr)?;
-                    let tsocket = TypedUdpSocket::new(channel_socket);
-                    let pred = gen_pred(self, local_id);
+            if let Ok(Some((server_id, addr))) = connect_tsocket.try_recv() {
+                channel_socket.connect(addr)?;
+                let tsocket = TypedUdpSocket::new(channel_socket);
+                let pred = gen_pred(self, local_id);
 
-                    let chan = ServerChannel::new(pred, server_id, local_id, tsocket);
-                    vlib::veprintln!(
+                let chan = ServerChannel::new(pred, server_id, local_id, tsocket);
+                vlib::veprintln!(
                         "[client|{:>3}]: connected to server {server_id} (channel_id: {:?}, server addr: {addr:?})", local_id, chan.id()
                     );
-                    return Ok(chan);
-                },
-                _ => {},
+                return Ok(chan);
             }
         }
     }

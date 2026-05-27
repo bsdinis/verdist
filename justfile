@@ -9,6 +9,9 @@ fmt:
 check:
     RUSTFLAGS="-D warnings" cargo check;
 
+clippy:
+    cargo clippy -- -D warnings;
+
 [default]
 run-examples:
     for name in {{examples}}; \
@@ -20,4 +23,4 @@ run-examples:
 verify:
     cargo verus verify
 
-pre-commit: fmt check verify run-examples
+pre-commit: fmt check clippy verify run-examples

@@ -545,6 +545,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             agree_with_max@.contains(server_id) ==> replies@.contains((id.0, server_id)));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_aux(
         max_resp: &mut Option<GetTimestampResponse>,
         agree_with_max: &mut BTreeSet<u64>,

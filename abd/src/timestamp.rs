@@ -49,6 +49,8 @@ impl vstd::std_specs::cmp::OrdSpecImpl for Timestamp {
 }
 
 impl Timestamp {
+    // Ideally we would implement default, but not sure if trait extension is working
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> (r: Self)
         ensures
             r.seqno == 0,
@@ -120,7 +122,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const FIELDS: &'static [&'static str] = &["seqno", "client_id", "client_ctr"];
+            const FIELDS: &[&str] = &["seqno", "client_id", "client_ctr"];
 
             enum Field {
                 Seqno,
@@ -195,32 +197,26 @@ mod serde_impls {
                     let mut seqno = None;
                     let mut client_id = None;
                     let mut client_ctr = None;
-                    loop {
-                        if let Some(key) = map.next_key()? {
-                            match key {
-                                Field::Seqno => {
-                                    if seqno.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("seqno"));
-                                    }
-                                    seqno = Some(map.next_value()?);
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::Seqno => {
+                                if seqno.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("seqno"));
                                 }
-                                Field::ClientId => {
-                                    if client_id.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("client_id"));
-                                    }
-                                    client_id = Some(map.next_value()?);
-                                }
-                                Field::ClientCtr => {
-                                    if client_ctr.is_some() {
-                                        return Err(serde::de::Error::duplicate_field(
-                                            "client_ctr",
-                                        ));
-                                    }
-                                    client_ctr = Some(map.next_value()?);
-                                }
+                                seqno = Some(map.next_value()?);
                             }
-                        } else {
-                            break;
+                            Field::ClientId => {
+                                if client_id.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("client_id"));
+                                }
+                                client_id = Some(map.next_value()?);
+                            }
+                            Field::ClientCtr => {
+                                if client_ctr.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("client_ctr"));
+                                }
+                                client_ctr = Some(map.next_value()?);
+                            }
                         }
                     }
                     let seqno = seqno.ok_or_else(|| serde::de::Error::missing_field("seqno"))?;

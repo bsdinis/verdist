@@ -805,6 +805,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         assert(get_replies@.union(wb_replies@) == get_replies@);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_get_aux(
         max_resp: &mut Option<GetResponse>,
         agree_with_max: &mut BTreeSet<u64>,
@@ -1035,6 +1036,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         self.wb_request = Tracked(Some(wb_request.get()));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_wb_aux(
         agree_with_max: &mut BTreeSet<u64>,
         wb_replies: &mut BTreeSet<C::Id>,

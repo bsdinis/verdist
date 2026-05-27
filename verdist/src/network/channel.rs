@@ -126,7 +126,7 @@ impl<K, Id, R, S> vstd::rwlock::RwLockPredicate<HashMap<u64, R>> for BufChannelI
 
 pub struct BufChannel<C> where C: Channel, C::R: TaggedMessage {
     channel: C,
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::type_complexity)]
     buffered: RwLock<HashMap<u64, C::R>, BufChannelInv<C::K, C::Id, C::S>>,
 }
 

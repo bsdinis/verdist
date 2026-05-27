@@ -77,6 +77,7 @@ impl<'a, Pool, Request> BroadcastPool<'a, Pool> where
         proof {
             lemma_channel_seq_to_map(channels@, self.spec_channels());
         }
+        #[allow(clippy::explicit_iter_loop)]
         for chan in channels.iter()
             invariant
                 self.spec_channels() == g_channels,

@@ -373,7 +373,7 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for TcpConnector<A> where
             "[client|{:>3}]: connected to server {server_id} (channel_id: {:?}, server addr: {:?})", local_id, chan.id(),
             peer_addr
         );
-        return Ok(chan);
+        Ok(chan)
     }
 }
 

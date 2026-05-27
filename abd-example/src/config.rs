@@ -59,7 +59,7 @@ impl ParsedConfig {
         let config: ParsedConfig = toml::from_str(&config_contents)
             .map_err(|e| format!("toml: failed to parse: {e:?}"))?;
         if config.server.is_empty() {
-            return Err(format!("config: no servers specified"));
+            return Err("config: no servers specified".to_string());
         }
         // all servers must have an addr in a non-modelled network
         if config.network != crate::cli::NetworkType::Modelled {

@@ -116,6 +116,16 @@ impl<C, Pred, A> Replies<C, Pred, A> where
         self.accum.handled_replies().len()
     }
 
+    pub fn is_empty(&self) -> (r: bool)
+        ensures
+            r <==> self.spec_len() == 0,
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        self.len() == 0
+    }
+
     pub open spec fn spec_len(self) -> (r: nat) {
         self.spec_handled_replies().len()
     }

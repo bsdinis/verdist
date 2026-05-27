@@ -512,7 +512,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const FIELDS: &'static [&'static str] = &["request_id", "inner"];
+            const FIELDS: &[&str] = &["request_id", "inner"];
 
             enum Field {
                 RequestId,
@@ -577,26 +577,20 @@ mod serde_impls {
                 {
                     let mut request_id = None;
                     let mut inner = None;
-                    loop {
-                        if let Some(key) = map.next_key()? {
-                            match key {
-                                Field::RequestId => {
-                                    if request_id.is_some() {
-                                        return Err(serde::de::Error::duplicate_field(
-                                            "request_id",
-                                        ));
-                                    }
-                                    request_id = Some(map.next_value()?);
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::RequestId => {
+                                if request_id.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("request_id"));
                                 }
-                                Field::Inner => {
-                                    if inner.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("inner"));
-                                    }
-                                    inner = Some(map.next_value()?);
-                                }
+                                request_id = Some(map.next_value()?);
                             }
-                        } else {
-                            break;
+                            Field::Inner => {
+                                if inner.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("inner"));
+                                }
+                                inner = Some(map.next_value()?);
+                            }
                         }
                     }
                     let request_id =
@@ -636,7 +630,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const VARIANTS: &'static [&'static str] = &["Get", "GetTimestamp", "Write"];
+            const VARIANTS: &[&str] = &["Get", "GetTimestamp", "Write"];
 
             enum Variant {
                 Get,

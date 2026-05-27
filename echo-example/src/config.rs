@@ -36,9 +36,7 @@ impl Config {
 
     fn validate(&self) -> Result<(), String> {
         if self.client_id == self.server_id {
-            Err(format!(
-                "config: `client_id` and `server_id` must be distinct"
-            ))
+            Err("config: `client_id` and `server_id` must be distinct".to_string())
         } else {
             Ok(())
         }

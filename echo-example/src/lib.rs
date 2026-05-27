@@ -64,7 +64,7 @@ fn connect<C, Conn>(
     Ok(BufChannel::new(channel))
 }
 
-pub fn run_client<C, Conn, 'a>(args: ClientArgs, connector: &Conn) -> Result<(), Error> where
+pub fn run_client<C, Conn>(args: ClientArgs, connector: &Conn) -> Result<(), Error> where
     Conn: Connector<C> + Send + Sync,
     C: Channel<
         K = echo::channel::ChannelInv,

@@ -386,8 +386,8 @@ impl Clone for WriteRequest {
             ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         }
         WriteRequest {
-            value: self.value.clone(),
-            timestamp: self.timestamp.clone(),
+            value: self.value,
+            timestamp: self.timestamp,
             commitment: Tracked(new_commitment),
             servers: Tracked(new_servers),
         }
@@ -448,7 +448,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const FIELDS: &'static [&'static str] = &["value", "timestamp"];
+            const FIELDS: &[&str] = &["value", "timestamp"];
 
             enum Field {
                 Value,
@@ -513,24 +513,20 @@ mod serde_impls {
                 {
                     let mut value = None;
                     let mut timestamp = None;
-                    loop {
-                        if let Some(key) = map.next_key()? {
-                            match key {
-                                Field::Value => {
-                                    if value.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("value"));
-                                    }
-                                    value = Some(map.next_value()?);
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::Value => {
+                                if value.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("value"));
                                 }
-                                Field::Timestamp => {
-                                    if timestamp.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("timestamp"));
-                                    }
-                                    timestamp = Some(map.next_value()?);
-                                }
+                                value = Some(map.next_value()?);
                             }
-                        } else {
-                            break;
+                            Field::Timestamp => {
+                                if timestamp.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("timestamp"));
+                                }
+                                timestamp = Some(map.next_value()?);
+                            }
                         }
                     }
                     let value = value.ok_or_else(|| serde::de::Error::missing_field("value"))?;

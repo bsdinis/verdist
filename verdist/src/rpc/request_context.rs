@@ -40,6 +40,8 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
     }
 }
 
+pub type WaitForResult<C, Pred, A> = Result<Replies<C, Pred, A>, Replies<C, Pred, A>>;
+
 impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
     Pool: ConnectionPool,
     ChannelId<Pool>: std::fmt::Debug,
@@ -80,9 +82,10 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
     #[verifier::exec_allows_no_decreases_clause]
     // TODO: a mechanism to ensure that the Replies we get back is the same we put in (i.e., same
     // identity, not same value, would be useful, maybe)
-    pub fn wait_for<F>(self, termination_cond: F) -> (r: Result<
-        Replies<PoolChannel<Pool>, Pred, A>,
-        Replies<PoolChannel<Pool>, Pred, A>,
+    pub fn wait_for<F>(self, termination_cond: F) -> (r: WaitForResult<
+        PoolChannel<Pool>,
+        Pred,
+        A,
     >) where F: Fn(&Replies<PoolChannel<Pool>, Pred, A>) -> bool
         requires
             forall|replies| termination_cond.requires((&replies,)),
@@ -136,7 +139,9 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
             if resps.is_empty() {
                 continue;
             }
+            #[allow(unused)]
             let mut idx = 0usize;
+            #[allow(clippy::explicit_counter_loop)]
             for (id, r) in it: resps
                 invariant
                     pred == self_mut.pred(),
@@ -186,7 +191,10 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
                 }
 
                 assume(idx < usize::MAX);  // XXX: overflow
-                idx = idx + 1;
+                #[allow(unused)]
+                {
+                    idx += 1;
+                }
             }
         }
     }

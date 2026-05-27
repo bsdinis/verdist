@@ -74,7 +74,7 @@ fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
         },
 {
     let mut v = Vec::with_capacity(connectors.len());
-    for connector in connectors.iter() {
+    for connector in connectors {
         let conn = connect(connector, client_id)?;
         v.push(conn);
     }
@@ -85,9 +85,16 @@ fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
     Ok(v)
 }
 
-pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
+type ClientRunError = Error<
+    OwnedWritePerm,
+    GhostVar<Option<u64>>,
+    OwnedReadPerm,
+    GhostVar<Option<u64>>,
+>;
+
+pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
     (),
-    Error<OwnedWritePerm, GhostVar<Option<u64>>, OwnedReadPerm, GhostVar<Option<u64>>>,
+    ClientRunError,
 > where
     Conn: Connector<C> + Send + Sync,
     C: Channel<

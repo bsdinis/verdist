@@ -184,7 +184,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const FIELDS: &'static [&'static str] = &["message"];
+            const FIELDS: &[&str] = &["message"];
 
             enum Field {
                 Message,
@@ -243,18 +243,14 @@ mod serde_impls {
                     V: serde::de::MapAccess<'de>,
                 {
                     let mut message = None;
-                    loop {
-                        if let Some(key) = map.next_key()? {
-                            match key {
-                                Field::Message => {
-                                    if message.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("message"));
-                                    }
-                                    message = Some(map.next_value()?);
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::Message => {
+                                if message.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("message"));
                                 }
+                                message = Some(map.next_value()?);
                             }
-                        } else {
-                            break;
                         }
                     }
                     let message =
@@ -283,7 +279,7 @@ mod serde_impls {
         where
             D: serde::Deserializer<'de>,
         {
-            const FIELDS: &'static [&'static str] = &["message"];
+            const FIELDS: &[&str] = &["message"];
 
             enum Field {
                 Message,
@@ -342,18 +338,14 @@ mod serde_impls {
                     V: serde::de::MapAccess<'de>,
                 {
                     let mut message = None;
-                    loop {
-                        if let Some(key) = map.next_key()? {
-                            match key {
-                                Field::Message => {
-                                    if message.is_some() {
-                                        return Err(serde::de::Error::duplicate_field("message"));
-                                    }
-                                    message = Some(map.next_value()?);
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::Message => {
+                                if message.is_some() {
+                                    return Err(serde::de::Error::duplicate_field("message"));
                                 }
+                                message = Some(map.next_value()?);
                             }
-                        } else {
-                            break;
                         }
                     }
                     let message =

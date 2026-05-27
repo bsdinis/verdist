@@ -342,7 +342,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         let agree_with_max = replies.agree_with_max().clone();
         let max_resp = replies.max_resp();
         let max_ts = max_resp.timestamp();
-        let value = max_resp.value().clone();
+        let value = *max_resp.value();
         let Tracked(commitment) = max_resp.commitment();
         proph_val.resolve(&value);
 
@@ -542,7 +542,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             // XXX: debug assert
             assert(state.inv());
         });
-        return Ok((value, max_ts, Tracked(comp)));
+        Ok((value, max_ts, Tracked(comp)))
     }
 
     fn write(&mut self, value: Option<u64>, Tracked(lin): Tracked<ML>) -> (r: Result<

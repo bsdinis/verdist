@@ -13,6 +13,8 @@ pub trait RegisterError<L, Op> {
     spec fn err_ensures(self, op: Op, lin: L) -> bool;
 }
 
+pub type ReadReturn<Timestamp, Completion> = (Option<u64>, Timestamp, Tracked<Completion>);
+
 // NOTE: LIMITATION
 // - The MutLinearizer should be specified in the method
 // - Type problem: the linearization queue is parametrized by the linearizer type
@@ -37,7 +39,7 @@ pub trait LinRegisterClient<C, ML, RL> where
     spec fn inv(self) -> bool;
 
     fn read(&mut self, lin: Tracked<RL>) -> (r: Result<
-        (Option<u64>, Self::Timestamp, Tracked<RL::Completion>),
+        ReadReturn<Self::Timestamp, RL::Completion>,
         Self::ReadErr,
     >)
         requires

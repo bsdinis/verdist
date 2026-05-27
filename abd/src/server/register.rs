@@ -197,8 +197,8 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
         assert(req.servers()[self.id()]@@.timestamp() <= r@.timestamp());
         assert(req.servers()[self.id()]@@.timestamp() <= new_lb@.timestamp());
         GetResponse::new(
-            self.value.clone(),
-            self.timestamp.clone(),
+            self.value,
+            self.timestamp,
             Tracked(new_lb),
             Tracked(commitment),
             Tracked(server_token),
@@ -240,7 +240,7 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
         assert(req.servers()[self.id()]@@.timestamp() == lb@@.timestamp());
         assert(req.servers()[self.id()]@@.timestamp() <= r@.timestamp());
         assert(req.servers()[self.id()]@@.timestamp() <= new_lb@.timestamp());
-        GetTimestampResponse::new(self.timestamp.clone(), Tracked(new_lb), Tracked(server_token))
+        GetTimestampResponse::new(self.timestamp, Tracked(new_lb), Tracked(server_token))
     }
 
     pub fn write(self, req: WriteRequest) -> (r: Self)

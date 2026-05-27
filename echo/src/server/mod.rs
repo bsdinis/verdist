@@ -215,7 +215,7 @@ impl<L, C> EchoServer<L, C> where
         let iterator = connected.iter();
         #[allow(unused_variables)]
         let mut idx = 0usize;
-        #[allow(unused_assignments)]
+        #[allow(unused_assignments, clippy::explicit_counter_loop)]
         for channel in it: iterator
             invariant
                 self.connected.pred() == connected_pred,

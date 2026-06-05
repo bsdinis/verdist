@@ -267,8 +267,6 @@ mod serde_impls {
     use serde::de::VariantAccess;
     use serde::ser::SerializeStruct;
 
-    use crate::proto::EchoRequest;
-
     use super::Request;
     use super::RequestInner;
 
@@ -464,7 +462,7 @@ mod serde_impls {
                     let (variant, variant_access) = data.variant::<Variant>()?;
                     match variant {
                         Variant::Echo => {
-                            let echo: EchoRequest = variant_access.newtype_variant()?;
+                            let echo = variant_access.newtype_variant()?;
                             Ok(RequestInner::Echo(echo))
                         }
                     }

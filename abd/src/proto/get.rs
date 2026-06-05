@@ -151,6 +151,12 @@ impl GetRequest {
         ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         GetRequest { servers: Tracked(new_servers) }
     }
+
+    /// Create a GetRequest (to be used for deserialization)
+    fn axiom_forge() -> Self {
+        proof { assume(false) }
+        GetRequest { servers: Tracked(proof_from_false()) }
+    }
 }
 
 #[allow(unused)]
@@ -354,6 +360,21 @@ impl GetResponse {
             a.server_id() == b.server_id(),
     {
     }
+
+    /// Create a GetResponse (to be used for deserialization)
+    fn axiom_forge(value: Option<u64>, timestamp: Timestamp) -> Self {
+        proof {
+            assume(false);
+        }
+
+        GetResponse {
+            value,
+            timestamp,
+            lb: Tracked(proof_from_false()),
+            commitment: Tracked(proof_from_false()),
+            server_token: Tracked(proof_from_false()),
+        }
+    }
 }
 
 impl Clone for GetRequest {
@@ -409,5 +430,166 @@ impl std::fmt::Debug for GetResponse {
             .field("value", &self.value)
             .field("timestamp", &self.timestamp)
             .finish()
+    }
+}
+
+mod serde_impls {
+    use super::GetRequest;
+    use super::GetResponse;
+    use serde::ser::SerializeStruct;
+
+    impl serde::Serialize for GetRequest {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let state = serializer.serialize_struct("GetRequest", 0)?;
+            state.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for GetRequest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct StructVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for StructVisitor {
+                type Value = GetRequest;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("struct GetRequest")
+                }
+
+                fn visit_seq<V>(self, _seq: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::SeqAccess<'de>,
+                {
+                    Ok(GetRequest::axiom_forge())
+                }
+
+                fn visit_map<V>(self, _map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+                {
+                    Ok(GetRequest::axiom_forge())
+                }
+            }
+
+            deserializer.deserialize_struct("GetRequest", &[], StructVisitor)
+        }
+    }
+
+    impl serde::Serialize for GetResponse {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut state = serializer.serialize_struct("GetResponse", 2)?;
+            state.serialize_field("value", &self.value)?;
+            state.serialize_field("timestamp", &self.timestamp)?;
+            state.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for GetResponse {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            const FIELDS: &'static [&'static str] = &["value", "timestamp"];
+
+            enum Field {
+                Value,
+                Timestamp,
+            }
+
+            struct FieldVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                type Value = Field;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("`value` or `timestamp`")
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                where
+                    E: serde::de::Error,
+                {
+                    match value {
+                        "value" => Ok(Field::Value),
+                        "timestamp" => Ok(Field::Timestamp),
+                        _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for Field {
+                fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    deserializer.deserialize_identifier(FieldVisitor)
+                }
+            }
+
+            struct StructVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for StructVisitor {
+                type Value = GetResponse;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("struct GetResponse")
+                }
+
+                fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::SeqAccess<'de>,
+                {
+                    let value = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                    let timestamp = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                    Ok(GetResponse::axiom_forge(value, timestamp))
+                }
+
+                fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+                {
+                    let mut value = None;
+                    let mut timestamp = None;
+                    loop {
+                        if let Some(key) = map.next_key()? {
+                            match key {
+                                Field::Value => {
+                                    if value.is_some() {
+                                        return Err(serde::de::Error::duplicate_field("value"));
+                                    }
+                                    value = Some(map.next_value()?);
+                                }
+                                Field::Timestamp => {
+                                    if timestamp.is_some() {
+                                        return Err(serde::de::Error::duplicate_field("timestamp"));
+                                    }
+                                    timestamp = Some(map.next_value()?);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    let value = value.ok_or_else(|| serde::de::Error::missing_field("value"))?;
+                    let timestamp =
+                        timestamp.ok_or_else(|| serde::de::Error::missing_field("timestamp"))?;
+                    Ok(GetResponse::axiom_forge(value, timestamp))
+                }
+            }
+            deserializer.deserialize_struct("GetResponse", FIELDS, StructVisitor)
+        }
     }
 }

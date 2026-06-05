@@ -166,7 +166,6 @@ impl std::fmt::Debug for EchoResponse {
 mod serde_impls {
     use super::EchoRequest;
     use super::EchoResponse;
-    use serde;
     use serde::ser::SerializeStruct;
 
     impl serde::Serialize for EchoRequest {

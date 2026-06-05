@@ -9,6 +9,8 @@ rust-version = { workspace = true }
 version = { workspace = true }
 
 [dependencies]
+serde = { workspace = true }
+
 specs = { workspace = true }
 verdist = { workspace = true }
 vlib = { workspace = true }

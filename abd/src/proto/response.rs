@@ -346,6 +346,15 @@ impl Response {
             use_type_invariant(self);
         }
     }
+
+    /// Create a response from the executable parts only, for deserialization purposes
+    fn axiom_forge(request_id: u64, inner: ResponseInner) -> Self {
+        proof {
+            assume(false);
+        }
+        let request = Tracked(proof_from_false());
+        Response { request_id, inner, request }
+    }
 }
 
 impl ResponseInner {
@@ -476,5 +485,236 @@ impl std::fmt::Debug for Response {
             .field("request_id", &self.request_id)
             .field("response", &self.inner)
             .finish()
+    }
+}
+
+mod serde_impls {
+    use serde::de::VariantAccess;
+    use serde::ser::SerializeStruct;
+
+    use super::Response;
+    use super::ResponseInner;
+
+    impl serde::Serialize for Response {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut state = serializer.serialize_struct("Response", 2)?;
+            state.serialize_field("request_id", &self.request_id)?;
+            state.serialize_field("inner", &self.inner)?;
+            state.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Response {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            const FIELDS: &'static [&'static str] = &["request_id", "inner"];
+
+            enum Field {
+                RequestId,
+                Inner,
+            }
+
+            struct FieldVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                type Value = Field;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("`request_id` or `inner`")
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                where
+                    E: serde::de::Error,
+                {
+                    match value {
+                        "request_id" => Ok(Field::RequestId),
+                        "inner" => Ok(Field::Inner),
+                        _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for Field {
+                fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    deserializer.deserialize_identifier(FieldVisitor)
+                }
+            }
+
+            struct StructVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for StructVisitor {
+                type Value = Response;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("struct Response")
+                }
+
+                fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::SeqAccess<'de>,
+                {
+                    let request_id = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                    let inner = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                    Ok(Response::axiom_forge(request_id, inner))
+                }
+
+                fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+                {
+                    let mut request_id = None;
+                    let mut inner = None;
+                    loop {
+                        if let Some(key) = map.next_key()? {
+                            match key {
+                                Field::RequestId => {
+                                    if request_id.is_some() {
+                                        return Err(serde::de::Error::duplicate_field(
+                                            "request_id",
+                                        ));
+                                    }
+                                    request_id = Some(map.next_value()?);
+                                }
+                                Field::Inner => {
+                                    if inner.is_some() {
+                                        return Err(serde::de::Error::duplicate_field("inner"));
+                                    }
+                                    inner = Some(map.next_value()?);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    let request_id =
+                        request_id.ok_or_else(|| serde::de::Error::missing_field("request_id"))?;
+                    let inner = inner.ok_or_else(|| serde::de::Error::missing_field("inner"))?;
+                    Ok(Response::axiom_forge(request_id, inner))
+                }
+            }
+            deserializer.deserialize_struct("Response", FIELDS, StructVisitor)
+        }
+    }
+
+    impl serde::Serialize for ResponseInner {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            match self {
+                ResponseInner::Get(get) => {
+                    serializer.serialize_newtype_variant("ResponseInner", 0, "Get", get)
+                }
+                ResponseInner::GetTimestamp(get_timestamp) => serializer.serialize_newtype_variant(
+                    "ResponseInner",
+                    1,
+                    "GetTimestamp",
+                    get_timestamp,
+                ),
+                ResponseInner::Write(write) => {
+                    serializer.serialize_newtype_variant("ResponseInner", 2, "Write", write)
+                }
+            }
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for ResponseInner {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            const VARIANTS: &'static [&'static str] = &["Get", "GetTimestamp", "Write"];
+
+            enum Variant {
+                Get,
+                GetTimestamp,
+                Write,
+            }
+            impl<'de> serde::Deserialize<'de> for Variant {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::de::Deserializer<'de>,
+                {
+                    struct FieldVisitor;
+
+                    impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                        type Value = Variant;
+
+                        fn expecting(
+                            &self,
+                            formatter: &mut std::fmt::Formatter,
+                        ) -> std::fmt::Result {
+                            formatter.write_str("variant identifier")
+                        }
+
+                        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            match value {
+                                "Get" => Ok(Variant::Get),
+                                "GetTimestamp" => Ok(Variant::GetTimestamp),
+                                "Write" => Ok(Variant::Write),
+                                _ => Err(serde::de::Error::unknown_variant(value, VARIANTS)),
+                            }
+                        }
+
+                        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            self.visit_str(&value)
+                        }
+                    }
+
+                    deserializer.deserialize_identifier(FieldVisitor)
+                }
+            }
+
+            struct EnumVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for EnumVisitor {
+                type Value = ResponseInner;
+
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("enum ResponseInner")
+                }
+
+                fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::EnumAccess<'de>,
+                {
+                    let (variant, variant_access) = data.variant::<Variant>()?;
+                    match variant {
+                        Variant::Get => {
+                            let get = variant_access.newtype_variant()?;
+                            Ok(ResponseInner::Get(get))
+                        }
+                        Variant::GetTimestamp => {
+                            let get_timestamp = variant_access.newtype_variant()?;
+                            Ok(ResponseInner::GetTimestamp(get_timestamp))
+                        }
+                        Variant::Write => {
+                            let write = variant_access.newtype_variant()?;
+                            Ok(ResponseInner::Write(write))
+                        }
+                    }
+                }
+            }
+            deserializer.deserialize_enum("ResponseInner", VARIANTS, EnumVisitor)
+        }
     }
 }

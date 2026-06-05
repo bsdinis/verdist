@@ -3,6 +3,30 @@ use clap::Parser;
 use abd_example::cli::Args;
 use abd_example::server;
 
+/*
+fn main() {
+    let args = Args::parse();
+
+    match args.network {
+        cli::NetworkType::Modelled => {
+            let (listener, connector) = verdist::network::modelled::listen_channel(args.server_id);
+            server::spawn_server(args.server_id, listener);
+            abd_example::run_client(args, &connector).expect("run_client: error");
+        }
+        cli::NetworkType::Udp => {
+            let my_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let connector =
+                verdist::network::udp::UdpConnector::new(echo_example::LISTEN_ADDR, my_ip)
+                    .expect("failed to create connector");
+            abd_example::run_client(args, &connector).expect("run_client: error");
+        }
+        cli::NetworkType::Tcp => {
+            unimplemented!()
+        }
+    }
+}
+*/
+
 fn main() {
     let args = Args::parse();
 
@@ -16,15 +40,4 @@ fn main() {
         .collect();
 
     abd_example::run_client(args, &connectors).expect("error");
-
-    // let realtime_order = realtime(&trace);
-    // println!("realtime ordering:\n{realtime_order:?}");
-    // let part_order = partial(&trace);
-    // println!("implied partial ordering:\n{part_order:?}");
-
-    // if orders_agree(&realtime_order, &part_order) {
-    // println!("partial orderings agree");
-    // } else {
-    // println!("partial orderings do not agree");
-    // }
 }

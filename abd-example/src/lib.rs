@@ -1,8 +1,12 @@
 use vstd::atomic::PAtomicU64;
 #[cfg(verus_only)]
 use vstd::logatom::ReadLinearizer;
+#[cfg(verus_only)]
+use vstd::modes::tracked_swap;
 use vstd::prelude::*;
 use vstd::resource::ghost_var::GhostVar;
+#[cfg(verus_only)]
+use vstd::resource::ghost_var::GhostVarAuth;
 
 use verdist::network::channel::BufChannel;
 use verdist::network::channel::Channel;
@@ -118,7 +122,7 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
     let (request_ctr, request_ctr_perm) = PAtomicU64::new(0);
 
     #[allow(unused)]
-    let (client_ctr_token, request_ctr_token, state_inv, view) = get_invariant_state::<
+    let (client_ctr_token, request_ctr_token, state_inv, register_perm) = get_invariant_state::<
         _,
         _,
         OwnedWritePerm,
@@ -134,6 +138,7 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
             &&& state_inv.constant().server_tokens_id == c.constant().server_tokens_id
             &&& state_inv.constant().server_locs == c.constant().server_locs
         });
+    let tracked mut register_perm = register_perm.get();
     let mut client = AbdPool::<_, OwnedWritePerm, OwnedReadPerm>::new(
         pool,
         args.client_id,
@@ -145,10 +150,24 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
     );
     assert(client.inv()) by { abd::client::lemma_inv(client) };
 
+    let mut remaining_writes = args.n_writes;
+    let mut remaining_reads = if args.n_reads > 0 {
+        args.n_reads
+    } else {
+        1
+    };
+    assume(remaining_writes + remaining_reads < usize::MAX);  // XXX: arithmetic overflow
+
+    // do the first read
+    let tracked perm;
+    proof {
+        let tracked (_, mut dummy) = GhostVarAuth::new(None);
+        tracked_swap(&mut register_perm, &mut dummy);
+        perm = dummy;
+    }
+    let tracked read_perm = OwnedReadPerm { register: perm };
     #[allow(unused)]
-    let tracked read_perm = OwnedReadPerm { register: view.get() };
-    #[allow(unused)]
-    let (v, ts, view2) = match client.read(Tracked(read_perm)) {
+    let (v, ts, orig_view) = match client.read(Tracked(read_perm)) {
         Ok((v, ts, view)) => {
             vlib::veprintln!("[client|{:>3}]: read completed: {:?} @ {:?}", args.client_id, v, ts);
             (v, ts, view)
@@ -158,37 +177,78 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
             return Err(Error::Empty);
         },
     };
-    assert(view2@@ == v);
-
-    #[allow(unused)]
-    let value = Some(42u64);
-    let tracked write_perm = OwnedWritePerm { register: view2.get(), value };
+    let tracked mut orig_view = orig_view.get();
     #[allow(unused_variables)]
-    let view3 = match client.write(Some(42), Tracked(write_perm)) {
-        Ok(comp) => {
-            vlib::veprintln!("[client|{:>3}]: write completed: {:?}", args.client_id, value);
-            comp
-        },
-        Err(e) => {
-            vlib::veprintln!("[client|{:>3}]: write error: {}", args.client_id, e);
-            return Err(Error::Empty);
-        },
-    };
-    assert(view3@@ == Some(42u64));
+    let mut expected_value = v;
+    assert(orig_view@ == v);
+    proof {
+        tracked_swap(&mut register_perm, &mut orig_view);
+    }
 
-    let tracked read_perm = OwnedReadPerm { register: view3.get() };
-    #[allow(unused)]
-    let (v, ts, view4) = match client.read(Tracked(read_perm)) {
-        Ok((v, ts, comp)) => {
-            vlib::veprintln!("[client|{:>3}]: read completed: {:?} @ {:?}", args.client_id, v, ts);
-            (v, ts, comp)
-        },
-        Err(e) => {
-            vlib::veprintln!("[client|{:>3}]: read error: {}", args.client_id, e);
-            return Err(Error::Empty);
-        },
-    };
-    assert(view4@@ == v);
+    assert(register_perm@ == expected_value);
+    remaining_reads -= 1;
+    let mut last_was_read = true;
+    let ghost register_perm_id = register_perm.id();
+    #[allow(unused_variables)]
+    while remaining_writes + remaining_reads > 0
+        invariant
+            register_perm@ == expected_value,
+            register_perm.id() == register_perm_id,
+            remaining_writes + remaining_reads < usize::MAX,
+            client.inv(),
+            client.register_loc() == register_perm.id(),
+        decreases remaining_writes + remaining_reads,
+    {
+        let tracked perm;
+        proof {
+            let tracked (_, mut dummy) = GhostVarAuth::new(None);
+            tracked_swap(&mut register_perm, &mut dummy);
+            perm = dummy;
+        }
+        #[allow(unused_assignments)]
+        if (last_was_read && remaining_writes > 0) || remaining_reads == 0 {
+            let value = Some(remaining_writes);
+            let tracked write_perm = OwnedWritePerm { register: perm, value };
+            let write_view = match client.write(value, Tracked(write_perm)) {
+                Ok(comp) => {
+                    vlib::veprintln!("[client|{:>3}]: write completed: {:?}", args.client_id, value);
+                    comp
+                },
+                Err(e) => {
+                    vlib::veprintln!("[client|{:>3}]: write error: {}", args.client_id, e);
+                    return Err(Error::Empty);
+                },
+            };
+            let tracked mut write_view = write_view.get();
+            assert(write_view@ == value);
+            proof {
+                tracked_swap(&mut register_perm, &mut write_view);
+            }
+            expected_value = value;
+            last_was_read = false;
+            remaining_writes -= 1;
+        } else {
+            let tracked read_perm = OwnedReadPerm { register: perm };
+            let (v, ts, read_view) = match client.read(Tracked(read_perm)) {
+                Ok((v, ts, comp)) => {
+                    vlib::veprintln!("[client|{:>3}]: read completed: {:?} @ {:?}", args.client_id, v, ts);
+                    (v, ts, comp)
+                },
+                Err(e) => {
+                    vlib::veprintln!("[client|{:>3}]: read error: {}", args.client_id, e);
+                    return Err(Error::Empty);
+                },
+            };
+            let tracked mut read_view = read_view.get();
+            assert(read_view@ == v);
+            assert(read_view@ == expected_value);
+            proof {
+                tracked_swap(&mut register_perm, &mut read_view);
+            }
+            last_was_read = true;
+            remaining_reads -= 1;
+        }
+    }
 
     Ok(())
 }

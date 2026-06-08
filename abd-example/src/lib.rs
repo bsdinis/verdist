@@ -27,9 +27,8 @@ pub mod cli;
 pub mod error;
 pub mod invariant;
 pub mod server;
-pub mod trace;
 
-use cli::Args;
+use cli::ClientArgs;
 use error::Error;
 use invariant::get_invariant_state;
 
@@ -39,7 +38,7 @@ const REQUEST_LATENCY_DEFAULT_MS: u64 = 1000;
 
 const REQUEST_STDDEV_DEFAULT_MS: u64 = 2000;
 
-fn connect<C, Conn>(args: &Args, connector: &Conn, client_id: u64) -> Result<
+fn connect<C, Conn>(args: &ClientArgs, connector: &Conn, client_id: u64) -> Result<
     BufChannel<C>,
     ConnectError,
 > where
@@ -58,7 +57,7 @@ fn connect<C, Conn>(args: &Args, connector: &Conn, client_id: u64) -> Result<
                 },
             ),
     )?;
-    if !args.no_delay {
+    if args.delay {
         channel.add_latency(
             std::time::Duration::from_millis(REQUEST_LATENCY_DEFAULT_MS),
             std::time::Duration::from_millis(REQUEST_STDDEV_DEFAULT_MS),
@@ -67,7 +66,7 @@ fn connect<C, Conn>(args: &Args, connector: &Conn, client_id: u64) -> Result<
     Ok(BufChannel::new(channel))
 }
 
-fn connect_all<C, Conn>(args: &Args, connectors: &[Conn], client_id: u64) -> (r: Result<
+fn connect_all<C, Conn>(args: &ClientArgs, connectors: &[Conn], client_id: u64) -> (r: Result<
     Vec<BufChannel<C>>,
     ConnectError,
 >) where
@@ -95,7 +94,7 @@ fn connect_all<C, Conn>(args: &Args, connectors: &[Conn], client_id: u64) -> (r:
     Ok(v)
 }
 
-pub fn run_client<C, Conn, 'a>(args: Args, connectors: &[Conn]) -> Result<
+pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
     (),
     Error<OwnedWritePerm, GhostVar<Option<u64>>, OwnedReadPerm, GhostVar<Option<u64>>>,
 > where

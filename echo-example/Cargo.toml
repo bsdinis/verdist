@@ -11,6 +11,8 @@ version = { workspace = true }
 [dependencies]
 clap = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 
 echo = { workspace = true }
 specs = { workspace = true }

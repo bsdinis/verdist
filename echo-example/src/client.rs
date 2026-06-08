@@ -1,13 +1,17 @@
 use clap::Parser;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
 
 use echo_example::cli;
-use echo_example::cli::Args;
+use echo_example::cli::ClientArgs;
 use echo_example::server;
 
 fn main() {
-    let args = Args::parse();
+    let args = match ClientArgs::parse().apply_config() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("failed to parse config: {e:?}");
+            return;
+        }
+    };
 
     match args.network {
         cli::NetworkType::Modelled => {
@@ -16,9 +20,8 @@ fn main() {
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
-            let my_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
             let connector =
-                verdist::network::udp::UdpConnector::new(echo_example::LISTEN_ADDR, my_ip)
+                verdist::network::udp::UdpConnector::new(args.server_addr, args.client_addr)
                     .expect("failed to create connector");
             echo_example::run_client(args, &connector).expect("run_client: error");
         }

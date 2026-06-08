@@ -1,6 +1,3 @@
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rand::distr::Alphanumeric;
@@ -21,14 +18,13 @@ use echo::channel::ChannelInv;
 use echo::client::EchoClient;
 
 pub mod cli;
+pub mod config;
 pub mod error;
 pub mod invariant;
 
-use cli::Args;
+use cli::ClientArgs;
 use error::Error;
 use invariant::get_invariant_state;
-
-pub const LISTEN_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6432);
 
 verus! {
 
@@ -37,7 +33,7 @@ const REQUEST_LATENCY_DEFAULT_MS: u64 = 100;
 const REQUEST_STDDEV_DEFAULT_MS: u64 = 200;
 
 fn connect<C, Conn>(
-    args: &Args,
+    args: &ClientArgs,
     connector: &Conn,
     client_id: u64,
     #[allow(unused_variables)]
@@ -70,7 +66,7 @@ fn connect<C, Conn>(
             { Ghost(constant) },
     )?;
     assume(channel.spec_id().0 == client_id);  // TODO(verdist/connector): connector spec is lacking
-    if !args.no_delay {
+    if args.delay {
         channel.add_latency(
             std::time::Duration::from_millis(REQUEST_LATENCY_DEFAULT_MS),
             std::time::Duration::from_millis(REQUEST_STDDEV_DEFAULT_MS),
@@ -79,7 +75,7 @@ fn connect<C, Conn>(
     Ok(BufChannel::new(channel))
 }
 
-pub fn run_client<C, Conn, 'a>(args: Args, connector: &Conn) -> Result<(), Error> where
+pub fn run_client<C, Conn, 'a>(args: ClientArgs, connector: &Conn) -> Result<(), Error> where
     Conn: Connector<C> + Send + Sync,
     C: Channel<
         K = echo::channel::ChannelInv,

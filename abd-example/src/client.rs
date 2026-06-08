@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use abd_example::cli::Args;
+use abd_example::cli::ClientArgs;
 use abd_example::server;
 
 /*
@@ -28,7 +28,7 @@ fn main() {
 */
 
 fn main() {
-    let args = Args::parse();
+    let args = ClientArgs::parse();
 
     if args.n_servers == 0 {
         eprintln!("need at least one server");

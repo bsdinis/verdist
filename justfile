@@ -12,7 +12,7 @@ check:
 [default]
 run-examples:
     for name in {{examples}}; \
-        cargo run -p {$name}-example --bin {$name}_client  -- --no-delay --network modelled; \
+        cargo run -p {$name}-example --bin {$name}_client  -- --network modelled; \
     end
 
 verify:

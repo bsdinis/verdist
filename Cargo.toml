@@ -10,6 +10,7 @@ members = [
 	"verdist",
     "vlib",
 ]
+exclude = ["../verus/source/vstd"]
 
 [workspace.package]
 version = "0.0.0"
@@ -32,7 +33,7 @@ echo = { path = "./echo" }
 specs = { path = "./specs" }
 verdist = { path = "./verdist" }
 vlib = { path = "./vlib" }
-vstd = { path = "../verus/source/vstd" }
+vstd = { git = "https://github.com/verus-lang/verus" }
 
 [workspace.lints.clippy]
 explicit_iter_loop = "warn"
@@ -48,3 +49,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_k
 
 [profile.release]
 strip = "debuginfo"
+
+[patch."https://github.com/verus-lang/verus"]
+vstd = { path = "../verus/source/vstd" }

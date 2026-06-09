@@ -5,9 +5,6 @@ use vstd::logatom::MutLinearizer;
 use vstd::logatom::ReadLinearizer;
 use vstd::prelude::*;
 
-use verdist::network::channel::Channel;
-use verdist::pool::ConnectionPool;
-
 use specs::register::RegisterRead;
 use specs::register::RegisterWrite;
 
@@ -19,8 +16,8 @@ use abd::invariants::StateInvariant;
 verus! {
 
 #[allow(unused)]
-pub fn get_invariant_state<Pool, C, ML, RL>(
-    pool: &Pool,
+pub fn get_invariant_state<ML, RL>(
+    server_ids: &Ghost<Set<u64>>,
     client_id: u64,
     client_perm: Tracked<PermissionU64>,
     request_perm: Tracked<PermissionU64>,
@@ -29,15 +26,8 @@ pub fn get_invariant_state<Pool, C, ML, RL>(
     Tracked<RequestCtrToken>,
     Tracked<Arc<StateInvariant<ML, RL>>>,
     Tracked<RegisterView>,
-)) where
-    Pool: ConnectionPool<C = C>,
-    C: Channel<R = abd::proto::Response, S = abd::proto::Request, Id = (u64, u64)>,
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
-
+)) where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead>
     requires
-        forall|cid: (u64, u64)| #[trigger]
-            pool.spec_channels().contains_key(cid) ==> cid.0 == client_id,
         client_perm@.value() == 0,
         request_perm@.value() == 0,
     ensures
@@ -50,24 +40,13 @@ pub fn get_invariant_state<Pool, C, ML, RL>(
         r.1@.value().1 == request_perm@.id(),
         r.1@.id() == r.2@.constant().request_map_ids.request_ctr_id,
         r.2@.namespace() == abd::invariants::state_inv_id(),
-        forall|cid: (u64, u64)| #[trigger]
-            pool.spec_channels().contains_key(cid) ==> {
-                &&& cid.0 == client_id
-                &&& r.2@.constant().server_locs.contains_key(cid.1)
-            },
-        forall|server_id| #[trigger]
-            r.2@.constant().server_locs.contains_key(server_id) ==> {
-                pool.spec_channels().contains_key((client_id, server_id))
-            },
         r.2@.constant().register_id == r.3@.id(),
-        pool.spec_len() == r.2@.constant().server_locs.len(),  // TODO: superfluous
+        server_ids@ == r.2@.constant().server_locs.dom(),
 {
-    let ghost server_ids = pool.spec_channels().dom().map(|id: (u64, u64)| id.1);
-    assume(server_ids.len() == pool.spec_len());  // TODO
     let tracked state_inv;
     let tracked view;
     proof {
-        let tracked (s, v) = abd::invariants::get_system_state::<ML, RL>(server_ids);
+        let tracked (s, v) = abd::invariants::get_system_state::<ML, RL>(server_ids@);
         state_inv = s;
         view = v;
     }

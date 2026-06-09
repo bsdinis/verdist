@@ -112,23 +112,24 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
     C: Sync + Send,
 
     requires
-        connectors.len() > 0,
+        connectors.len() == args.servers@.len(),
+        args.servers@.len() > 0,
 {
+    let (client_ctr, client_ctr_perm) = PAtomicU64::new(0);
+    let (request_ctr, request_ctr_perm) = PAtomicU64::new(0);
+    let server_ids = Ghost(args.servers@.dom());
+    #[allow(unused)]
+    let (client_ctr_token, request_ctr_token, state_inv, register_perm) = get_invariant_state::<
+        OwnedWritePerm,
+        OwnedReadPerm,
+    >(&server_ids, args.client_id, client_ctr_perm, request_ctr_perm);
+
     let pool = connect_all(&args, connectors, args.client_id)?;
     vlib::veprintln!("[client|{:>3}]: finished connecting\n", args.client_id);
     let pool = FlawlessPool::new(pool);
     assert(pool.spec_len() == connectors.len());
 
-    let (client_ctr, client_ctr_perm) = PAtomicU64::new(0);
-    let (request_ctr, request_ctr_perm) = PAtomicU64::new(0);
-
-    #[allow(unused)]
-    let (client_ctr_token, request_ctr_token, state_inv, register_perm) = get_invariant_state::<
-        _,
-        _,
-        OwnedWritePerm,
-        OwnedReadPerm,
-    >(&pool, args.client_id, client_ctr_perm, request_ctr_perm);
+    // TODO(connector): connector trait should preserve the ids
     assume(forall|cid| #[trigger]
         pool.spec_channels().dom().contains(cid) ==> {
             let c = pool.spec_channels()[cid];
@@ -139,6 +140,7 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
             &&& state_inv.constant().server_tokens_id == c.constant().server_tokens_id
             &&& state_inv.constant().server_locs == c.constant().server_locs
         });
+
     let tracked mut register_perm = register_perm.get();
     let mut client = AbdPool::<_, OwnedWritePerm, OwnedReadPerm>::new(
         pool,

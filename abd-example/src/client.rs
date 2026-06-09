@@ -33,7 +33,17 @@ fn main() {
             abd_example::run_client(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
-            unimplemented!()
+            let connectors = args
+                .servers
+                .values()
+                .map(|server_conf| {
+                    let addr = server_conf.addr.expect("server addr should be set");
+                    verdist::network::udp::UdpConnector::new(addr, args.client_addr)
+                        .expect("failed to create connector")
+                })
+                .collect::<Vec<_>>();
+
+            abd_example::run_client(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
             unimplemented!()

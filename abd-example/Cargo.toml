@@ -30,5 +30,9 @@ path = "src/lib.rs"
 name = "abd_client"
 path = "src/client.rs"
 
+[[bin]]
+name = "abd_server"
+path = "src/server.rs"
+
 [package.metadata.verus]
 verify = true

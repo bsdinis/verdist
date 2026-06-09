@@ -61,7 +61,7 @@ pub struct ClientParsedArgs {
 #[command(author, version, about, long_about=None)]
 pub struct ServerParsedArgs {
     /// Id of the server
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     pub server_id: u64,
 
     #[arg(short, long)]

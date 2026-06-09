@@ -115,7 +115,6 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
                 self_mut.replies.request_tag() == request_tag,
         {
             if termination_cond(&self_mut.replies) {
-                vlib::veprintln!("termination condition triggered");
                 self_mut.replies.lemma_pred();
                 assert(Pred::inv(self_mut.replies.pred(), self_mut.replies.spec_accumulator()));
                 assert(self_mut.replies.pred() == pred);
@@ -124,7 +123,6 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
             // TODO: we can try to figure out a better "give up" condition
 
             if self_mut.replies.n_received() >= self_mut.n_nodes() {
-                vlib::veprintln!("failsafe give up triggered");
                 let replies = self_mut.replies;
                 replies.lemma_pred();
 

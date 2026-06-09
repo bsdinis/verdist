@@ -293,7 +293,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
                 &&& write_req.servers()[resp.server_id()]@@.timestamp() <= resp.spec_timestamp()
             }),
     {
-        vlib::veprintln!("[server|{:>3}]: received req: {:?}", self.id, request);
+        // vlib::veprintln!("[server|{:>3}]: received req: {:?}", self.id, request);
         let (request_id, request_inner, request_proof) = request.destruct();
         let resp_inner = match request_inner {
             RequestInner::Get(req) => self.handle_get(req),
@@ -335,7 +335,7 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
         proof {
             RequestInner::spec_eq_refl(r.request());
         }
-        vlib::veprintln!("[server|{:>3}]: sending resp: {:?}", self.id, r);
+        // vlib::veprintln!("[server|{:>3}]: sending resp: {:?}", self.id, r);
         r
     }
 
@@ -446,25 +446,26 @@ impl<L, C, ML, RL> RegisterServer<L, C, ML, RL> where
     }
 }
 
-pub fn create_server<L, C, ML, RL>(server_id: u64, listener: L) -> RegisterServer<
-    L,
-    C,
-    ML,
-    RL,
-> where
+#[allow(unused_variables)]
+pub fn create_server<L, C, ML, RL>(
+    server_ids: &HashSet<u64>,
+    my_server_id: u64,
+    listener: L,
+) -> RegisterServer<L, C, ML, RL> where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
     ML: MutLinearizer<RegisterWrite>,
     RL: ReadLinearizer<RegisterRead>,
- {
-    // XXX: this comes from the limitation on run_modelled_server
-    let ghost server_ids = arbitrary::<Set<u64>>().insert(server_id);
+
+    requires
+        server_ids@.contains(my_server_id),
+{
     let tracked state_inv;
     proof {
-        let tracked (s, v) = invariants::get_system_state::<ML, RL>(server_ids);
+        let tracked (s, v) = invariants::get_system_state::<ML, RL>(server_ids@);
         state_inv = s;
     }
-    RegisterServer::new(listener, server_id, Tracked(state_inv))
+    RegisterServer::new(listener, my_server_id, Tracked(state_inv))
 }
 
 } // verus!

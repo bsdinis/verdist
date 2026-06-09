@@ -367,7 +367,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         }
         replies.lemma_max_min();
         assert(replies.spec_min_timestamp() <= replies.spec_max_timestamp());
-        vlib::veprintln!("\n[client|{:>3}]: got first round reads quorum_size: {} agree_with_max: {:?}\n", self.id, self.quorum_size(), replies.agree_with_max());
+        vlib::veprintln!("[client|{:>3}]: got first round reads quorum_size: {}, agree_with_max: {:?}", self.id, self.quorum_size(), replies.agree_with_max());
         // check early return
         if replies.agree_with_max().len() >= self.quorum_size() {
             vlib::veprintln!("[client|{:>3}]: first round is unanimous", self.id);
@@ -498,7 +498,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             },
         };
 
-        vlib::veprintln!("\n[client|{:>3}]: got read writeback round quorum_size: {} agree_with_max: {:?}\n", self.id, self.quorum_size(), wb_replies.agree_with_max());
+        vlib::veprintln!("[client|{:>3}]: got read writeback round quorum_size: {}, agree_with_max: {:?}", self.id, self.quorum_size(), wb_replies.agree_with_max());
 
         let tracked comp;
         wb_replies.lemma_quorum();
@@ -732,7 +732,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             }
         };
 
-        vlib::veprintln!("\n[client|{:>3}]: got write get timestamp round quorum_size: {} quorum: {:?} max_timestamp: {:?}\n", self.id, self.quorum_size()
+        vlib::veprintln!("[client|{:>3}]: got write get timestamp round quorum_size: {} quorum: {:?} max_timestamp: {:?}", self.id, self.quorum_size()
             , get_ts_replies.get_ts_replies(), get_ts_replies.max_resp().timestamp() );
 
         assert(get_ts_replies.constant() == get_ts_pred@);
@@ -882,7 +882,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 },
             };
 
-            vlib::veprintln!("\n[client|{:>3}]: got write quorum quorum_size: {} quorum: {:?}\n", self.id, self.quorum_size() , write_replies.write_replies());
+            vlib::veprintln!("[client|{:>3}]: got write quorum quorum_size: {} quorum: {:?}", self.id, self.quorum_size() , write_replies.write_replies());
 
             let exec_comp;
             write_replies.lemma_quorum();

@@ -1,0 +1,19 @@
+n_reads = 4
+n_writes = 3
+
+network = "modelled"
+
+[[server]]
+id = 1
+
+[[server]]
+id = 2
+
+[[server]]
+id = 3
+
+[[server]]
+id = 4
+
+[[server]]
+id = 5

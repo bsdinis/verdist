@@ -12,7 +12,9 @@ check:
 [default]
 run-examples:
     for name in {{examples}}; \
-        cargo run -p {$name}-example --bin {$name}_client  -- --network modelled; \
+        for config in (rg -l  '^network = "modelled"$' sample_configs/{$name}*.toml); \
+            cargo run -p {$name}-example --bin {$name}_client  -- --config {$config}; \
+        end; \
     end
 
 verify:

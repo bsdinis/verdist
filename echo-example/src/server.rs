@@ -23,7 +23,10 @@ fn main() {
             echo_example::server::run_server(args.server_id, listener);
         }
         cli::NetworkType::Tcp => {
-            unimplemented!()
+            let listener =
+                verdist::network::tcp::TcpListener::listen(args.server_addr, args.server_id)
+                    .expect("failed to create listener");
+            echo_example::server::run_server(args.server_id, listener);
         }
     }
 }

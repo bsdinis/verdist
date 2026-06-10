@@ -41,10 +41,6 @@ pub struct ClientParsedArgs {
     #[arg(long)]
     pub n_writes: Option<u64>,
 
-    /// Whether to introduce artificial delays
-    #[arg(long)]
-    pub delay: bool,
-
     /// Id of the client
     #[arg(long)]
     pub client_id: Option<u64>,
@@ -74,9 +70,6 @@ pub struct ClientArgs {
 
     /// Number of writes to perform
     pub n_writes: u64,
-
-    /// Whether to introduce artificial delays
-    pub delay: bool,
 
     /// Id of the client
     pub client_id: u64,
@@ -131,16 +124,12 @@ pub struct ExServerArgs(ServerArgs);
 impl ClientArgs {
     #[verifier::external_body]
     pub fn parse() -> Result<Self, String> {
-        let mut args = ClientParsedArgs::parse();
+        let args = ClientParsedArgs::parse();
         let config = crate::config::Config::parse(args.config)?;
-        if let Some(delay) = config.delay {
-            args.delay = delay;
-        }
         Ok(
             ClientArgs {
                 n_reads: args.n_reads.or(config.n_reads).unwrap_or(2),
                 n_writes: args.n_writes.or(config.n_writes).unwrap_or(1),
-                delay: args.delay,
                 client_id: args.client_id.or(config.client_id).unwrap_or(42),
                 client_addr: args.client_addr.or(config.client_addr).unwrap_or(
                     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),

@@ -28,12 +28,7 @@ use invariant::get_invariant_state;
 
 verus! {
 
-const REQUEST_LATENCY_DEFAULT_MS: u64 = 100;
-
-const REQUEST_STDDEV_DEFAULT_MS: u64 = 200;
-
 fn connect<C, Conn>(
-    args: &ClientArgs,
     connector: &Conn,
     client_id: u64,
     #[allow(unused_variables)]
@@ -58,7 +53,7 @@ fn connect<C, Conn>(
     let ghost constant = ChannelInv {
         request_map_id: state_inv@.constant().request_map_ids.request_auth_id,
     };
-    let mut channel = connector.connect(
+    let channel = connector.connect(
         client_id,
         |_connector, _client_id| -> (x: Ghost<ChannelInv>)
             ensures
@@ -66,12 +61,6 @@ fn connect<C, Conn>(
             { Ghost(constant) },
     )?;
     assume(channel.spec_id().0 == client_id);  // TODO(verdist/connector): connector spec is lacking
-    if args.delay {
-        channel.add_latency(
-            std::time::Duration::from_millis(REQUEST_LATENCY_DEFAULT_MS),
-            std::time::Duration::from_millis(REQUEST_STDDEV_DEFAULT_MS),
-        );
-    }
     Ok(BufChannel::new(channel))
 }
 
@@ -90,7 +79,7 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connector: &Conn) -> Result<(),
     #[allow(unused)]
     let (request_ctr_token, state_inv) = get_invariant_state(args.client_id, request_ctr_perm);
 
-    let channel = connect(&args, connector, args.client_id, &state_inv)?;
+    let channel = connect(connector, args.client_id, &state_inv)?;
 
     let mut client = EchoClient::new(
         channel,

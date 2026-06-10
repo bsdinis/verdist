@@ -1,5 +1,3 @@
-use std::sync::atomic::AtomicBool;
-
 use crossbeam_channel::unbounded;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
@@ -46,9 +44,6 @@ pub struct ClientChannel<K, R, S> {
     rx: Receiver<R>,
     client_id: u64,
     server_id: u64,
-    faulty: AtomicBool,
-    avg_latency: std::time::Duration,
-    stddev_latency: std::time::Duration,
 }
 
 /// Channel TO Server
@@ -63,9 +58,6 @@ pub struct ServerChannel<K, R, S> {
     rx: Receiver<R>,
     client_id: u64,
     server_id: u64,
-    faulty: AtomicBool,
-    avg_latency: std::time::Duration,
-    stddev_latency: std::time::Duration,
 }
 
 impl<K, R, S> ClientChannel<K, R, S> {
@@ -77,16 +69,7 @@ impl<K, R, S> ClientChannel<K, R, S> {
         tx: Sender<S>,
         rx: Receiver<R>,
     ) -> Self {
-        ClientChannel {
-            pred,
-            tx,
-            rx,
-            client_id,
-            server_id,
-            faulty: AtomicBool::new(false),
-            avg_latency: Default::default(),
-            stddev_latency: Default::default(),
-        }
+        ClientChannel { pred, tx, rx, client_id, server_id }
     }
 }
 
@@ -99,16 +82,7 @@ impl<K, R, S> ServerChannel<K, R, S> {
         tx: Sender<S>,
         rx: Receiver<R>,
     ) -> Self {
-        ServerChannel {
-            pred,
-            tx,
-            rx,
-            server_id,
-            client_id,
-            faulty: AtomicBool::new(false),
-            avg_latency: Default::default(),
-            stddev_latency: Default::default(),
-        }
+        ServerChannel { pred, tx, rx, server_id, client_id }
     }
 }
 
@@ -143,21 +117,13 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
 
     #[verifier::external_body]
     fn try_recv(&self) -> Result<R, TryRecvError> {
-        if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
-            self.wait();
-            let r = self.rx.try_recv()?;
-            Ok(r)
-        } else {
-            Err(TryRecvError::Empty)
-        }
+        let r = self.rx.try_recv()?;
+        Ok(r)
     }
 
     #[verifier::external_body]
     fn send(&self, v: &S) -> Result<(), SendError> {
-        if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
-            self.wait();
-            self.tx.send(v.clone())?;
-        }
+        self.tx.send(v.clone())?;
         Ok(())
     }
 
@@ -169,17 +135,6 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
     #[verifier::external_body]
     closed spec fn spec_id(self) -> Self::Id {
         (self.server_id, self.client_id)
-    }
-
-    #[verifier::external_body]
-    fn add_latency(&mut self, avg: std::time::Duration, stddev: std::time::Duration) {
-        self.avg_latency = avg;
-        self.stddev_latency = stddev;
-    }
-
-    #[verifier::external_body]
-    fn delay(&self) -> (std::time::Duration, std::time::Duration) {
-        (self.avg_latency, self.stddev_latency)
     }
 }
 
@@ -202,20 +157,12 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
 
     #[verifier::external_body]
     fn try_recv(&self) -> Result<R, TryRecvError> {
-        if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
-            self.wait();
-            self.rx.try_recv().map_err(|e| e.into())
-        } else {
-            Err(TryRecvError::Empty)
-        }
+        self.rx.try_recv().map_err(|e| e.into())
     }
 
     #[verifier::external_body]
     fn send(&self, v: &S) -> Result<(), SendError> {
-        if !self.faulty.load(std::sync::atomic::Ordering::SeqCst) {
-            self.wait();
-            self.tx.send(v.clone())?;
-        }
+        self.tx.send(v.clone())?;
         Ok(())
     }
 
@@ -227,17 +174,6 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
     #[verifier::external_body]
     closed spec fn spec_id(self) -> Self::Id {
         (self.client_id, self.server_id)
-    }
-
-    #[verifier::external_body]
-    fn add_latency(&mut self, avg: std::time::Duration, stddev: std::time::Duration) {
-        self.avg_latency = avg;
-        self.stddev_latency = stddev;
-    }
-
-    #[verifier::external_body]
-    fn delay(&self) -> (std::time::Duration, std::time::Duration) {
-        (self.avg_latency, self.stddev_latency)
     }
 }
 

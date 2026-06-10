@@ -42,6 +42,16 @@ pub struct ExIpv6Addr(std::net::Ipv6Addr);
 #[verifier::external_type_specification]
 #[verifier::external_body]
 #[allow(dead_code)]
+pub struct ExTcpListener(std::net::TcpListener);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
+pub struct ExTcpStream(std::net::TcpStream);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
 pub struct ExUdpSocket(std::net::UdpSocket);
 
 pub assume_specification[ std::net::UdpSocket::local_addr ](s: &std::net::UdpSocket) -> (r:
@@ -62,6 +72,32 @@ pub assume_specification[ std::net::UdpSocket::peer_addr ](s: &std::net::UdpSock
 
 pub assume_specification[ std::net::UdpSocket::set_nonblocking ](
     s: &std::net::UdpSocket,
+    b: bool,
+) -> (r: std::io::Result<()>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
+pub assume_specification[ std::net::TcpStream::local_addr ](s: &std::net::TcpStream) -> (r:
+    std::io::Result<std::net::SocketAddr>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
+pub assume_specification[ std::net::TcpStream::peer_addr ](s: &std::net::TcpStream) -> (r:
+    std::io::Result<std::net::SocketAddr>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
+pub assume_specification[ std::net::TcpStream::set_nonblocking ](
+    s: &std::net::TcpStream,
     b: bool,
 ) -> (r: std::io::Result<()>)
     ensures

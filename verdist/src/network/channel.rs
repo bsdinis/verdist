@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 use crate::network::error::ConnectError;
 use crate::network::error::SendError;
@@ -8,28 +7,10 @@ use crate::network::error::TryListenError;
 use crate::network::error::TryRecvError;
 use crate::rpc::proto::TaggedMessage;
 
-use rand_distr::{Distribution, Normal};
-
 use vstd::prelude::*;
 use vstd::rwlock::RwLock;
 
 verus! {
-
-#[verifier::external_body]
-fn park_thread(mean: Duration, std_dev: Duration) {
-    let normal = Normal::new(mean.as_secs_f64(), std_dev.as_secs_f64()).expect(
-        "should be able to construct normal distribution",
-    );
-    let wait = normal.sample(&mut rand::rng());
-    if wait.is_sign_positive() {
-        std::thread::sleep(Duration::from_secs_f64(wait));
-    }
-}
-
-#[verifier::external_body]
-fn default_delay() -> (Duration, Duration) {
-    Default::default()
-}
 
 pub trait ChannelInvariant<K, Id, R, S> {
     spec fn recv_inv(k: K, id: Id, r: R) -> bool;
@@ -103,23 +84,6 @@ pub trait Channel {
     ;
 
     spec fn spec_id(self) -> Self::Id;
-
-    fn add_latency(&mut self, _avg: Duration, _stddev: Duration)
-        ensures
-            final(self).spec_id() == old(self).spec_id(),
-            final(self).constant() == old(self).constant(),
-        no_unwind
-    {
-    }
-
-    fn delay(&self) -> (Duration, Duration) {
-        default_delay()
-    }
-
-    fn wait(&self) {
-        let (mean, std_dev) = self.delay();
-        park_thread(mean, std_dev);
-    }
 
     spec fn constant(self) -> Self::K;
 }
@@ -254,21 +218,6 @@ impl<C> Channel for BufChannel<C> where C: Channel, C::R: TaggedMessage {
 
     fn send(&self, v: &Self::S) -> Result<(), SendError> {
         self.channel.send(v)
-    }
-
-    fn wait(&self) {
-        self.channel.wait();
-    }
-
-    fn delay(&self) -> (Duration, Duration) {
-        self.channel.delay()
-    }
-
-    fn add_latency(&mut self, avg: Duration, stddev: Duration) {
-        proof {
-            use_type_invariant(&*self);
-        }
-        self.channel.add_latency(avg, stddev);
     }
 }
 

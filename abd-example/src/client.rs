@@ -46,7 +46,17 @@ fn main() {
             abd_example::run_client(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
-            unimplemented!()
+            let connectors = args
+                .servers
+                .values()
+                .map(|server_conf| {
+                    let addr = server_conf.addr.expect("server addr should be set");
+                    verdist::network::tcp::TcpConnector::new(addr)
+                        .expect("failed to create connector")
+                })
+                .collect::<Vec<_>>();
+
+            abd_example::run_client(args, &connectors).expect("run_client: error");
         }
     }
 }

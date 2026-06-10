@@ -33,7 +33,7 @@ echo = { path = "./echo" }
 specs = { path = "./specs" }
 verdist = { path = "./verdist" }
 vlib = { path = "./vlib" }
-vstd = { git = "https://github.com/verus-lang/verus" }
+vstd = { path = "../verus/source/vstd" }
 
 [workspace.lints.clippy]
 explicit_iter_loop = "warn"
@@ -50,5 +50,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_k
 [profile.release]
 strip = "debuginfo"
 
-[patch."https://github.com/verus-lang/verus"]
-vstd = { path = "../verus/source/vstd" }

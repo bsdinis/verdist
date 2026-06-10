@@ -11,12 +11,32 @@ use crate::network::channel::Listener;
 use crate::network::error::ConnectError;
 use crate::network::error::TryListenError;
 
+// TODO(fix_udp):
+//
+// Currently, UDP has to be shimmied like this, with an explicit listening and connecting step
+// due to the way the servers are architected.
+//
+// A server doesn't know the type of listeners it has, and this forces it to have explicit
+// listening and poll steps.
+//
+// The solution is to provide a batteries included Servers, which takes in a Service.
+// External applications can then create the Server with the type of network they want,
+// and provide a listener;
+//
+// The Service trait would then be something like this
+// ```rust
+// trait Service<Id, R, S> {
+//      fn handle(conn_id: Id, request: R) -> S
+// }
+// ```
+//
+// Things to figure out:
+//  - pre and post conditions
+
 #[cfg(verus_only)]
 use vlib::serde::ExDeserialize;
 #[cfg(verus_only)]
 use vlib::serde::ExSerialize;
-// #[cfg(verus_only)]
-// use vlib::std::error::ExError;
 
 use vstd::prelude::*;
 

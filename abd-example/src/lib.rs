@@ -38,18 +38,11 @@ use invariant::get_invariant_state;
 
 verus! {
 
-const REQUEST_LATENCY_DEFAULT_MS: u64 = 1000;
-
-const REQUEST_STDDEV_DEFAULT_MS: u64 = 2000;
-
-fn connect<C, Conn>(args: &ClientArgs, connector: &Conn, client_id: u64) -> Result<
-    BufChannel<C>,
-    ConnectError,
-> where
+fn connect<C, Conn>(connector: &Conn, client_id: u64) -> Result<BufChannel<C>, ConnectError> where
     Conn: Connector<C>,
     C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
  {
-    let mut channel = connector.connect(
+    let channel = connector.connect(
         client_id,
         |_connector, _client_id|
             Ghost(
@@ -61,16 +54,10 @@ fn connect<C, Conn>(args: &ClientArgs, connector: &Conn, client_id: u64) -> Resu
                 },
             ),
     )?;
-    if args.delay {
-        channel.add_latency(
-            std::time::Duration::from_millis(REQUEST_LATENCY_DEFAULT_MS),
-            std::time::Duration::from_millis(REQUEST_STDDEV_DEFAULT_MS),
-        );
-    }
     Ok(BufChannel::new(channel))
 }
 
-fn connect_all<C, Conn>(args: &ClientArgs, connectors: &[Conn], client_id: u64) -> (r: Result<
+fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
     Vec<BufChannel<C>>,
     ConnectError,
 >) where
@@ -88,7 +75,7 @@ fn connect_all<C, Conn>(args: &ClientArgs, connectors: &[Conn], client_id: u64) 
 {
     let mut v = Vec::with_capacity(connectors.len());
     for connector in connectors.iter() {
-        let conn = connect(args, connector, client_id)?;
+        let conn = connect(connector, client_id)?;
         v.push(conn);
     }
 
@@ -124,7 +111,7 @@ pub fn run_client<C, Conn, 'a>(args: ClientArgs, connectors: &[Conn]) -> Result<
         OwnedReadPerm,
     >(&server_ids, args.client_id, client_ctr_perm, request_ctr_perm);
 
-    let pool = connect_all(&args, connectors, args.client_id)?;
+    let pool = connect_all(connectors, args.client_id)?;
     vlib::veprintln!("[client|{:>3}]: finished connecting\n", args.client_id);
     let pool = FlawlessPool::new(pool);
     assert(pool.spec_len() == connectors.len());

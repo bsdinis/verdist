@@ -26,7 +26,9 @@ fn main() {
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
-            unimplemented!()
+            let connector = verdist::network::tcp::TcpConnector::new(args.server_addr)
+                .expect("failed to create connector");
+            echo_example::run_client(args, &connector).expect("run_client: error");
         }
     }
 }

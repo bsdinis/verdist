@@ -1,0 +1,16 @@
+n_reads = 4
+n_writes = 3
+
+network = "tcp"
+
+[[server]]
+id = 1
+addr = "127.0.0.1:6651"
+
+[[server]]
+id = 2
+addr = "127.0.0.1:6652"
+
+[[server]]
+id = 3
+addr = "127.0.0.1:6653"

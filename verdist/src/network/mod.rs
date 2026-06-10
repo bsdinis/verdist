@@ -1,4 +1,15 @@
 pub mod channel;
 pub mod error;
-pub mod modelled;
-pub mod udp;
+
+mod impls;
+
+pub mod modelled {
+    pub use super::impls::modelled::*;
+}
+pub mod udp {
+    pub use super::impls::udp::*;
+}
+
+pub mod tcp {
+    pub use super::impls::tcp::*;
+}

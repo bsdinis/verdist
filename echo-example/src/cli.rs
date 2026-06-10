@@ -26,10 +26,6 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = 3)]
     pub n_ops: u64,
 
-    /// Whether to introduce artificial delays
-    #[arg(long)]
-    pub delay: bool,
-
     /// Id of the client
     #[arg(long, default_value_t = 1)]
     pub client_id: u64,
@@ -95,9 +91,6 @@ impl ClientArgs {
             let config = crate::config::Config::parse(config_path)?;
             if let Some(n_ops) = config.n_ops {
                 mself.n_ops = n_ops;
-            }
-            if let Some(delay) = config.delay {
-                mself.delay = delay;
             }
             if let Some(client_addr) = config.client_addr {
                 mself.client_addr = client_addr;

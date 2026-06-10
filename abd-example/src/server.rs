@@ -28,7 +28,13 @@ fn main() {
             );
         }
         cli::NetworkType::Tcp => {
-            unimplemented!()
+            let listener = verdist::network::tcp::TcpListener::listen(args.addr(), args.server_id)
+                .expect("failed to create listener");
+            abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                &server_ids,
+                args.server_id,
+                listener,
+            );
         }
     }
 }

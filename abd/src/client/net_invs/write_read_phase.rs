@@ -22,8 +22,6 @@ use verdist::rpc::proto::TaggedMessage;
 use verdist::rpc::replies::ReplyAccumulator;
 
 use vstd::invariant::InvariantPredicate;
-#[cfg(verus_only)]
-use vstd::map_lib::lemma_values_finite;
 use vstd::prelude::*;
 use vstd::resource::map::GhostPersistentSubmap;
 use vstd::resource::Loc;
@@ -182,7 +180,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         servers: ServerUniverse,
         client_id: u64,
     ) -> bool {
-        &&& replies.finite()
         &&& forall|cid| #[trigger] replies.contains(cid) ==> cid.0 == client_id
         &&& replies.map(|id: (u64, u64)| id.1) <= servers.dom()
     }
@@ -206,7 +203,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         replies: Set<C::Id>,
         max_resp: Option<GetTimestampResponse>,
     ) -> bool {
-        &&& agree_with_max.finite()
         &&& agree_with_max.is_empty() <==> replies.is_empty()
         &&& max_resp is None <==> agree_with_max.is_empty()
         &&& agree_with_max <= replies.map(|id: (u64, u64)| id.1)
@@ -337,7 +333,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     pub fn lemma_quorum(&self)
         ensures
             self.quorum().len() == self.replies().len(),
-            self.quorum().finite(),
             self.quorum() <= self.server_locs().dom(),
     {
         proof {
@@ -360,21 +355,16 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             use_type_invariant(self);
             if self.servers().valid_quorum(self.quorum()) {
                 let max = self.spec_max_timestamp();
-                let quorum_map = self.servers().map.restrict(self.quorum());
-                assert(quorum_map.dom() == self.quorum());  // XXX: load bearing
-                lemma_values_finite(quorum_map);
-                quorum_map.values().lemma_map_finite(
-                    |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-                );
-                let quorum_vals = self.servers().quorum_vals(self.quorum());
-                assume(quorum_vals.len() > 0);  // TODO(verus): this needs a verus lemma
-                quorum_vals.find_unique_maximal_ensures(ServerUniverse::ts_leq());
+                let witness = self.agree_with_max@.choose();
+                self.servers().lemma_quorum_witness_implies_lb(self.quorum(), witness);
+                assert(self.servers().quorum_timestamp(self.quorum()) >= max);
 
-                // triggers
-                let witness = choose|id| #[trigger]
-                    quorum_map.contains_key(id) && self.servers()[id]@@.timestamp() == max;
-                assert(quorum_map.values().contains(self.servers()[witness]));
-                assert(vstd::relations::is_maximal(ServerUniverse::ts_leq(), max, quorum_vals));
+                vstd::assert_by_contradiction!(self.servers().quorum_timestamp(self.quorum()) <= max, {
+                    assert(self.servers().quorum_timestamp(self.quorum()) > max);
+                    let fake_witness = self.servers().lemma_quorum_timestamp_witness(self.quorum());
+                    assert(self.quorum().contains(fake_witness));
+                    assert(self.servers()[fake_witness]@@.timestamp() <= max);
+                });
             }
         }
     }

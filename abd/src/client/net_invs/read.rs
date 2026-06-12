@@ -21,8 +21,6 @@ use verdist::rpc::replies::ReplyAccumulator;
 #[cfg(verus_only)]
 use verdist::rpc::proto::TaggedMessage;
 use vstd::invariant::InvariantPredicate;
-#[cfg(verus_only)]
-use vstd::map_lib::lemma_values_finite;
 use vstd::prelude::*;
 use vstd::resource::map::GhostPersistentSubmap;
 use vstd::resource::Loc;
@@ -216,7 +214,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     closed spec fn replies_inv(replies: Set<C::Id>, client_id: u64) -> bool {
-        &&& replies.finite()
         &&& forall|cid| #[trigger] replies.contains(cid) ==> cid.0 == client_id
     }
 
@@ -261,7 +258,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         wb_replies: Set<C::Id>,
         max_resp: Option<GetResponse>,
     ) -> bool {
-        &&& agree_with_max.finite()
         &&& agree_with_max.is_empty() <==> get_replies.is_empty()
         &&& max_resp is None <==> agree_with_max.is_empty()
         &&& agree_with_max <= get_replies.union(wb_replies).map(|id: (u64, u64)| id.1)
@@ -448,7 +444,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     // PROOF
     pub fn lemma_quorum(&self)
         ensures
-            self.quorum().finite(),
             self.quorum() <= self.server_locs().dom(),
     {
         proof {
@@ -459,7 +454,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     pub fn lemma_first_quorum(&self)
         ensures
             self.first_quorum().len() == self.spec_get_replies().len(),
-            self.first_quorum().finite(),
             self.first_quorum() <= self.server_locs().dom(),
     {
         proof {
@@ -503,10 +497,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 let quorum_map = self.servers().map.restrict(self.quorum());
                 assert(quorum_map.dom() == self.quorum());  // XXX: load bearing
                 let quorum_vals = self.servers().quorum_vals(self.quorum());
-                lemma_values_finite(quorum_map);
-                quorum_map.values().lemma_map_finite(
-                    |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-                );
                 assume(quorum_vals.len() > 0);  // TODO(verus): this needs a verus lemma
                 quorum_vals.find_unique_maximal_ensures(ServerUniverse::ts_leq());
             }
@@ -1120,7 +1110,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             final(servers)@.locs() == old(servers)@.locs(),
             final(server_tokens)@.id() == old(server_tokens)@.id(),
             final(wb_replies)@ == old(wb_replies)@.insert(id),
-            final(wb_replies)@.finite(),
             Self::server_invs(
                 final(servers)@,
                 get_request@.get().servers(),

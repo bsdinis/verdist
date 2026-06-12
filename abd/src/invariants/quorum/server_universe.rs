@@ -34,7 +34,6 @@ impl ServerUniverse {
     }
 
     pub open spec fn inv(self) -> bool {
-        &&& self.map.dom().finite()
         &&& forall|id| #[trigger]
             self.contains_key(id) && self[id]@@ is FullRightToAdvance ==> self[id]@@.timestamp()
                 == Timestamp::spec_default()
@@ -107,7 +106,6 @@ impl ServerUniverse {
         recommends
             self.inv(),
     {
-        &&& q.finite()
         &&& !q.is_empty()
         &&& q <= self.dom()
         &&& 2 * q.len() > self.map.len()
@@ -133,8 +131,9 @@ impl ServerUniverse {
             self.inv(),
             self.valid_quorum(q),
     {
-        // TODO: proofs are much nicer if the order of values().map() is reversed
-        self.map.restrict(q).values().map(|r: Tracked<MonotonicTimestampResource>| r@@.timestamp())
+        self.map.restrict(q).map_values(
+            |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
+        ).values()
     }
 
     pub proof fn split_auth(tracked &mut self, server_id: u64) -> (tracked r:
@@ -395,7 +394,6 @@ impl ServerUniverse {
             r.0 == self.quorum_vals(q),
             r.1 == self.quorum_timestamp(q),
             forall|idx: u64| #[trigger] q.contains(idx) ==> r.0.contains(self[idx]@@.timestamp()),
-            r.0.finite(),
             r.0.len() <= q.len(),
     {
         let ts_leq = Self::ts_leq();
@@ -406,40 +404,28 @@ impl ServerUniverse {
         assert forall|idx: u64| #[trigger] q.contains(idx) implies vals.contains(
             self[idx]@@.timestamp(),
         ) by {
-            assert(self.map.restrict(q).contains_key(idx));
-            assert(self.map.restrict(q).values().contains(self[idx]));
-        }
-        assert(vals.finite()) by {
-            assert(self.map.dom().finite());
-            axiom_set_intersect_finite(self.map.dom(), q);
-            assert(self.map.restrict(q).dom() == self.map.dom().intersect(q));
-            assert(self.map.restrict(q).dom().finite());
-            lemma_values_finite(self.map.restrict(q));
-            self.map.restrict(q).values().lemma_map_finite(
-                |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-            );
+            assert(lb_map.contains_key(idx));
+            assert(lb_map.values().contains(self[idx]));
         }
 
-        // lb_map.dom().len() <= q.len()
-        assert(lb_map.dom() == self.map.dom().intersect(q));
         assert(lb_map.dom() <= q);
-        assert(lb_map.dom().finite());
         lemma_len_subset(lb_map.dom(), q);
         assert(lb_map.dom().len() <= q.len());
 
-        // lb_map.values().len() <= lb_map.dom().len()
         lb_map.lemma_values_len();
         assert(lb_map.values().len() <= lb_map.dom().len());
-        assert(lb_map.values().finite());
 
-        // vals <= lb_map.values().len()
+        vlib::map::lemma_map_values_commutes(
+            lb_map,
+            |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
+        );
         lemma_map_size_bound(
             lb_map.values(),
             vals,
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
         );
-
         assert(vals.len() <= q.len());
+
         (vals, ts)
     }
 
@@ -454,9 +440,9 @@ impl ServerUniverse {
         let ts_leq = Self::ts_leq();
         let (vals, ts) = self.lemma_vals(q);
 
-        self.map.restrict(q).values().map(
+        self.map.restrict(q).map_values(
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-        ).find_unique_maximal_ensures(ts_leq);
+        ).values().find_unique_maximal_ensures(ts_leq);
         vals.lemma_maximal_equivalent_greatest(ts_leq, ts);
 
         assert(forall|idx: u64| #[trigger] q.contains(idx) ==> ts_leq(self[idx]@@.timestamp(), ts));
@@ -473,9 +459,9 @@ impl ServerUniverse {
         let ts_leq = Self::ts_leq();
         let (vals, ts) = self.lemma_vals(q);
 
-        self.map.restrict(q).values().map(
+        self.map.restrict(q).map_values(
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-        ).find_unique_maximal_ensures(ts_leq);
+        ).values().find_unique_maximal_ensures(ts_leq);
         vals.lemma_maximal_equivalent_greatest(ts_leq, ts);
 
         let witness_idx = choose|idx: u64| #[trigger]
@@ -485,7 +471,7 @@ impl ServerUniverse {
         witness_idx
     }
 
-    proof fn lemma_quorum_witness_implies_lb(self, q: Quorum, witness_idx: u64)
+    pub proof fn lemma_quorum_witness_implies_lb(self, q: Quorum, witness_idx: u64)
         requires
             self.inv(),
             self.valid_quorum(q),
@@ -496,9 +482,9 @@ impl ServerUniverse {
         let ts_leq = Self::ts_leq();
         let (vals, ts) = self.lemma_vals(q);
 
-        self.map.restrict(q).values().map(
+        self.map.restrict(q).map_values(
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
-        ).find_unique_maximal_ensures(ts_leq);
+        ).values().find_unique_maximal_ensures(ts_leq);
         vals.lemma_maximal_equivalent_greatest(ts_leq, ts);
 
         assert(forall|idx: u64| #[trigger] q.contains(idx) ==> ts_leq(self[idx]@@.timestamp(), ts));
@@ -906,7 +892,6 @@ impl ServerUniverse {
             other.inv(),
             other.is_auth(),
             old(self).locs() == other.locs(),
-            visited.finite(),
             visited <= old(self).dom(),
             forall|id| #[trigger]
                 visited.contains(id) ==> old(self)[id]@@.timestamp() <= other[id]@@.timestamp(),
@@ -989,7 +974,7 @@ impl ServerUniverse {
             lemma_len_subset(u, self.dom());
         });
 
-        lemma_disjoint_iff_empty_intersection(q1, q2);
+        lemma_set_disjoint_iff_empty_intersection(q1, q2);
         let witness_idx = choose|idx: u64| #[trigger] q1.contains(idx) && q2.contains(idx);
         witness_idx
     }
@@ -1034,8 +1019,6 @@ impl ServerUniverse {
         tracked other: &mut Map<u64, Tracked<MonotonicTimestampResource>>,
     )
         requires
-            m.dom().finite(),
-            old(other).dom().finite(),
             forall|k| #[trigger]
                 old(other).contains_key(k) ==> {
                     &&& m.contains_key(k) && old(other)[k]@@ is LowerBound && old(
@@ -1045,7 +1028,6 @@ impl ServerUniverse {
             old(other).map_values(|r: Tracked<MonotonicTimestampResource>| r@.loc())
                 <= m.map_values(|r: Tracked<MonotonicTimestampResource>| r@.loc()),
         ensures
-            final(other).dom().finite(),
             final(other).dom() == m.dom(),
             forall|k| #[trigger]
                 final(other).contains_key(k) ==> {

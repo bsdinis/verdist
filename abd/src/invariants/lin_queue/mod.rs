@@ -154,12 +154,6 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     // - always true, asserts facts that are always true
     pub closed spec fn basic_inv(&self) -> bool {
         &&& self.watermark@ is FullRightToAdvance
-        &&& self.write_token_map@.dom().finite()
-        &&& self.read_token_map@.dom().finite()
-        &&& self.completed_writes.dom().finite()
-        &&& self.completed_reads.dom().finite()
-        &&& self.pending_writes.dom().finite()
-        &&& self.pending_reads.dom().finite()
         &&& self.committed_to@.contains_key(self.watermark@.timestamp())
         &&& forall|ts: Timestamp| #[trigger]
             self.committed_to@.contains_key(ts) ==> ts <= self.watermark@.timestamp()
@@ -623,7 +617,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
             token.value().op == op,
             token.value().min_ts.loc() == final(self).watermark_id(),
             token.value().min_ts@.timestamp() == final(self).watermark(),
-        opens_invariants Set::new(|id: int| id != super::state_inv_id())
+        opens_invariants ISet::new(|id: int| id != super::state_inv_id())
     {
         let key = (value, self.next_read_op);
         let tracked v = ReadTokenVal { lin, op, min_ts: self.watermark.extract_lower_bound() };
@@ -718,7 +712,6 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         requires
             self.inv(),
         ensures
-            self.pending_writes_up_to(max_timestamp).finite(),
             self.pending_writes_up_to(max_timestamp) <= self.pending_writes.dom(),
             self.pending_writes_up_to(max_timestamp).len() <= self.pending_writes.dom().len(),
     {
@@ -729,7 +722,6 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         (Option<u64>, nat),
     >)
         recommends
-            self.pending_reads().dom().finite(),
             self.inv() || self.current_value() == value,
     {
         self.pending_reads().dom().filter(|k: (Option<u64>, nat)| k.0 == value)
@@ -737,10 +729,8 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
 
     proof fn lemma_pending_reads(self, value: Option<u64>)
         requires
-            self.pending_reads.dom().finite(),
             self.inv() || self.current_value() == value,
         ensures
-            self.pending_reads_with_value(value).finite(),
             self.pending_reads_with_value(value) <= self.pending_reads.dom(),
             self.pending_reads_with_value(value).len() <= self.pending_reads.dom().len(),
             forall|x: (Option<u64>, nat)| #[trigger]
@@ -783,11 +773,10 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
             r@.timestamp() == final(self).watermark(),
             r@ is LowerBound,
         decreases old(self).pending_writes_up_to(max_timestamp).len(),
-        opens_invariants Set::new(|id: int| id != super::state_inv_id())
+        opens_invariants ISet::new(|id: int| id != super::state_inv_id())
     {
         let pending_writes = self.pending_writes_up_to(max_timestamp);
         self.lemma_pending_writes(max_timestamp);
-        assert(pending_writes.finite());
 
         if pending_writes.len() == 0 {
             if self.pending_writes.contains_key(max_timestamp) {
@@ -875,7 +864,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
                 old(self).pending_reads_with_value(value),
             ),
         decreases old(self).pending_reads_with_value(value).len(),
-        opens_invariants Set::new(|id: int| id != super::state_inv_id())
+        opens_invariants ISet::new(|id: int| id != super::state_inv_id())
     {
         let ghost old_watermark = self.watermark@.timestamp();
         let pending_reads = self.pending_reads_with_value(value);

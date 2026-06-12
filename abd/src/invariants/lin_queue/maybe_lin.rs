@@ -72,10 +72,10 @@ impl<ML: MutLinearizer<RegisterWrite>> MaybeWriteLinearized<ML, ML::Completion> 
         }
     }
 
-    pub open spec fn namespaces(self) -> Set<int> {
+    pub open spec fn namespaces(self) -> ISet<int> {
         match self {
             MaybeWriteLinearized::Linearizer { lin, .. } => lin.namespaces(),
-            MaybeWriteLinearized::Completion { .. } => Set::empty(),
+            MaybeWriteLinearized::Completion { .. } => ISet::empty(),
         }
     }
 
@@ -140,10 +140,10 @@ impl<RL: ReadLinearizer<RegisterRead>> MaybeReadLinearized<RL, RL::Completion> {
         }
     }
 
-    pub open spec fn namespaces(self) -> Set<int> {
+    pub open spec fn namespaces(self) -> ISet<int> {
         match self {
             MaybeReadLinearized::Linearizer { lin, .. } => lin.namespaces(),
-            MaybeReadLinearized::Completion { .. } => Set::empty(),
+            MaybeReadLinearized::Completion { .. } => ISet::empty(),
         }
     }
 

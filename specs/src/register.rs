@@ -117,8 +117,8 @@ pub struct OwnedReadPerm {
 impl ReadLinearizer<RegisterRead> for OwnedReadPerm {
     type Completion = GhostVar<Option<u64>>;
 
-    open spec fn namespaces(self) -> Set<int> {
-        Set::empty()
+    open spec fn namespaces(self) -> ISet<int> {
+        ISet::empty()
     }
 
     open spec fn pre(self, op: RegisterRead) -> bool {
@@ -186,8 +186,8 @@ pub struct OwnedWritePerm {
 impl MutLinearizer<RegisterWrite> for OwnedWritePerm {
     type Completion = GhostVar<Option<u64>>;
 
-    open spec fn namespaces(self) -> Set<int> {
-        Set::empty()
+    open spec fn namespaces(self) -> ISet<int> {
+        ISet::empty()
     }
 
     open spec fn pre(self, op: RegisterWrite) -> bool {

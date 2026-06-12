@@ -92,8 +92,6 @@ impl<ML, RL> State<ML, RL> where
             0,
         )
         // server claims
-        &&& self.unclaimed_servers().finite()
-        &&& self.server_tokens@.dom().finite()
         &&& self.server_tokens@ <= self.servers.locs()
         &&& self.unclaimed_servers() <= self.servers.dom()
         &&& forall|id: u64| #[trigger]

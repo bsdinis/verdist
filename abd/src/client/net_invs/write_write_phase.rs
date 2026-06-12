@@ -181,7 +181,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         timestamp: Timestamp,
         client_id: u64,
     ) -> bool {
-        &&& replies.finite()
         &&& forall|cid| #[trigger]
             replies.contains(cid) ==> {
                 &&& cid.0 == client_id
@@ -285,7 +284,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     pub fn lemma_quorum(&self)
         ensures
             self.quorum().len() == self.replies().len(),
-            self.quorum().finite(),
             self.quorum() <= self.server_locs().dom(),
     {
         proof {

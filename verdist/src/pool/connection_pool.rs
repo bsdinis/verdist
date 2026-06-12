@@ -14,7 +14,8 @@ pub open spec fn channel_seq_to_map<C: Channel>(s: Seq<C>) -> Map<C::Id, C>
     recommends
         s.map_values(|c: C| c.spec_id()).no_duplicates(),
 {
-    s.map_values(|c: C| c.spec_id()).to_set().mk_map(
+    Map::new(
+        s.map_values(|c: C| c.spec_id()).to_set(),
         |id|
             {
                 let idx = choose|idx| 0 <= idx < s.len() && #[trigger] s[idx].spec_id() == id;
@@ -28,7 +29,6 @@ pub proof fn lemma_channel_seq_to_map<C: Channel>(s: Seq<C>, m: Map<C::Id, C>)
         m == channel_seq_to_map(s),
         s.map_values(|c: C| c.spec_id()).no_duplicates(),
     ensures
-        m.dom().finite(),
         m.dom() == s.map_values(|c: C| c.spec_id()).to_set(),
         m.values() == s.to_set(),
         forall|id| #[trigger] m.contains_key(id) ==> m[id].spec_id() == id,
@@ -132,7 +132,6 @@ pub trait ConnectionPool {
 
     proof fn lemma_channels(tracked &self)
         ensures
-            self.spec_channels().dom().finite(),
             forall|id| #[trigger]
                 self.spec_channels().contains_key(id) ==> self.spec_channels()[id].spec_id() == id,
     ;

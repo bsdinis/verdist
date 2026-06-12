@@ -4,8 +4,6 @@ verus! {
 
 pub proof fn lemma_different_sets_with_inclusion_have_difference<T>(a: Set<T>, b: Set<T>)
     requires
-        a.finite(),
-        b.finite(),
         a <= b,
     ensures
         a == b <==> b.difference(a).is_empty(),

@@ -211,7 +211,7 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
         self.op().id@
     }
 
-    pub open spec fn namespaces(self) -> Set<int> {
+    pub open spec fn namespaces(self) -> ISet<int> {
         self.lin().namespaces()
     }
 
@@ -347,7 +347,7 @@ impl<RL: ReadLinearizer<RegisterRead>> PendingRead<RL> {
         self.op().id@
     }
 
-    pub open spec fn namespaces(self) -> Set<int> {
+    pub open spec fn namespaces(self) -> ISet<int> {
         self.lin().namespaces()
     }
 

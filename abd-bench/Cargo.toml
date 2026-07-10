@@ -1,0 +1,25 @@
+[package]
+name = "abd-bench"
+
+edition = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+clap = { workspace = true }
+humantime = { workspace = true }
+polars = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+abd = { workspace = true }
+specs = { workspace = true }
+verdist = { workspace = true }
+vlib = { workspace = true }
+vstd = { workspace = true }
+
+[lints]
+workspace = true

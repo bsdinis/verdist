@@ -50,7 +50,7 @@ semicolon-if-nothing-returned = "allow"
 
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost_body)', 'cfg(verus_keep_ghost)'] }
 
 [profile.release]
 strip = "debuginfo"

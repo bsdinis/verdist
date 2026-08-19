@@ -25,6 +25,7 @@ fn main() {
                 &server_ids,
                 args.server_id,
                 listener,
+                args.num_threads,
             );
         }
         cli::NetworkType::Tcp => {
@@ -34,6 +35,7 @@ fn main() {
                 &server_ids,
                 args.server_id,
                 listener,
+                args.num_threads,
             );
         }
     }

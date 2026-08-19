@@ -26,6 +26,7 @@ fn main() {
                         &server_ids,
                         server_conf.id,
                         listener,
+                        cli::default_num_threads(),
                     );
                     connector
                 })

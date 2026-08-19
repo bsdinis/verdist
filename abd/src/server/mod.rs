@@ -335,6 +335,7 @@ pub fn create_server<L, C, ML, RL>(
     server_ids: &HashSet<u64>,
     my_server_id: u64,
     listener: L,
+    num_threads: usize,
 ) -> RegisterServer<L, C, ML, RL> where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
@@ -343,6 +344,7 @@ pub fn create_server<L, C, ML, RL>(
 
     requires
         server_ids@.contains(my_server_id),
+        num_threads > 0,
 {
     let tracked state_inv;
     proof {
@@ -353,7 +355,7 @@ pub fn create_server<L, C, ML, RL>(
     let ghost channel_inv = ChannelInv::from_state_pred(state_inv@.constant());
     let register = MonotonicRegister::new(my_server_id, state_inv);
     let service = RegisterService::new(my_server_id, register, Ghost(channel_inv));
-    Server::new(service, listener, Ghost(channel_inv))
+    Server::new(service, listener, Ghost(channel_inv), num_threads)
 }
 
 } // verus!

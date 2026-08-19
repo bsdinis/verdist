@@ -29,6 +29,7 @@ fn main() {
                         &server_ids,
                         server_conf.id,
                         listener,
+                        args.num_threads,
                     );
                     connector
                 })
@@ -81,9 +82,13 @@ pub mod server {
     use verdist::network::channel::Listener;
 
     // Why is this unverified:
-    // - major: verus does not support threads
-    pub fn spawn_server<L, C, ML, RL>(server_ids: &HashSet<u64>, server_id: u64, listener: L)
-    where
+    // - major: verus does not support scoped threads (see verdist::service::Server::run)
+    pub fn spawn_server<L, C, ML, RL>(
+        server_ids: &HashSet<u64>,
+        server_id: u64,
+        listener: L,
+        num_threads: usize,
+    ) where
         L: Listener<C> + Send + Sync + 'static,
         C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
             + Send
@@ -95,27 +100,34 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let server = Arc::new(create_server::<_, _, ML, RL>(
-            server_ids, server_id, listener,
+            server_ids,
+            server_id,
+            listener,
+            num_threads,
         ));
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
-            std::thread::scope(|s| {
-                s.spawn(move || while server.poll() {});
-            });
+            server.run();
         });
     }
 
-    pub fn run_server<L, C, ML, RL>(server_ids: &HashSet<u64>, server_id: u64, listener: L)
-    where
-        L: Listener<C>,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
-        ML: MutLinearizer<RegisterWrite>,
-        RL: ReadLinearizer<RegisterRead>,
+    pub fn run_server<L, C, ML, RL>(
+        server_ids: &HashSet<u64>,
+        server_id: u64,
+        listener: L,
+        num_threads: usize,
+    ) where
+        L: Listener<C> + Sync,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        ML: MutLinearizer<RegisterWrite> + Send,
+        RL: ReadLinearizer<RegisterRead> + Send,
+        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
-        let server = create_server::<_, _, ML, RL>(server_ids, server_id, listener);
+        let server = create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
-        while server.poll() {}
+        server.run();
     }
 }

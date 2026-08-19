@@ -61,12 +61,29 @@ pub struct ServerArgs {
     #[arg(long, default_value = SERVER_LISTEN_ADDR_DEFAULT)]
     pub server_addr: std::net::SocketAddr,
 
+    /// Number of request-processing worker threads to spawn (in addition to one dedicated
+    /// accept thread). Defaults to `available_parallelism() - 1`, so as not to oversubscribe
+    /// cores with busy-spinning threads.
+    #[arg(long)]
+    pub num_threads: Option<usize>,
+
     /// What network type to run
     #[arg(long, value_enum, default_value_t)]
     pub network: NetworkType,
 
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,
+}
+
+/// `available_parallelism() - 1`, reserving one core for the dedicated accept thread so the
+/// default doesn't oversubscribe cores with busy-spinning worker threads (see
+/// `verdist::service::Server::run`).
+pub fn default_num_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .saturating_sub(1)
+        .max(1)
 }
 
 verus! {
@@ -117,6 +134,7 @@ impl ServerArgs {
             if let Some(server_addr) = config.server_addr {
                 mself.server_addr = server_addr;
             }
+            mself.num_threads = mself.num_threads.or(config.num_threads);
         }
         Ok(mself)
     }

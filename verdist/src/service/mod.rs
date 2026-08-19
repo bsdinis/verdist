@@ -160,8 +160,9 @@ pub struct Server<S, L, C> where
     service: S,
     /// Listener channel
     listener: L,
-    /// Connected clients
-    connected: RwLock<Vec<C>, ConnectionsInv<C::K>>,
+    /// Connected clients, sharded across independent locks so that `connected.len()` worker
+    /// threads can each poll their own shard without contending on the others.
+    connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -174,24 +175,58 @@ impl<S, L, C> Server<S, L, C> where
     }
 
     #[allow(unused)]
-    pub fn new(service: S, listener: L, channel_inv: Ghost<C::K>) -> (r: Self)
+    pub fn new(service: S, listener: L, channel_inv: Ghost<C::K>, num_shards: usize) -> (r: Self)
         requires
             channel_inv@ == service.channel_inv(),
+            num_shards > 0,
         ensures
             r.spec_server_id() == service.spec_id(),
     {
-        let empty = Vec::new();
         let id = service.id();
         let ghost connected_inv = ConnectionsInv { channel_inv: channel_inv@, server_id: id };
-        assert(connected_inv.inv(empty));
-        let connected = RwLock::new(empty, Ghost(connected_inv));
+        let mut connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>> = Vec::new();
+        let mut i = 0;
+        while i < num_shards
+            invariant
+                connected.len() == i,
+                forall|j: int|
+                    0 <= j < connected@.len() ==> #[trigger] connected@[j].pred() == connected_inv,
+            decreases num_shards - i,
+        {
+            let empty: Vec<C> = Vec::new();
+            assert(connected_inv.inv(empty));
+            connected.push(RwLock::new(empty, Ghost(connected_inv)));
+            i += 1;
+        }
         Server { service, listener, connected }
     }
 
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
-        &&& self.connected.pred().server_id == self.service.spec_id()
-        &&& self.connected.pred().channel_inv == self.service.channel_inv()
+        &&& self.connected.len() > 0
+        &&& forall|i: int|
+            0 <= i < self.connected.len() ==> {
+                &&& #[trigger] self.connected[i].pred().server_id == self.service.spec_id()
+                &&& self.connected[i].pred().channel_inv == self.service.channel_inv()
+            }
+    }
+
+    /// Number of independent shards `connected` is split across -- exposed so public
+    /// requires/ensures clauses don't have to reach into the (module-private) `connected` field.
+    pub closed spec fn spec_num_shards(self) -> int {
+        self.connected.len() as int
+    }
+
+    /// Number of independent shards `connected` is split across -- also the number of
+    /// request-processing worker threads the (unverified) `run()` driver spawns.
+    pub fn num_shards(&self) -> (r: usize)
+        ensures
+            r as int == self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        self.connected.len()
     }
 
     pub fn server_id(&self) -> (r: u64)
@@ -206,23 +241,28 @@ impl<S, L, C> Server<S, L, C> where
 
     fn accept(&self, channel: C)
         requires
-            channel.constant() == self.connected.pred().channel_inv,
+            channel.constant() == self.service.channel_inv(),
     {
         proof {
             use_type_invariant(self);
         }
-        let (mut guard, handle) = self.connected.acquire_write();
+        // Which shard a connection lands in is a pure load-balancing choice -- every shard
+        // shares the same `ConnectionsInv`, so any in-bounds index is equally valid here.
+        let shard = (channel.id().1 as usize) % self.connected.len();
+        assert(self.connected[shard as int].pred().server_id == self.service.spec_id());
+        assert(self.connected[shard as int].pred().channel_inv == self.service.channel_inv());
+        let (mut guard, handle) = self.connected[shard].acquire_write();
         assume(channel.spec_id().0 == self.service.spec_id());  // TODO(connector)
         guard.push(channel);
-        assert(ConnectionsInv::inv(self.connected.pred(), guard));
+        assert(ConnectionsInv::inv(self.connected[shard as int].pred(), guard));
         handle.release_write(guard);
     }
 
-    pub fn poll(&self) -> bool {
+    /// Drains up to 10 pending `try_accept`s from the listener into the shards. Meant to be
+    /// driven by a single, dedicated accept thread -- see `run()`.
+    pub fn poll_accept(&self) -> bool {
         proof {
             use_type_invariant(self);
-            broadcast use vstd::seq_lib::group_filter_ensures;
-
         }
         // verus does not support unbounded loops + streams probably don't/can't have specs
         // so we do this up to 10 times every time
@@ -231,9 +271,9 @@ impl<S, L, C> Server<S, L, C> where
             decreases i,
         {
             use crate::network::error::TryListenError;
-            match self.listener.try_accept(Ghost(|l| self.connected.pred().channel_inv)) {
+            match self.listener.try_accept(Ghost(|l| self.service.channel_inv())) {
                 Ok(channel) => {
-                    assert(channel.constant() == self.connected.pred().channel_inv);
+                    assert(channel.constant() == self.service.channel_inv());
                     self.accept(channel)
                 },
                 Err(TryListenError::Empty) => {
@@ -262,17 +302,33 @@ impl<S, L, C> Server<S, L, C> where
             i -= 1;
         }
 
-        let mut drop = HashSet::new();
-        let (mut connected, handle) = self.connected.acquire_write();
+        true
+    }
 
-        let ghost connected_pred = self.connected.pred();
+    /// Polls, handles, and drops dead connections within a single shard. Meant to be driven by
+    /// one dedicated worker thread per shard -- see `run()`.
+    pub fn poll_shard(&self, shard: usize) -> bool
+        requires
+            (shard as int) < self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+            broadcast use vstd::seq_lib::group_filter_ensures;
+
+        }
+        let mut drop = HashSet::new();
+        let (mut connected, handle) = self.connected[shard].acquire_write();
+
+        let ghost connected_pred = self.connected[shard as int].pred();
+        assert(connected_pred.server_id == self.service.spec_id());
+        assert(connected_pred.channel_inv == self.service.channel_inv());
         let iterator = connected.iter();
         #[allow(unused_variables)]
         let mut idx = 0usize;
         #[allow(unused_assignments, clippy::explicit_counter_loop)]
         for channel in it: iterator
             invariant
-                self.connected.pred() == connected_pred,
+                self.connected[shard as int].pred() == connected_pred,
                 connected_pred.server_id == self.service.spec_id(),
                 connected_pred.channel_inv == self.service.channel_inv(),
                 idx == it.index,
@@ -318,7 +374,7 @@ impl<S, L, C> Server<S, L, C> where
         let filter_fn = |c: &C| !drop.contains(&c.id());
         connected.retain(filter_fn);
         proof {
-            let ghost server_inv = self.connected.pred();
+            let ghost server_inv = self.connected[shard as int].pred();
             assert forall|idx| 0 <= idx < connected@.len() implies {
                 let chan = #[trigger] connected@[idx];
                 &&& server_inv.channel_inv == chan.constant()
@@ -335,3 +391,28 @@ impl<S, L, C> Server<S, L, C> where
 }
 
 } // verus!
+// Why is this unverified:
+// - major: verus does not support scoped threads (`vstd::thread::spawn` only wraps
+//   `std::thread::spawn`'s `'static`, owned case) -- this mirrors the pattern every
+//   example/bench binary already used to drive the single-worker-thread `poll()`.
+impl<S, L, C> Server<S, L, C>
+where
+    S: Service<Request = C::R, Response = C::S, ChanInv = C::K> + Sync,
+    L: Listener<C> + Sync,
+    C: Channel<Id = (u64, u64)> + Send + Sync,
+{
+    /// Spawns one dedicated accept thread plus one dedicated worker thread per shard, and
+    /// blocks until they all exit. The accept thread stops on a fatal listener error; each
+    /// worker thread polls its own shard forever -- a dead listener no longer takes down
+    /// already-connected clients, unlike the single-loop `poll()` this replaces.
+    pub fn run(&self) {
+        std::thread::scope(|s| {
+            s.spawn(|| while self.poll_accept() {});
+            for shard in 0..self.num_shards() {
+                s.spawn(move || loop {
+                    self.poll_shard(shard);
+                });
+            }
+        });
+    }
+}

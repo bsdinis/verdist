@@ -16,7 +16,7 @@ fn main() {
     match args.network {
         cli::NetworkType::Modelled => {
             let (listener, connector) = verdist::network::modelled::listen_channel(args.server_id);
-            server::spawn_server(args.server_id, listener);
+            server::spawn_server(args.server_id, listener, cli::default_num_threads());
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Udp => {

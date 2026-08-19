@@ -21,6 +21,9 @@ pub struct ParsedConfig {
     /// IP client will bind to
     pub client_addr: Option<std::net::IpAddr>,
 
+    /// Number of request-processing worker threads the server should spawn
+    pub num_threads: Option<usize>,
+
     /// What network type to run
     pub network: crate::cli::NetworkType,
 
@@ -44,6 +47,9 @@ pub struct Config {
 
     /// IP client will bind to
     pub client_addr: Option<std::net::IpAddr>,
+
+    /// Number of request-processing worker threads the server should spawn
+    pub num_threads: Option<usize>,
 
     /// What network type to run
     pub network: crate::cli::NetworkType,
@@ -97,6 +103,7 @@ impl Config {
             delay: config.delay,
             client_id: config.client_id,
             client_addr: config.client_addr,
+            num_threads: config.num_threads,
             network: config.network,
             servers,
         })

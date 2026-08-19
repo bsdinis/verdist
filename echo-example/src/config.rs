@@ -20,6 +20,9 @@ pub struct Config {
     /// Id of the server (only meaningful when the network is modelled)
     pub server_id: u64,
 
+    /// Number of request-processing worker threads the server should spawn
+    pub num_threads: Option<usize>,
+
     /// What network type to run
     pub network: crate::cli::NetworkType,
 }

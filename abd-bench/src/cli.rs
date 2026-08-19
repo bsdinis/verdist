@@ -59,6 +59,12 @@ pub struct ClientParsedArgs {
 
     #[arg(short, long)]
     pub start: Option<humantime::Timestamp>,
+
+    /// Number of request-processing worker threads each in-process (modelled-network) server
+    /// should spawn. Defaults to `available_parallelism() - 1`, so as not to oversubscribe cores
+    /// with busy-spinning threads.
+    #[arg(long)]
+    pub num_threads: Option<usize>,
 }
 
 #[derive(Parser)]
@@ -90,6 +96,21 @@ pub struct ClientArgs {
     pub duration: std::time::Duration,
 
     pub start: Option<std::time::SystemTime>,
+
+    /// Number of request-processing worker threads each in-process (modelled-network) server
+    /// should spawn.
+    pub num_threads: usize,
+}
+
+/// `available_parallelism() - 1`, reserving one core for the dedicated accept thread so the
+/// default doesn't oversubscribe cores with busy-spinning worker threads (see
+/// `verdist::service::Server::run`).
+pub fn default_num_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .saturating_sub(1)
+        .max(1)
 }
 
 pub struct ServerArgs {
@@ -145,6 +166,11 @@ impl ClientArgs {
                 op: args.op,
                 start: args.start.map(|x| x.into()),
                 duration: args.duration.into(),
+                // `0` is not a valid thread count -- treat it the same as "unset" rather than
+                // handing Server::new a value that violates its `num_shards > 0` precondition.
+                num_threads: args.num_threads.filter(|n| *n != 0).or(
+                    config.num_threads.filter(|n| *n != 0),
+                ).unwrap_or_else(default_num_threads),
             },
         )
     }

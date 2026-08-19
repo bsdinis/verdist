@@ -130,10 +130,13 @@ impl Service for EchoService {
 
 pub type EchoServer<L, C> = Server<EchoService, L, C>;
 
-pub fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> where
-    L: Listener<C>,
-    C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
- {
+pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> EchoServer<
+    L,
+    C,
+> where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+    requires
+        num_threads > 0,
+{
     let tracked state_inv;
     proof {
         state_inv = invariants::get_system_state();
@@ -142,7 +145,7 @@ pub fn create_server<L, C>(server_id: u64, listener: L) -> EchoServer<L, C> wher
     let state_inv = Tracked(state_inv);
     let ghost channel_inv = ChannelInv::from_state_pred(state_inv@.constant());
     let service = EchoService::new(server_id, Ghost(channel_inv));
-    Server::new(service, listener, Ghost(channel_inv))
+    Server::new(service, listener, Ghost(channel_inv), num_threads)
 }
 
 } // verus!

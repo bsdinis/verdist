@@ -99,7 +99,6 @@ pub open spec fn request_inv(
     &&& request.key().0 == client_id
     &&& request.key().1 == request_id
     &&& request.req_type() is GetTimestamp
-    &&& (request.get_timestamp().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -123,7 +122,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             pred@.server_locs == servers@.locs(),
             pred@.server_tokens_id == server_tokens@.id(),
             server_tokens@@ <= servers@.locs(),
-            (servers@).inv(),
             request_inv(request@, pred@.request_map_id, pred@.client_id, pred@.request_id),
             request@.get_timestamp().servers().eq_timestamp(servers@),
             request@.get_timestamp().servers() == pred@.orig_servers,
@@ -155,8 +153,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         req_servers: ServerUniverseLb,
         server_tokens: Map<u64, Loc>,
     ) -> bool {
-        &&& (servers).inv()
-        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& server_tokens <= servers.locs()
     }
@@ -332,7 +328,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
-            self.servers().lemma_locs();
+            self.servers.borrow().lemma_inv();
             let q = self.replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.replies(), q, |id: (u64, u64)| id.1);
         }
@@ -342,7 +338,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         requires
             !self.replies().is_empty(),
         ensures
-            self.servers().inv(),
             self.servers().valid_quorum(self.quorum()) ==> {
                 self.servers().quorum_timestamp(self.quorum()) == self.spec_max_timestamp()
             },
@@ -405,8 +400,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     {
         let ghost old_servers = *old(servers);
         servers.tracked_update_lb(server_id, lb);
+        servers.lemma_inv();
         if max_resp is Some {
-            (*servers).lemma_dom();
             assert forall|id| #[trigger]
                 agree_with_max.contains(id) implies servers[id]@@.timestamp()
                 == max_resp->Some_0.spec_timestamp() by {
@@ -443,8 +438,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         ensures
             self.server_locs() == r@.locs(),
             self.servers().leq(r@),
-            self.servers().inv(),
-            r@.inv(),
             r@.valid_quorum(self.quorum()) ==> r@.quorum_timestamp(self.quorum())
                 == self.spec_max_timestamp(),
             self.servers().eq_timestamp(r@),
@@ -455,7 +448,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         proof {
             use_type_invariant(self);
             lbs = self.servers.borrow().extract_lbs();
-            lbs.lemma_locs();
+            lbs.lemma_inv();
             lbs.lemma_eq(self.servers());
             ServerUniverseLb::lemma_leq_trans(self.orig_servers(), self.servers(), lbs);
         }
@@ -538,7 +531,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         replies.insert(id);
 
         proof {
-            servers@.lemma_dom();
+            servers@.lemma_dom_correspondence();
         }
         assert(forall|server_id| #[trigger]
             agree_with_max@.contains(server_id) ==> replies@.contains((id.0, server_id)));
@@ -638,12 +631,10 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         assert(lb@ is LowerBound);
 
         proof {
-            servers@.lemma_locs();
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
             assert(servers@.locs().dom().contains(id.1));
             assert(servers@.dom().contains(id.1));
             assert(servers@.contains_key(id.1));
-            servers@.lemma_index_loc(id.1);
             let ghost old_servers = *old(servers);
             Self::update_servers(
                 servers.borrow_mut(),
@@ -653,7 +644,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 id.1,
                 lb,
             );
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
 
             assert forall|cid|
                 {
@@ -665,7 +656,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(replies@.insert(id).contains(cid));
                 } else {
-                    old_servers.lemma_dom();
                     assert(servers@.dom().contains(cid.1));
                     assert(old_servers.dom().contains(cid.1));
                     assert(old_servers.contains_key(cid.1));

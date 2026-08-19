@@ -112,8 +112,6 @@ impl RequestInner {
     }
 
     pub fn new_get(servers: Tracked<ServerUniverseLb>) -> (r: Self)
-        requires
-            servers@.inv(),
         ensures
             r.req_type() is Get,
             ({
@@ -125,8 +123,6 @@ impl RequestInner {
     }
 
     pub fn new_get_timestamp(servers: Tracked<ServerUniverseLb>) -> (r: Self)
-        requires
-            servers@.inv(),
         ensures
             r.req_type() is GetTimestamp,
             ({
@@ -144,7 +140,6 @@ impl RequestInner {
         servers: Tracked<ServerUniverseLb>,
     ) -> (r: Self)
         requires
-            servers@.inv(),
             commitment@.key() == timestamp,
             commitment@.value() == value,
         ensures

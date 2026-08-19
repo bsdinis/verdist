@@ -1,5 +1,11 @@
 #[cfg(verus_only)]
 use crate::invariants::quorum::server_map::raw_extract_lbs;
+#[cfg(verus_only)]
+use crate::invariants::quorum::server_map::raw_insert_auth;
+#[cfg(verus_only)]
+use crate::invariants::quorum::server_map::raw_remove_auth;
+#[cfg(verus_only)]
+use crate::invariants::quorum::server_map::raw_split_auth;
 use crate::invariants::quorum::server_map::ServerMap;
 #[cfg(verus_only)]
 use crate::invariants::quorum::Quorum;
@@ -31,7 +37,6 @@ pub tracked struct ServerUniverseAuth {
 impl ServerUniverseAuth {
     pub proof fn dummy() -> (tracked r: Self)
         ensures
-            r.inv(),
             forall|q: Quorum| #[trigger]
                 r.valid_quorum(q) ==> r.quorum_timestamp(q) >= Timestamp::spec_default(),
             forall|id: u64| #[trigger] r.contains_key(id) ==> r[id]@@ is FullRightToAdvance,
@@ -39,7 +44,8 @@ impl ServerUniverseAuth {
         ServerUniverseAuth { map: Map::tracked_empty() }
     }
 
-    pub closed spec fn inv(self) -> bool {
+    #[verifier::type_invariant]
+    spec fn inv(self) -> bool {
         &&& forall|k: u64| #[trigger]
             self.map.contains_key(k) ==> {
                 self.map[k]@@ is HalfRightToAdvance || self.map[k]@@ is FullRightToAdvance
@@ -76,37 +82,34 @@ impl ServerUniverseAuth {
         self.map.tracked_borrow(server_id).borrow()
     }
 
-    pub proof fn lemma_locs(self)
+    pub proof fn lemma_inv(tracked &self)
         ensures
             self.locs().dom() == self.dom(),
+            forall|k: u64| #[trigger]
+                self.contains_key(k) ==> {
+                    self[k]@@ is HalfRightToAdvance || self[k]@@ is FullRightToAdvance
+                },
+            forall|id: u64| #[trigger]
+                self.contains_key(id) && self[id]@@ is FullRightToAdvance ==> self[id]@@.timestamp()
+                    == Timestamp::spec_default(),
+            forall|id: u64| #[trigger] self.dom().contains(id) <==> self.contains_key(id),
+            forall|id: u64| #[trigger] self.contains_key(id) ==> self[id]@.loc() == self.locs()[id],
+    {
+        use_type_invariant(self);
+        self.lemma_dom_correspondence();
+    }
+
+    /// The purely structural half of `lemma_inv`'s ensures: generic `Map`/`map_values` facts
+    /// about `locs()` and `spec_index()` that hold regardless of the entry-kind invariant, so —
+    /// unlike `lemma_inv` — this is safe to call on a ghost/spec-mode `Self`, not just a
+    /// genuinely `tracked` one.
+    pub(crate) proof fn lemma_dom_correspondence(self)
+        ensures
+            self.locs().dom() == self.dom(),
+            forall|id: u64| #[trigger] self.dom().contains(id) <==> self.contains_key(id),
+            forall|id: u64| #[trigger] self.contains_key(id) ==> self[id]@.loc() == self.locs()[id],
     {
         vlib::map::lemma_map_values_dom(self.map, |r: Tracked<MonotonicTimestampResource>| r@.loc())
-    }
-
-    /// The dom agrees with the contains_key method
-    pub proof fn lemma_dom(self)
-        ensures
-            forall|id: u64| #[trigger] self.dom().contains(id) <==> self.contains_key(id),
-    {
-    }
-
-    /// Indexing commutes with taking the locations
-    pub proof fn lemma_index_loc(self, id: u64)
-        requires
-            self.contains_key(id),
-        ensures
-            self[id]@.loc() == self.locs()[id],
-    {
-    }
-
-    /// All the ids are authorative
-    pub proof fn lemma_inv_advance_right(self, id: u64)
-        requires
-            self.inv(),
-            self.contains_key(id),
-        ensures
-            self[id]@@ is HalfRightToAdvance || self[id]@@ is FullRightToAdvance,
-    {
     }
 
     proof fn lemma_map_len(self)
@@ -178,7 +181,6 @@ impl ServerUniverseAuth {
     pub proof fn split_auth(tracked &mut self, server_id: u64) -> (tracked r:
         MonotonicTimestampResource)
         requires
-            old(self).inv(),
             old(self).contains_key(server_id),
             old(self)[server_id]@@ is FullRightToAdvance,
         ensures
@@ -195,31 +197,31 @@ impl ServerUniverseAuth {
                             ==> final(self)[id]@@ is FullRightToAdvance
                     }
                 },
-            final(self).inv(),
             r.loc() == final(self)[server_id]@.loc(),
             r@ is HalfRightToAdvance,
             r@.timestamp() == Timestamp::spec_default(),
     {
+        use_type_invariant(&*self);
         let ghost old = *self;
-        let tracked Tracked(r) = self.map.tracked_remove(server_id);
-        let tracked (left, right) = r.split();
-        self.map.tracked_insert(server_id, Tracked(left));
+        let tracked mut map: ServerMap = Map::tracked_empty();
+        vstd::modes::tracked_swap(&mut map, &mut self.map);
+        let tracked (mut new_map, right) = raw_split_auth(map, server_id);
         assert forall|id: u64| #[trigger]
-            self.contains_key(id) && self[id]@@ is FullRightToAdvance implies self[id]@@.timestamp()
+            new_map.contains_key(id)
+                && new_map[id]@@ is FullRightToAdvance implies new_map[id]@@.timestamp()
             == Timestamp::spec_default() by {
             assert(old.contains_key(id));
         }
+        vstd::modes::tracked_swap(&mut self.map, &mut new_map);
         right
     }
 
     pub proof fn tracked_remove_auth(tracked &mut self, server_id: u64) -> (tracked r:
         MonotonicTimestampResource)
         requires
-            old(self).inv(),
             old(self).contains_key(server_id),
             old(self)[server_id]@@ is HalfRightToAdvance,
         ensures
-            final(self).inv(),
             final(self).dom() == old(self).dom().remove(server_id),
             final(self).locs() == old(self).locs().remove(server_id),
             forall|id: u64| #[trigger]
@@ -234,14 +236,18 @@ impl ServerUniverseAuth {
             r@.timestamp() == old(self)[server_id]@@.timestamp(),
             r@ is HalfRightToAdvance,
     {
-        let old = *self;
-        let tracked Tracked(r) = self.map.tracked_remove(server_id);
-        assert(self.map.agrees(old.map));
+        use_type_invariant(&*self);
+        let ghost old = *self;
+        let tracked mut map: ServerMap = Map::tracked_empty();
+        vstd::modes::tracked_swap(&mut map, &mut self.map);
+        let tracked (mut new_map, r) = raw_remove_auth(map, server_id);
         assert forall|id: u64| #[trigger]
-            self.contains_key(id) && self[id]@@ is FullRightToAdvance implies self[id]@@.timestamp()
+            new_map.contains_key(id)
+                && new_map[id]@@ is FullRightToAdvance implies new_map[id]@@.timestamp()
             == Timestamp::spec_default() by {
             assert(old.contains_key(id));
         }
+        vstd::modes::tracked_swap(&mut self.map, &mut new_map);
         r
     }
 
@@ -251,11 +257,9 @@ impl ServerUniverseAuth {
         tracked r: MonotonicTimestampResource,
     )
         requires
-            old(self).inv(),
             !old(self).contains_key(server_id),
             r@ is HalfRightToAdvance,
         ensures
-            final(self).inv(),
             final(self).dom() == old(self).dom().insert(server_id),
             final(self).locs() == old(self).locs().insert(server_id, r.loc()),
             forall|id: u64| #[trigger]
@@ -270,22 +274,23 @@ impl ServerUniverseAuth {
             final(self)[server_id]@@.timestamp() == r@.timestamp(),
             final(self)[server_id]@@ is HalfRightToAdvance,
     {
-        let old = *self;
-        self.map.tracked_insert(server_id, Tracked(r));
-        assert(self.map.agrees(old.map));
+        use_type_invariant(&*self);
+        let ghost old = *self;
+        let tracked mut map: ServerMap = Map::tracked_empty();
+        vstd::modes::tracked_swap(&mut map, &mut self.map);
+        let tracked mut new_map = raw_insert_auth(map, server_id, r);
         assert forall|id: u64| #[trigger]
-            self.contains_key(id) && self[id]@@ is FullRightToAdvance implies self[id]@@.timestamp()
+            new_map.contains_key(id)
+                && new_map[id]@@ is FullRightToAdvance implies new_map[id]@@.timestamp()
             == Timestamp::spec_default() by {
             assert(old.contains_key(id));
         }
+        vstd::modes::tracked_swap(&mut self.map, &mut new_map);
     }
 
     /// Duplicate every entry as a fresh lower bound
     pub proof fn extract_lbs(tracked &self) -> (tracked r: ServerUniverseLb)
-        requires
-            self.inv(),
         ensures
-            r.inv(),
             self.locs() =~= r.locs(),
             self.leq_lb(r),
             forall|id: u64| #[trigger]

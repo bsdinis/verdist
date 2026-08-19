@@ -262,7 +262,6 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             match treq {
                 RequestInner::Get(get_req) => {
-                    get_req.lemma_inv();
                     treq = RequestInner::Get(get_req);
                 },
                 other => {
@@ -362,8 +361,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             let Tracked(replies_servers) = replies.servers_lb();  // needed to have an owned instance
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
                 proof {
-                    state.servers.lemma_locs();
-                    replies_servers.lemma_locs();
+                    state.servers.lemma_inv();
+                    replies_servers.lemma_inv();
 
                     // NOTE: this is an annoying thing from the way that equality works for
                     // ServerUniverse. Even though replies_server does not change, it is not `==`
@@ -393,8 +392,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
                 proof {
                     let ghost old_known = state.linearization_queue.known_timestamps();
-                    state.servers.lemma_locs();
-                    replies_servers.lemma_locs();
+                    state.servers.lemma_inv();
+                    replies_servers.lemma_inv();
 
                     state.commitments.agree_commitment(&commitment);
                     // NOTE: this is an annoying thing from the way that equality works for
@@ -449,7 +448,6 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             match treq {
                 RequestInner::Write(write_req) => {
-                    write_req.lemma_inv();
                     treq = RequestInner::Write(write_req);
                 },
                 other => {
@@ -535,8 +533,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
             proof {
                 let ghost old_known = state.linearization_queue.known_timestamps();
-                state.servers.lemma_locs();
-                replies_servers.lemma_locs();
+                state.servers.lemma_inv();
+                replies_servers.lemma_inv();
 
                 state.commitments.agree_commitment(&commitment);
                 // NOTE: this is an annoying thing from the way that equality works for
@@ -674,7 +672,6 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             match treq {
                 RequestInner::GetTimestamp(get_ts_req) => {
-                    get_ts_req.lemma_inv();
                     treq = RequestInner::GetTimestamp(get_ts_req);
                 },
                 other => {
@@ -795,8 +792,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             let ghost replies_orig_servers = get_ts_replies.orig_servers();
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
                 proof {
-                    state.servers.lemma_locs();
-                    replies_servers.lemma_locs();
+                    state.servers.lemma_inv();
+                    replies_servers.lemma_inv();
 
                     // NOTE: this is an annoying thing from the way that equality works for
                     // ServerUniverse. Even though replies_server does not change, it is not `==`
@@ -857,7 +854,6 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             proof {
                 match treq {
                     RequestInner::Write(write_req) => {
-                        write_req.lemma_inv();
                         treq = RequestInner::Write(write_req);
                     },
                     other => {
@@ -948,8 +944,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     let ghost old_known = state.linearization_queue.known_timestamps();
                     let ghost old_watermark = state.linearization_queue.watermark();
 
-                    state.servers.lemma_locs();
-                    replies_servers.lemma_locs();
+                    state.servers.lemma_inv();
+                    replies_servers.lemma_inv();
 
                     // NOTE: this is an annoying thing from the way that equality works for
                     // ServerUniverse. Even though replies_server does not change, it is not `==`
@@ -1022,8 +1018,6 @@ pub proof fn lemma_watermark_contradiction<ML, RL>(
     RL: ReadLinearizer<RegisterRead>,
 
     requires
-        orig_servers.inv(),
-        servers.inv(),
         servers.valid_quorum(quorum),
         orig_servers.leq(servers),
         orig_servers.valid_quorum(quorum),

@@ -83,12 +83,12 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
 
                 assert(old_tokens <= old_servers.locs());
                 assume(state.unclaimed_servers().contains(server_id)); // XXX: server login
-                old_servers.lemma_dom();
+                state.servers.lemma_inv();
                 assert(old_servers.dom().contains(server_id));
                 assert(old_servers.contains_key(server_id));
                 resource = state.servers.split_auth(server_id);
                 server_token = state.server_tokens.insert(server_id, resource.loc());
-                state.servers.lemma_dom();
+                state.servers.lemma_inv();
                 assert forall |id| #[trigger] state.unclaimed_servers().contains(id) implies state.servers[id]@@ is FullRightToAdvance by {
                     assert(state.servers.dom().contains(id));
                     assert(old_servers.dom().contains(id));
@@ -99,13 +99,11 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
                     }
                 }
 
-                state.servers.lemma_dom();
                 assert(state.servers.dom().contains(server_id));
                 assert(state.servers.contains_key(server_id));
-                state.servers.lemma_index_loc(server_id);
                 assert(resource.loc() == state.servers.locs()[server_id]);
                 assert(state.server_tokens@ <= state.servers.locs());
-                state.servers.lemma_locs();
+                state.servers.lemma_inv();
                 assert(state.servers.locs().dom() == state.servers.dom());
                 assert forall |id| #[trigger] state.server_tokens@.contains_key(id) implies state.servers[id]@@ is HalfRightToAdvance by {
                     assert(state.servers.dom().contains(id));
@@ -188,18 +186,15 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
             req.servers()[r.server_id()]@@.timestamp() <= r.spec_timestamp(),
     {
         proof {
-            req.servers().lemma_locs();
-            req.servers().lemma_dom();
+            req.servers().lemma_dom_correspondence();
             assert(req.servers().dom().contains(self.id()));
             assert(req.servers().contains_key(self.id()));
         }
         let lb = req.server_lower_bound(Ghost(self.id()));
         proof {
-            req.servers().lemma_locs();
-            req.servers().lemma_dom();
+            req.servers().lemma_dom_correspondence();
             assert(req.servers().dom().contains(self.id()));
             assert(req.servers().contains_key(self.id()));
-            req.servers().lemma_index_loc(self.id());
         }
 
         let tracked r = self.resource.borrow();
@@ -249,18 +244,15 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
             req.servers()[r.server_id()]@@.timestamp() <= r.spec_timestamp(),
     {
         proof {
-            req.servers().lemma_locs();
-            req.servers().lemma_dom();
+            req.servers().lemma_dom_correspondence();
             assert(req.servers().dom().contains(self.id()));
             assert(req.servers().contains_key(self.id()));
         }
         let lb = req.server_lower_bound(Ghost(self.id()));
         proof {
-            req.servers().lemma_locs();
-            req.servers().lemma_dom();
+            req.servers().lemma_dom_correspondence();
             assert(req.servers().dom().contains(self.id()));
             assert(req.servers().contains_key(self.id()));
-            req.servers().lemma_index_loc(self.id());
         }
 
         let tracked r = self.resource.borrow();
@@ -304,11 +296,9 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
             req.spec_timestamp() <= r.timestamp,
     {
         proof {
-            req.servers().lemma_locs();
-            req.servers().lemma_dom();
+            req.servers().lemma_dom_correspondence();
             assert(req.servers().dom().contains(self.id()));
             assert(req.servers().contains_key(self.id()));
-            req.servers().lemma_index_loc(self.id());
         }
         #[allow(unused_variables)]
         let (value, timestamp, commitment, lb) = req.destruct(self.id);
@@ -317,8 +307,7 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
                 proof {
                     let ghost old_servers = state.servers;
-                    old_servers.lemma_locs();
-                    old_servers.lemma_dom();
+                    state.servers.lemma_inv();
                     assert(state.server_tokens@ <= old_servers.locs());
                     assert(old_servers.locs().dom() == old_servers.dom());
 
@@ -328,18 +317,17 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
                     assert(state.servers.locs().contains_key(server_id));
                     assert(old_servers.dom().contains(server_id));
                     assert(old_servers.contains_key(server_id));
-                    old_servers.lemma_index_loc(server_id);
                     assert(old_servers[server_id]@.loc() == old_servers.locs()[server_id]);
                     assert(r.loc() == old_servers.locs()[server_id]);
 
                     let tracked mut other_half = state.servers.tracked_remove_auth(server_id);
                     let ghost unchanged_servers = state.servers;
-                    unchanged_servers.lemma_dom();
+                    state.servers.lemma_inv();
                     assert(!unchanged_servers.dom().contains(server_id));
                     r.lemma_halves_agree(&other_half);
                     r.advance_halves(&mut other_half, timestamp);
                     state.servers.tracked_insert_auth(server_id, other_half);
-                    state.servers.lemma_dom();
+                    state.servers.lemma_inv();
 
                     assert(old_servers.leq(state.servers)) by {
                         assert(old_servers.locs() == state.servers.locs());

@@ -99,7 +99,6 @@ pub open spec fn request_inv<C: Channel<K = ChannelInv>>(
     &&& request.req_type() is Write
     &&& request.write().commitment_id() == pred.commitment_id
     &&& request.write().spec_timestamp() == pred.timestamp
-    &&& (request.write().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -124,7 +123,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             pred@.server_locs == servers@.locs(),
             pred@.server_tokens_id == server_tokens@.id(),
             server_tokens@@ <= servers@.locs(),
-            (servers@).inv(),
             request_inv(request@, pred@),
             request@.write().servers().eq_timestamp(servers@),
             request@.write().servers() == pred@.orig_servers,
@@ -155,8 +153,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         req_servers: ServerUniverseLb,
         server_tokens: Map<u64, Loc>,
     ) -> bool {
-        &&& (servers).inv()
-        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& server_tokens <= servers.locs()
     }
@@ -283,8 +279,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
-            self.servers().lemma_locs();
-            self.servers().lemma_dom();
+            self.servers.borrow().lemma_inv();
             let q = self.replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.replies(), q, |id: (u64, u64)| id.1);
             assert forall|v| #[trigger] q.contains(v) implies self.server_locs().dom().contains(
@@ -302,7 +297,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         requires
             !self.replies().is_empty(),
         ensures
-            self.servers().inv(),
             self.servers().valid_quorum(self.quorum()) ==> {
                 self.servers().unanimous_quorum(self.quorum(), self.spec_timestamp())
             },
@@ -372,9 +366,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         ensures
             self.server_locs() == r@.locs(),
             self.servers().leq(r@),
-            self.servers().inv(),
             r@.leq(self.servers()),
-            r@.inv(),
             r@.valid_quorum(self.quorum()) ==> r@.unanimous_quorum(
                 self.quorum(),
                 self.spec_timestamp(),
@@ -386,7 +378,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         proof {
             use_type_invariant(self);
             lbs = self.servers.borrow().extract_lbs();
-            lbs.lemma_locs();
+            lbs.lemma_inv();
             lbs.lemma_eq(self.servers());
         }
         Tracked(lbs)
@@ -445,15 +437,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         assert(lb@ is LowerBound);
 
         proof {
-            servers@.lemma_locs();
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
             assert(servers@.locs().dom().contains(id.1));
             assert(servers@.dom().contains(id.1));
             assert(servers@.contains_key(id.1));
-            servers@.lemma_index_loc(id.1);
             let ghost old_servers = *old(servers);
             Self::update_servers(servers.borrow_mut(), request@.write().servers(), id.1, lb);
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
             assert(servers@.dom().contains(id.1));
             assert(servers@.contains_key(id.1));
 
@@ -481,7 +471,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(old(replies)@.insert(id).contains(cid));
                 } else {
-                    old_servers.lemma_dom();
                     assert(servers@.dom().contains(cid.1));
                     assert(old_servers.dom().contains(cid.1));
                     assert(old_servers.contains_key(cid.1));

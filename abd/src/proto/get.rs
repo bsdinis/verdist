@@ -30,30 +30,14 @@ pub struct GetResponse {
 #[allow(unused)]
 impl GetRequest {
     pub fn new(servers: Tracked<ServerUniverseLb>) -> (r: Self)
-        requires
-            servers@.inv(),
         ensures
             r.servers() == servers@,
     {
         GetRequest { servers }
     }
 
-    #[verifier::type_invariant]
-    pub closed spec fn inv(self) -> bool {
-        &&& self.servers@.inv()
-    }
-
     pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
-    }
-
-    /// Unlocks the facts bundled in `Self::inv()` for a genuinely tracked value, so callers
-    /// don't need to `assume` them on a bare ghost/spec projection.
-    pub proof fn lemma_inv(tracked &self)
-        ensures
-            self.servers().inv(),
-    {
-        use_type_invariant(self);
     }
 
     pub fn server_lower_bound(&mut self, server_id: Ghost<u64>) -> (r: Tracked<
@@ -70,23 +54,18 @@ impl GetRequest {
     {
         let tracked new_lb;
         proof {
-            use_type_invariant(&*self);
+            self.servers.borrow().lemma_inv();
 
             let ghost old_servers = self.servers@;
 
-            self.servers@.lemma_locs();  // TRIGGER
-            old_servers.lemma_locs();  // TRIGGER
-            old_servers.lemma_inv_lower_bound(server_id@);
-
             let tracked lb = self.servers.borrow_mut().tracked_remove_lb(server_id@);
             let ghost unchanged_servers = self.servers@;
-            old_servers.lemma_dom();
-            unchanged_servers.lemma_dom();
+            unchanged_servers.lemma_dom_correspondence();
             assert(!unchanged_servers.dom().contains(server_id@));
 
             new_lb = lb.extract_lower_bound();
             self.servers.borrow_mut().tracked_insert_lb(server_id@, lb);
-            self.servers@.lemma_dom();
+            self.servers.borrow().lemma_inv();
             assert(self.servers@.dom().contains(server_id@));
             assert(self.servers@.contains_key(server_id@));
 
@@ -99,16 +78,12 @@ impl GetRequest {
                 &&& self.servers@[id]@@ is FullRightToAdvance
                     == old_servers[id]@@ is FullRightToAdvance
             } by {
-                self.servers@.lemma_inv_lower_bound(id);
                 if id != server_id@ {
                     assert(self.servers@.dom().contains(id));
                     assert(unchanged_servers.dom().contains(id));
                     assert(unchanged_servers.contains_key(id));  // TRIGGER
                     assert(old_servers.dom().contains(id));
                 }
-                old_servers.lemma_inv_lower_bound(id);
-                self.servers@.lemma_index_loc(id);
-                old_servers.lemma_index_loc(id);
             }
 
             assert forall|id| #[trigger] old_servers.contains_key(id) implies {
@@ -120,20 +95,15 @@ impl GetRequest {
                 &&& self.servers@[id]@@ is FullRightToAdvance
                     == old_servers[id]@@ is FullRightToAdvance
             } by {
-                old_servers.lemma_inv_lower_bound(id);
                 if id != server_id@ {
                     assert(old_servers.dom().contains(id));
                     assert(unchanged_servers.dom().contains(id));
                     assert(unchanged_servers.contains_key(id));  // TRIGGER
                     assert(self.servers@.dom().contains(id));
                 }
-                self.servers@.lemma_inv_lower_bound(id);
-                self.servers@.lemma_index_loc(id);
-                old_servers.lemma_index_loc(id);
             }
 
-            self.servers@.lemma_locs();
-            old_servers.lemma_locs();
+            self.servers.borrow().lemma_inv();
             assert(self.servers@.dom() =~= old_servers.dom());
             assert(self.servers@.locs().dom() == old_servers.locs().dom());
             assert forall|id: u64| #[trigger]
@@ -143,8 +113,6 @@ impl GetRequest {
                 assert(self.servers@.contains_key(id));
                 assert(old_servers.dom().contains(id));
                 assert(old_servers.contains_key(id));
-                self.servers@.lemma_index_loc(id);
-                old_servers.lemma_index_loc(id);
             }
             assert(self.servers@.locs() =~= old_servers.locs());
         }
@@ -194,8 +162,9 @@ impl GetRequest {
             self.spec_eq(r),
     {
         let tracked new_servers;
-        use_type_invariant(self);
+        self.servers.borrow().lemma_inv();
         new_servers = self.servers.borrow().extract_lbs();
+        new_servers.lemma_inv();
         ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         GetRequest { servers: Tracked(new_servers) }
     }
@@ -433,8 +402,9 @@ impl Clone for GetRequest {
     {
         let tracked new_servers;
         proof {
-            use_type_invariant(self);
+            self.servers.borrow().lemma_inv();
             new_servers = self.servers.borrow().extract_lbs();
+            new_servers.lemma_inv();
             ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         }
         GetRequest { servers: Tracked(new_servers) }

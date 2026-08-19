@@ -118,7 +118,6 @@ pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
     &&& request.get().servers().eq_timestamp(servers)
     &&& request.get().servers() == k.orig_servers
     &&& request.req_type() is Get
-    &&& (request.get().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -141,7 +140,6 @@ pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>
     &&& k.server_tokens_id == server_tokens.id()
     &&& k.wb_request_id is None
     &&& server_tokens@ <= servers.locs()
-    &&& (servers).inv()
     &&& get_request_inv(get_request, servers, k)
     &&& forall|q: Quorum| #[trigger]
         servers.valid_quorum(q) ==> { k.min_timestamp <= servers.quorum_timestamp(q) }
@@ -191,8 +189,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         server_tokens: Map<u64, Loc>,
         min_timestamp: Timestamp,
     ) -> bool {
-        &&& (servers).inv()
-        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& forall|q: Quorum| #[trigger]
             servers.valid_quorum(q) ==> servers.quorum_timestamp(q) >= min_timestamp
@@ -225,7 +221,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             &&& req.key().0 == get_request.key().0
             &&& req.req_type() is Write
             &&& req.write().spec_timestamp() == max_resp->Some_0.spec_timestamp()
-            &&& (req.write().servers()).inv()
             &&& req.write().servers().eq_timestamp(get_request.get().servers())
         }
     }
@@ -443,7 +438,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
-            self.servers().lemma_locs();
+            self.servers.borrow().lemma_inv();
         }
     }
 
@@ -454,7 +449,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
-            self.servers().lemma_locs();
+            self.servers.borrow().lemma_inv();
             let q = self.spec_get_replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.spec_get_replies(), q, |id: (u64, u64)| id.1);
         }
@@ -483,7 +478,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
     pub fn lemma_max_timestamp(&self)
         ensures
-            self.servers().inv(),
             self.servers().valid_quorum(self.quorum()) ==> {
                 self.servers().quorum_timestamp(self.quorum()) >= self.spec_max_timestamp()
             },
@@ -544,7 +538,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         servers.tracked_update_lb(server_id, lb);
         old_servers.lemma_leq_quorums(*servers, min_timestamp);
         if max_resp is Some {
-            (*servers).lemma_dom();
+            servers.lemma_inv();
             assert forall|id| #[trigger]
                 agree_with_max.contains(id) implies servers[id]@@.timestamp()
                 >= max_resp->Some_0.spec_timestamp() by {
@@ -592,12 +586,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                     final(servers)[id]@@.timestamp() >= max_resp.spec_timestamp()
                 },
     {
+        servers.lemma_inv();
         let ghost old_servers = *old(servers);
         if servers[server_id]@@.timestamp() < lb@.timestamp() {
             servers.tracked_update_lb(server_id, lb);
         }
+        servers.lemma_inv();
         old_servers.lemma_leq_quorums(*servers, min_timestamp);
-        (*servers).lemma_dom();
         assert forall|id| #[trigger] agree_with_max.contains(id) implies servers[id]@@.timestamp()
             >= max_resp.spec_timestamp() by {
             assert(servers.contains_key(id));  // XXX: trigger
@@ -632,9 +627,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         ensures
             self.server_locs() == r@.locs(),
             self.servers().leq(r@),
-            self.servers().inv(),
             r@.leq(self.servers()),
-            r@.inv(),
             r@.valid_quorum(self.quorum()) ==> r@.unanimous_quorum(
                 self.quorum(),
                 self.spec_max_timestamp(),
@@ -650,10 +643,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         proof {
             use_type_invariant(self);
             lbs = self.servers.borrow().extract_lbs();
-            lbs.lemma_locs();
-            self.servers@.lemma_locs();
-            self.servers@.lemma_dom();
-            lbs.lemma_dom();
+            lbs.lemma_inv();
+            self.servers.borrow().lemma_inv();
             assert(lbs.dom() == self.servers@.dom());
             let ghost quorum = self.quorum();
             let ghost max_ts = self.spec_max_timestamp();
@@ -929,12 +920,10 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
         proof {
             assert(!wb_replies@.contains(id));
-            servers@.lemma_locs();
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
             assert(servers@.locs().dom().contains(id.1));
             assert(servers@.dom().contains(id.1));
             assert(servers@.contains_key(id.1));
-            servers@.lemma_index_loc(id.1);
             let ghost old_servers = *old(servers);
             Self::update_servers(
                 servers.borrow_mut(),
@@ -945,7 +934,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 id.1,
                 lb,
             );
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
 
             assert forall|cid|
                 {
@@ -958,7 +947,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(get_replies@.insert(id).contains(cid));
                 } else {
-                    old_servers.lemma_dom();
                     assert(servers@.dom().contains(cid.1));
                     assert(old_servers.dom().contains(cid.1));
                     assert(old_servers.contains_key(cid.1));
@@ -1214,12 +1202,10 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
         proof {
             assert(!wb_replies@.contains(id));
-            servers@.lemma_locs();
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
             assert(servers@.locs().dom().contains(id.1));
             assert(servers@.dom().contains(id.1));
             assert(servers@.contains_key(id.1));
-            servers@.lemma_index_loc(id.1);
             let ghost old_servers = *old(servers);
             Self::update_servers_on_wb(
                 servers.borrow_mut(),
@@ -1230,7 +1216,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 id.1,
                 lb,
             );
-            servers@.lemma_dom();
+            servers.borrow().lemma_inv();
 
             assert forall|cid|
                 {
@@ -1243,7 +1229,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(wb_replies@.insert(id).contains(cid));
                 } else {
-                    old_servers.lemma_dom();
                     assert(servers@.dom().contains(cid.1));
                     assert(old_servers.dom().contains(cid.1));
                     assert(old_servers.contains_key(cid.1));
@@ -1438,7 +1423,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
             wb_request@.id() == accum.constant().request_map_id,
             wb_request@.req_type() is Write,
             wb_request@.write().spec_timestamp() == accum.spec_max_timestamp(),
-            wb_request@.write().servers().inv(),
             wb_request@.write().servers().eq_timestamp(accum.orig_servers()),
         ensures
             r.spec_request_tag() == wb_request@.key().1,

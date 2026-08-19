@@ -83,7 +83,6 @@ impl<ML, RL> State<ML, RL> where
     pub open spec fn inv(self) -> bool {
         // member invariants
         &&& self.linearization_queue.inv()
-        &&& self.servers.inv()
         &&& self.commitments.is_full()
         &&& self.request_map.is_full()
         // client ids
@@ -170,7 +169,7 @@ pub proof fn initialize_system_state<ML, RL>(tracked zero_perm: PermissionU64) -
         request_map,
         server_tokens,
     };
-    state.servers.lemma_dom();
+    state.servers.lemma_inv();
     assert forall|id| #[trigger]
         state.unclaimed_servers().contains(
             id,

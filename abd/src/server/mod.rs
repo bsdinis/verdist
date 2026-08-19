@@ -2,7 +2,7 @@ use crate::channel::ChannelInv;
 #[cfg(verus_only)]
 use crate::invariants;
 #[cfg(verus_only)]
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::proto::GetRequest;
 use crate::proto::GetTimestampRequest;
 use crate::proto::Request;
@@ -289,28 +289,28 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
             if request_inner is Get {
                 let get_req = request_inner->Get_0;
                 let proof_get_req = request_proof@.get();
-                assume(proof_get_req.servers().inv());  // TODO(verus): type invariants on spec items
-                assume(get_req.servers().inv());  // TODO(verus): type invariants on spec items
+                request_proof.borrow().lemma_get_inv();
                 GetRequest::lemma_spec_eq(proof_get_req, get_req);
-                ServerUniverse::lemma_eq(proof_get_req.servers(), get_req.servers());
+                get_req.servers().lemma_eq_preserves_inv(proof_get_req.servers());
+                ServerUniverseLb::lemma_eq(proof_get_req.servers(), get_req.servers());
                 proof_get_req.servers().lemma_locs();
             }
             if request_inner is GetTimestamp {
                 let get_ts_req = request_inner->GetTimestamp_0;
                 let proof_get_ts_req = request_proof@.get_timestamp();
-                assume(proof_get_ts_req.servers().inv());  // TODO(verus): type invariants on spec items
-                assume(get_ts_req.servers().inv());  // TODO(verus): type invariants on spec items
+                request_proof.borrow().lemma_get_timestamp_inv();
                 GetTimestampRequest::lemma_spec_eq(proof_get_ts_req, get_ts_req);
-                ServerUniverse::lemma_eq(proof_get_ts_req.servers(), get_ts_req.servers());
+                get_ts_req.servers().lemma_eq_preserves_inv(proof_get_ts_req.servers());
+                ServerUniverseLb::lemma_eq(proof_get_ts_req.servers(), get_ts_req.servers());
                 proof_get_ts_req.servers().lemma_locs();
             }
             if request_inner is Write {
                 let write_req = request_inner->Write_0;
                 let proof_write_req = request_proof@.write();
-                assume(proof_write_req.servers().inv());  // TODO(verus): type invariants on spec items
-                assume(write_req.servers().inv());  // TODO(verus): type invariants on spec items
+                request_proof.borrow().lemma_write_inv();
                 WriteRequest::lemma_spec_eq(proof_write_req, write_req);
-                ServerUniverse::lemma_eq(proof_write_req.servers(), write_req.servers());
+                write_req.servers().lemma_eq_preserves_inv(proof_write_req.servers());
+                ServerUniverseLb::lemma_eq(proof_write_req.servers(), write_req.servers());
                 proof_write_req.servers().lemma_locs();
             }
         }

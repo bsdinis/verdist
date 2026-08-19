@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::channel::ChannelInv;
 #[cfg(verus_only)]
 use crate::invariants::quorum::Quorum;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::requests::RequestProof;
 #[cfg(verus_only)]
 use crate::invariants::StatePredicate;
@@ -31,7 +31,7 @@ verus! {
 #[allow(unused_variables, dead_code)]
 pub ghost struct GetTimestampPred<C: Channel<K = ChannelInv>> {
     pub server_locs: Map<u64, Loc>,
-    pub orig_servers: ServerUniverse,
+    pub orig_servers: ServerUniverseLb,
     pub request_map_id: Loc,
     pub server_tokens_id: Loc,
     pub channels: Map<C::Id, C>,
@@ -72,7 +72,7 @@ pub struct GetTimestampAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> 
     /// Constructed view over the server map
     ///
     /// In the beginning, we only know that every quorum is bounded bellow by the watermark
-    servers: Tracked<ServerUniverse>,
+    servers: Tracked<ServerUniverseLb>,
     /// Lower bound for the server tokens
     server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
     /// channels of the pool this accumulator is working with
@@ -99,12 +99,7 @@ pub open spec fn request_inv(
     &&& request.key().0 == client_id
     &&& request.key().1 == request_id
     &&& request.req_type() is GetTimestamp
-    &&& server_inv(request.get_timestamp().servers())
-}
-
-pub open spec fn server_inv(s: ServerUniverse) -> bool {
-    &&& s.inv()
-    &&& s.is_lb()
+    &&& (request.get_timestamp().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -118,7 +113,7 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
 
 impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     pub fn new(
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
         request: Tracked<RequestProof>,
         #[allow(unused_variables)]
@@ -128,7 +123,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             pred@.server_locs == servers@.locs(),
             pred@.server_tokens_id == server_tokens@.id(),
             server_tokens@@ <= servers@.locs(),
-            server_inv(servers@),
+            (servers@).inv(),
             request_inv(request@, pred@.request_map_id, pred@.client_id, pred@.request_id),
             request@.get_timestamp().servers().eq_timestamp(servers@),
             request@.get_timestamp().servers() == pred@.orig_servers,
@@ -156,12 +151,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 
     closed spec fn server_invs(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         server_tokens: Map<u64, Loc>,
     ) -> bool {
-        &&& server_inv(servers)
-        &&& server_inv(req_servers)
+        &&& (servers).inv()
+        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& server_tokens <= servers.locs()
     }
@@ -177,7 +172,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
 
     closed spec fn replies_inv(
         replies: Set<C::Id>,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         client_id: u64,
     ) -> bool {
         &&& forall|cid| #[trigger] replies.contains(cid) ==> cid.0 == client_id
@@ -185,8 +180,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 
     closed spec fn unchanged_inv(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         replies: Set<C::Id>,
         client_id: u64,
     ) -> bool {
@@ -211,7 +206,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     closed spec fn agree_with_max_inv(
         agree_with_max: Set<u64>,
         replies: Set<C::Id>,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         max_resp: Option<GetTimestampResponse>,
     ) -> bool {
         &&& Self::agree_with_max_aux_inv(agree_with_max, replies, max_resp)
@@ -220,7 +215,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
 
     closed spec fn max_resp_inv(
         max_resp: GetTimestampResponse,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         agree_with_max: Set<u64>,
         replies: Set<C::Id>,
         server_tokens_id: Loc,
@@ -283,11 +278,11 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         self.request@.key().1
     }
 
-    pub closed spec fn orig_servers(self) -> ServerUniverse {
+    pub closed spec fn orig_servers(self) -> ServerUniverseLb {
         self.request@.get_timestamp().servers()
     }
 
-    pub closed spec fn servers(self) -> ServerUniverse {
+    pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
     }
 
@@ -370,8 +365,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 
     proof fn update_servers(
-        tracked servers: &mut ServerUniverse,
-        req_servers: ServerUniverse,
+        tracked servers: &mut ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         agree_with_max: Set<u64>,
         max_resp: &Option<GetTimestampResponse>,
         server_id: u64,
@@ -416,7 +411,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 assert(servers.contains_key(id));  // XXX: trigger
             }
         }
-        ServerUniverse::lemma_leq_trans(req_servers, old_servers, *servers);
+        ServerUniverseLb::lemma_leq_trans(req_servers, old_servers, *servers);
     }
 
     // EXEC
@@ -440,7 +435,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         self.replies.clone()
     }
 
-    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverse>)
+    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverseLb>)
         requires
             !self.replies().is_empty(),
         ensures
@@ -448,7 +443,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             self.servers().leq(r@),
             self.servers().inv(),
             r@.inv(),
-            r@.is_lb(),
             r@.valid_quorum(self.quorum()) ==> r@.quorum_timestamp(self.quorum())
                 == self.spec_max_timestamp(),
             self.servers().eq_timestamp(r@),
@@ -461,7 +455,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
             lbs = self.servers.borrow().extract_lbs();
             lbs.lemma_locs();
             lbs.lemma_eq(self.servers());
-            ServerUniverse::lemma_leq_trans(self.orig_servers(), self.servers(), lbs);
+            ServerUniverseLb::lemma_leq_trans(self.orig_servers(), self.servers(), lbs);
         }
         Tracked(lbs)
     }
@@ -484,7 +478,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         agree_with_max: &mut BTreeSet<u64>,
         replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        servers: &Tracked<ServerUniverse>,
+        servers: &Tracked<ServerUniverseLb>,
         resp: GetTimestampResponse,
         id: (u64, u64),
     )
@@ -551,7 +545,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         agree_with_max: &mut BTreeSet<u64>,
         replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        servers: &mut Tracked<ServerUniverse>,
+        servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         #[allow(unused_variables)]
         request: &Tracked<RequestProof>,

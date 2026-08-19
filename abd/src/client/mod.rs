@@ -11,7 +11,9 @@ use crate::invariants::lin_queue::MaybeWriteLinearized;
 #[cfg(verus_only)]
 use crate::invariants::quorum::Quorum;
 #[cfg(verus_only)]
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseAuth;
+#[cfg(verus_only)]
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::requests::RequestCtrToken;
 #[cfg(verus_only)]
 use crate::invariants::RegisterView;
@@ -223,7 +225,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             broadcast use crate::proto::GetRequest::lemma_spec_eq;
             broadcast use crate::proto::WriteRequest::lemma_spec_eq;
-            broadcast use ServerUniverse::lemma_eq_timestamp_trans;
+            broadcast use ServerUniverseLb::lemma_eq_timestamp_trans;
 
         }
 
@@ -241,7 +243,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 server_lbs = state.servers.extract_lbs();
                 server_tokens_lb = state.server_tokens.lower_bound();
                 assert(server_tokens_lb@ == state.server_tokens@);
-                state.servers.lemma_leq_quorums(server_lbs, state.linearization_queue.watermark());
+                state.servers.lemma_leq_quorums_lb(server_lbs, state.linearization_queue.watermark());
                 token = state.linearization_queue.insert_read_linearizer(lin, op, proph_val@, &state.register);
 
                 assert(forall|q: Quorum|  #[trigger] server_lbs.valid_quorum(q) ==> {
@@ -256,10 +258,18 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         let req_inner = RequestInner::new_get(Tracked(server_lbs_cpy));
         #[allow(unused_variables)]
         let cloned_req = req_inner.clone();
-        let tracked treq = cloned_req;
-        assume(treq->Get_0.servers().inv());  // TODO(tracked_servers)
-        assume(treq->Get_0.servers().is_lb());  // TODO(tracked_servers)
-        assert(req_inner->Get_0.servers().spec_eq(treq->Get_0.servers()));  // TODO(XXX): debug
+        let tracked mut treq = cloned_req;
+        proof {
+            match treq {
+                RequestInner::Get(get_req) => {
+                    get_req.lemma_inv();
+                    treq = RequestInner::Get(get_req);
+                },
+                other => {
+                    treq = other;
+                },
+            }
+        }
         let tracked request_proof;
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -361,7 +371,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     replies_servers.lemma_lb(&state.servers);
                     old_replies_servers.lemma_eq(replies_servers);
                     assert(old_replies_servers.valid_quorum(replies.first_quorum()));
-                    replies_servers.lemma_leq_implies_validity(state.servers, replies.first_quorum());
+                    replies_servers.lemma_leq_implies_validity_auth(state.servers, replies.first_quorum());
                 }
             });
         }
@@ -388,8 +398,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     replies_servers.lemma_lb(&state.servers);
                     old_replies_servers.lemma_eq(replies_servers);
                     assert(old_replies_servers.valid_quorum(replies.quorum()));
-                    replies_servers.lemma_leq_implies_validity(state.servers, replies.quorum());
-                    replies_servers.lemma_leq_retains_unanimity(state.servers, replies.quorum(), max_ts);
+                    replies_servers.lemma_leq_implies_validity_auth(state.servers, replies.quorum());
+                    replies_servers.lemma_leq_retains_unanimity_auth(state.servers, replies.quorum(), max_ts);
                     state.servers.lemma_quorum_lb(replies.quorum(), max_ts);
 
                     let tracked (mut register, _view) = GhostVarAuth::<Option<u64>>::new(None);
@@ -425,11 +435,19 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         );
         #[allow(unused_variables)]
         let cloned_req = req_inner.clone();
-        let tracked treq = cloned_req;
+        let tracked mut treq = cloned_req;
+        proof {
+            match treq {
+                RequestInner::Write(write_req) => {
+                    write_req.lemma_inv();
+                    treq = RequestInner::Write(write_req);
+                },
+                other => {
+                    treq = other;
+                },
+            }
+        }
         let tracked request_proof;
-        assume(treq->Write_0.servers().inv());  // TODO(tracked_servers)
-        assume(treq->Write_0.servers().is_lb());  // TODO(tracked_servers)
-        assert(req_inner->Write_0.servers().spec_eq(treq->Write_0.servers()));  // TODO(XXX): debug
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
             let ghost old_dom = state.request_map.request_ctr_map().dom();
@@ -517,8 +535,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 replies_servers.lemma_lb(&state.servers);
                 old_replies_servers.lemma_eq(replies_servers);
                 assert(old_replies_servers.valid_quorum(wb_replies.quorum()));
-                replies_servers.lemma_leq_implies_validity(state.servers, wb_replies.quorum());
-                replies_servers.lemma_leq_retains_unanimity(state.servers, wb_replies.quorum(), max_ts);
+                replies_servers.lemma_leq_implies_validity_auth(state.servers, wb_replies.quorum());
+                replies_servers.lemma_leq_retains_unanimity_auth(state.servers, wb_replies.quorum(), max_ts);
                 assert(state.servers.unanimous_quorum(wb_replies.quorum(), max_ts));
                 state.servers.lemma_quorum_lb(wb_replies.quorum(), max_ts);
 
@@ -552,7 +570,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         proof {
             broadcast use crate::proto::GetTimestampRequest::lemma_spec_eq;
             broadcast use crate::proto::WriteRequest::lemma_spec_eq;
-            broadcast use ServerUniverse::lemma_eq_timestamp_trans;
+            broadcast use ServerUniverseLb::lemma_eq_timestamp_trans;
 
         }
         let tracked op = RegisterWrite { id: Ghost(self.register_loc()), new_value: value };
@@ -598,7 +616,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 server_lbs = state.servers.extract_lbs();
                 server_tokens_lb = state.server_tokens.lower_bound();
                 assert(server_tokens_lb@ == state.server_tokens@);
-                state.servers.lemma_leq_quorums(server_lbs, state.linearization_queue.watermark());
+                state.servers.lemma_leq_quorums_lb(server_lbs, state.linearization_queue.watermark());
                 let ghost old_known = state.linearization_queue.known_timestamps();
 
                 let tracked allocation_opt = if proph_ts > state.linearization_queue.watermark() {
@@ -637,10 +655,18 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         let req_inner = RequestInner::new_get_timestamp(Tracked(server_lbs_cpy));
         #[allow(unused_variables)]
         let cloned_req = req_inner.clone();
-        let tracked treq = cloned_req;
-        assume(treq->GetTimestamp_0.servers().inv());  // TODO(tracked_servers)
-        assume(treq->GetTimestamp_0.servers().is_lb());  // TODO(tracked_servers)
-        assert(req_inner->GetTimestamp_0.servers().spec_eq(treq->GetTimestamp_0.servers()));  // TODO(XXX): debug
+        let tracked mut treq = cloned_req;
+        proof {
+            match treq {
+                RequestInner::GetTimestamp(get_ts_req) => {
+                    get_ts_req.lemma_inv();
+                    treq = RequestInner::GetTimestamp(get_ts_req);
+                },
+                other => {
+                    treq = other;
+                },
+            }
+        }
         let tracked request_proof;
         let request_id;
         vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -764,7 +790,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     old_replies_servers.lemma_eq(replies_servers);
                     assert(old_replies_servers.valid_quorum(quorum));
 
-                    ServerUniverse::lemma_leq_trans(replies_orig_servers, old_replies_servers, replies_servers);
+                    ServerUniverseLb::lemma_leq_trans(replies_orig_servers, old_replies_servers, replies_servers);
                     replies_orig_servers.lemma_leq_implies_validity(replies_servers, quorum);
 
                     let tracked mut tk = lemma_watermark_contradiction(
@@ -807,9 +833,18 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             );
             #[allow(unused_variables)]
             let cloned_req = req_inner.clone();
-            let tracked treq = cloned_req;
-            assume(treq->Write_0.servers().inv());  // TODO(tracked_servers)
-            assume(treq->Write_0.servers().is_lb());  // TODO(tracked_servers)
+            let tracked mut treq = cloned_req;
+            proof {
+                match treq {
+                    RequestInner::Write(write_req) => {
+                        write_req.lemma_inv();
+                        treq = RequestInner::Write(write_req);
+                    },
+                    other => {
+                        treq = other;
+                    },
+                }
+            }
             let tracked request_proof;
             let request_id;
             vstd::open_atomic_invariant!(&self.state_inv.borrow() => state => {
@@ -904,7 +939,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     old_replies_servers.lemma_eq(replies_servers);
                     assert(old_replies_servers.valid_quorum(quorum));
 
-                    replies_servers.lemma_leq_retains_unanimity(state.servers, quorum, exec_ts);
+                    replies_servers.lemma_leq_retains_unanimity_auth(state.servers, quorum, exec_ts);
                     state.linearization_queue.lemma_write_token(&token);
                     state.commitments.agree_commitment(&commitment);
 
@@ -952,8 +987,8 @@ pub proof fn lemma_watermark_contradiction<ML, RL>(
     old_watermark: Timestamp,
     lin: ML,
     op: RegisterWrite,
-    orig_servers: ServerUniverse,
-    servers: ServerUniverse,
+    orig_servers: ServerUniverseLb,
+    servers: ServerUniverseLb,
     write_token_id: Loc,
     quorum: Quorum,
 ) -> (tracked tok: LinWriteToken<ML>) where
@@ -962,9 +997,7 @@ pub proof fn lemma_watermark_contradiction<ML, RL>(
 
     requires
         orig_servers.inv(),
-        orig_servers.is_lb(),
         servers.inv(),
-        servers.is_lb(),
         servers.valid_quorum(quorum),
         orig_servers.leq(servers),
         orig_servers.valid_quorum(quorum),

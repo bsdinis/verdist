@@ -66,7 +66,7 @@ pub struct StatePredicate {
 pub struct State<ML, RL> where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead> {
     pub tracked register: GhostVarAuth<Option<u64>>,
     pub tracked linearization_queue: LinearizationQueue<ML, RL>,
-    pub tracked servers: ServerUniverse,
+    pub tracked servers: ServerUniverseAuth,
     pub tracked server_tokens: GhostMonotonicMap<u64, Loc>,
     pub tracked commitments: Commitments,
     pub tracked request_map: RequestMap,
@@ -84,7 +84,6 @@ impl<ML, RL> State<ML, RL> where
         // member invariants
         &&& self.linearization_queue.inv()
         &&& self.servers.inv()
-        &&& self.servers.is_auth()
         &&& self.commitments.is_full()
         &&& self.request_map.is_full()
         // client ids
@@ -143,7 +142,7 @@ pub proof fn initialize_system_state<ML, RL>(tracked zero_perm: PermissionU64) -
         r.0.constant().register_id == r.1.id(),
 {
     let tracked (register, view) = GhostVarAuth::<Option<u64>>::new(None);
-    let tracked servers = ServerUniverse::dummy();
+    let tracked servers = ServerUniverseAuth::dummy();
     let tracked commitments = Commitments::new(zero_perm);
     let tracked request_map = RequestMap::new();
     let tracked zero_commitment = commitments.zero_commitment();

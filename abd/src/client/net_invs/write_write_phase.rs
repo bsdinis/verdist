@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::channel::ChannelInv;
 #[cfg(verus_only)]
 use crate::invariants::quorum::Quorum;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::requests::RequestProof;
 #[cfg(verus_only)]
 use crate::invariants::StatePredicate;
@@ -31,7 +31,7 @@ verus! {
 #[allow(unused_variables, dead_code)]
 pub ghost struct WritePred<C: Channel<K = ChannelInv>> {
     pub server_locs: Map<u64, Loc>,
-    pub orig_servers: ServerUniverse,
+    pub orig_servers: ServerUniverseLb,
     pub commitment_id: Loc,
     pub request_map_id: Loc,
     pub server_tokens_id: Loc,
@@ -72,7 +72,7 @@ pub struct WriteAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     // Spec state
     /// Constructed view over the server map
     /// The target is to show that there is a unanimous quorum >= request...timestamp()
-    servers: Tracked<ServerUniverse>,
+    servers: Tracked<ServerUniverseLb>,
     /// Lower bound for the server tokens
     server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
     /// channels of the pool this accumulator is working with
@@ -99,12 +99,7 @@ pub open spec fn request_inv<C: Channel<K = ChannelInv>>(
     &&& request.req_type() is Write
     &&& request.write().commitment_id() == pred.commitment_id
     &&& request.write().spec_timestamp() == pred.timestamp
-    &&& server_inv(request.write().servers())
-}
-
-pub open spec fn server_inv(s: ServerUniverse) -> bool {
-    &&& s.inv()
-    &&& s.is_lb()
+    &&& (request.write().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -119,7 +114,7 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
 
 impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     pub fn new(
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
         request: Tracked<RequestProof>,
         #[allow(unused_variables)]
@@ -129,7 +124,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             pred@.server_locs == servers@.locs(),
             pred@.server_tokens_id == server_tokens@.id(),
             server_tokens@@ <= servers@.locs(),
-            server_inv(servers@),
+            (servers@).inv(),
             request_inv(request@, pred@),
             request@.write().servers().eq_timestamp(servers@),
             request@.write().servers() == pred@.orig_servers,
@@ -156,12 +151,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     closed spec fn server_invs(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         server_tokens: Map<u64, Loc>,
     ) -> bool {
-        &&& server_inv(servers)
-        &&& server_inv(req_servers)
+        &&& (servers).inv()
+        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& server_tokens <= servers.locs()
     }
@@ -177,7 +172,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
 
     closed spec fn replies_inv(
         replies: Set<C::Id>,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         timestamp: Timestamp,
         client_id: u64,
     ) -> bool {
@@ -190,8 +185,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     closed spec fn unchanged_inv(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         replies: Set<C::Id>,
         client_id: u64,
     ) -> bool {
@@ -240,11 +235,11 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         self.request@.key().1
     }
 
-    pub closed spec fn orig_servers(self) -> ServerUniverse {
+    pub closed spec fn orig_servers(self) -> ServerUniverseLb {
         self.request@.write().servers()
     }
 
-    pub closed spec fn servers(self) -> ServerUniverse {
+    pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
     }
 
@@ -308,8 +303,8 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 
     proof fn update_servers(
-        tracked servers: &mut ServerUniverse,
-        req_servers: ServerUniverse,
+        tracked servers: &mut ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         server_id: u64,
         tracked lb: MonotonicTimestampResource,
     )
@@ -337,7 +332,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             servers.tracked_update_lb(server_id, lb);
         }
         assert(servers[server_id]@@.timestamp() >= lb@.timestamp());
-        ServerUniverse::lemma_leq_trans(req_servers, old_servers, *servers);
+        ServerUniverseLb::lemma_leq_trans(req_servers, old_servers, *servers);
     }
 
     // EXEC
@@ -361,7 +356,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         self.replies.clone()
     }
 
-    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverse>)
+    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverseLb>)
         requires
             !self.replies().is_empty(),
         ensures
@@ -370,7 +365,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
             self.servers().inv(),
             r@.leq(self.servers()),
             r@.inv(),
-            r@.is_lb(),
             r@.valid_quorum(self.quorum()) ==> r@.unanimous_quorum(
                 self.quorum(),
                 self.spec_timestamp(),
@@ -391,7 +385,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     fn insert_aux(
         replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        servers: &mut Tracked<ServerUniverse>,
+        servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         #[allow(unused_variables)]
         request: &Tracked<RequestProof>,

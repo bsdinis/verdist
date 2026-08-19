@@ -3,9 +3,12 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::set::Set;
 
-mod server_universe;
+mod auth;
+mod lb;
+mod server_map;
 
-pub use server_universe::ServerUniverse;
+pub use auth::ServerUniverseAuth;
+pub use lb::ServerUniverseLb;
 
 verus! {
 

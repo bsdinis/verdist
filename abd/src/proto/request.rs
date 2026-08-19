@@ -1,5 +1,5 @@
 use crate::invariants::committed_to::WriteCommitment;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::requests::RequestProof;
 use crate::proto::get::GetRequest;
 use crate::proto::get_timestamp::GetTimestampRequest;
@@ -111,10 +111,9 @@ impl RequestInner {
         }
     }
 
-    pub fn new_get(servers: Tracked<ServerUniverse>) -> (r: Self)
+    pub fn new_get(servers: Tracked<ServerUniverseLb>) -> (r: Self)
         requires
             servers@.inv(),
-            servers@.is_lb(),
         ensures
             r.req_type() is Get,
             ({
@@ -125,10 +124,9 @@ impl RequestInner {
         RequestInner::Get(GetRequest::new(servers))
     }
 
-    pub fn new_get_timestamp(servers: Tracked<ServerUniverse>) -> (r: Self)
+    pub fn new_get_timestamp(servers: Tracked<ServerUniverseLb>) -> (r: Self)
         requires
             servers@.inv(),
-            servers@.is_lb(),
         ensures
             r.req_type() is GetTimestamp,
             ({
@@ -143,11 +141,10 @@ impl RequestInner {
         value: Option<u64>,
         timestamp: Timestamp,
         commitment: Tracked<WriteCommitment>,
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
     ) -> (r: Self)
         requires
             servers@.inv(),
-            servers@.is_lb(),
             commitment@.key() == timestamp,
             commitment@.value() == value,
         ensures

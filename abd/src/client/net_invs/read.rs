@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::channel::ChannelInv;
 #[cfg(verus_only)]
 use crate::invariants::quorum::Quorum;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::requests::RequestProof;
 #[cfg(verus_only)]
 use crate::invariants::StatePredicate;
@@ -30,7 +30,7 @@ verus! {
 #[allow(unused_variables, dead_code)]
 pub ghost struct ReadPred<C: Channel<K = ChannelInv>> {
     pub server_locs: Map<u64, Loc>,
-    pub orig_servers: ServerUniverse,
+    pub orig_servers: ServerUniverseLb,
     pub commitment_id: Loc,
     pub request_map_id: Loc,
     pub server_tokens_id: Loc,
@@ -84,7 +84,7 @@ pub struct ReadAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     /// In the beginning, we only know that every quorum is bounded bellow by the watermark
     /// Over time, we monotonically gain knowledge that every quorum is bounded bellow by
     /// `max_resp.timestamp()`
-    servers: Tracked<ServerUniverse>,
+    servers: Tracked<ServerUniverseLb>,
     /// Lower bound for the server tokens
     server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
     /// The original watermark at creation time
@@ -109,7 +109,7 @@ impl<C> InvariantPredicate<ReadPred<C>, ReadAccumulator<C>> for ReadPred<C> wher
 
 pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
     request: RequestProof,
-    servers: ServerUniverse,
+    servers: ServerUniverseLb,
     k: ReadPred<C>,
 ) -> bool {
     &&& request.id() == k.request_map_id
@@ -118,12 +118,7 @@ pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
     &&& request.get().servers().eq_timestamp(servers)
     &&& request.get().servers() == k.orig_servers
     &&& request.req_type() is Get
-    &&& server_inv(request.get().servers())
-}
-
-pub open spec fn server_inv(s: ServerUniverse) -> bool {
-    &&& s.inv()
-    &&& s.is_lb()
+    &&& (request.get().servers()).inv()
 }
 
 pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
@@ -137,7 +132,7 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
 }
 
 pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
-    servers: ServerUniverse,
+    servers: ServerUniverseLb,
     server_tokens: GhostPersistentSubmap<u64, Loc>,
     get_request: RequestProof,
     k: ReadPred<C>,
@@ -146,7 +141,7 @@ pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>
     &&& k.server_tokens_id == server_tokens.id()
     &&& k.wb_request_id is None
     &&& server_tokens@ <= servers.locs()
-    &&& server_inv(servers)
+    &&& (servers).inv()
     &&& get_request_inv(get_request, servers, k)
     &&& forall|q: Quorum| #[trigger]
         servers.valid_quorum(q) ==> { k.min_timestamp <= servers.quorum_timestamp(q) }
@@ -160,7 +155,7 @@ pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>
 
 impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     pub fn new(
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
         get_request: Tracked<RequestProof>,
         #[allow(unused_variables)]
@@ -191,13 +186,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     closed spec fn server_invs(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         server_tokens: Map<u64, Loc>,
         min_timestamp: Timestamp,
     ) -> bool {
-        &&& server_inv(servers)
-        &&& server_inv(req_servers)
+        &&& (servers).inv()
+        &&& (req_servers).inv()
         &&& req_servers.leq(servers)
         &&& forall|q: Quorum| #[trigger]
             servers.valid_quorum(q) ==> servers.quorum_timestamp(q) >= min_timestamp
@@ -230,15 +225,15 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             &&& req.key().0 == get_request.key().0
             &&& req.req_type() is Write
             &&& req.write().spec_timestamp() == max_resp->Some_0.spec_timestamp()
-            &&& server_inv(req.write().servers())
+            &&& (req.write().servers()).inv()
             &&& req.write().servers().eq_timestamp(get_request.get().servers())
         }
     }
 
     // TODO: take in the union
     closed spec fn unchanged_inv(
-        servers: ServerUniverse,
-        req_servers: ServerUniverse,
+        servers: ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         get_replies: Set<C::Id>,
         wb_replies: Set<C::Id>,
         client_id: u64,
@@ -267,7 +262,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         agree_with_max: Set<u64>,
         get_replies: Set<C::Id>,
         wb_replies: Set<C::Id>,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         max_resp: Option<GetResponse>,
     ) -> bool {
         &&& Self::agree_with_max_aux_inv(agree_with_max, get_replies, wb_replies, max_resp)
@@ -276,7 +271,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
     closed spec fn max_resp_inv(
         max_resp: GetResponse,
-        servers: ServerUniverse,
+        servers: ServerUniverseLb,
         agree_with_max: Set<u64>,
         get_replies: Set<C::Id>,
         wb_replies: Set<C::Id>,
@@ -366,7 +361,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         self.get_request@.key().1
     }
 
-    pub closed spec fn orig_servers(self) -> ServerUniverse {
+    pub closed spec fn orig_servers(self) -> ServerUniverseLb {
         self.get_request@.get().servers()
     }
 
@@ -377,7 +372,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         }
     }
 
-    pub closed spec fn servers(self) -> ServerUniverse {
+    pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
     }
 
@@ -494,18 +489,16 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         proof {
             use_type_invariant(self);
             if self.servers().valid_quorum(self.quorum()) {
-                let quorum_map = self.servers().map.restrict(self.quorum());
-                assert(quorum_map.dom() == self.quorum());  // XXX: load bearing
+                self.servers().lemma_quorum_vals_nonempty(self.quorum());
                 let quorum_vals = self.servers().quorum_vals(self.quorum());
-                assume(quorum_vals.len() > 0);  // TODO(verus): this needs a verus lemma
-                quorum_vals.find_unique_maximal_ensures(ServerUniverse::ts_leq());
+                quorum_vals.find_unique_maximal_ensures(ServerUniverseLb::ts_leq());
             }
         }
     }
 
     proof fn update_servers(
-        tracked servers: &mut ServerUniverse,
-        req_servers: ServerUniverse,
+        tracked servers: &mut ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         min_timestamp: Timestamp,
         agree_with_max: Set<u64>,
         max_resp: &Option<GetResponse>,
@@ -552,12 +545,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 assert(servers.contains_key(id));  // XXX: trigger
             }
         }
-        ServerUniverse::lemma_leq_trans(req_servers, old_servers, *servers);
+        ServerUniverseLb::lemma_leq_trans(req_servers, old_servers, *servers);
     }
 
     proof fn update_servers_on_wb(
-        tracked servers: &mut ServerUniverse,
-        req_servers: ServerUniverse,
+        tracked servers: &mut ServerUniverseLb,
+        req_servers: ServerUniverseLb,
         min_timestamp: Timestamp,
         agree_with_max: Set<u64>,
         max_resp: GetResponse,
@@ -602,7 +595,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             >= max_resp.spec_timestamp() by {
             assert(servers.contains_key(id));  // XXX: trigger
         }
-        ServerUniverse::lemma_leq_trans(req_servers, old_servers, *servers);
+        ServerUniverseLb::lemma_leq_trans(req_servers, old_servers, *servers);
     }
 
     // EXEC
@@ -626,7 +619,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         self.wb_replies.clone()
     }
 
-    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverse>)
+    pub fn servers_lb(&self) -> (r: Tracked<ServerUniverseLb>)
         requires
             !self.spec_get_replies().is_empty(),
         ensures
@@ -635,7 +628,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             self.servers().inv(),
             r@.leq(self.servers()),
             r@.inv(),
-            r@.is_lb(),
             r@.valid_quorum(self.quorum()) ==> r@.unanimous_quorum(
                 self.quorum(),
                 self.spec_max_timestamp(),
@@ -811,7 +803,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         agree_with_max: &mut BTreeSet<u64>,
         get_replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        servers: &mut Tracked<ServerUniverse>,
+        servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         #[allow(unused_variables)]
         wb_replies: &BTreeSet<C::Id>,
@@ -1041,7 +1033,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         agree_with_max: &mut BTreeSet<u64>,
         wb_replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        servers: &mut Tracked<ServerUniverse>,
+        servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         max_resp: &Option<GetResponse>,
         #[allow(unused_variables)]
@@ -1270,7 +1262,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> InvariantPredicate<
 
 impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumGetPhase<C> {
     pub fn new(
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
         get_request: Tracked<RequestProof>,
         read_pred: Ghost<ReadPred<C>>,
@@ -1375,7 +1367,6 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
             wb_request@.req_type() is Write,
             wb_request@.write().spec_timestamp() == accum.spec_max_timestamp(),
             wb_request@.write().servers().inv(),
-            wb_request@.write().servers().is_lb(),
             wb_request@.write().servers().eq_timestamp(accum.orig_servers()),
         ensures
             r.spec_request_tag() == wb_request@.key().1,

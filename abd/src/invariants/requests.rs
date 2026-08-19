@@ -77,6 +77,66 @@ impl RequestProof {
         self@->Write_0
     }
 
+    /// Unlocks `self.get().servers().inv()` for a genuinely tracked `RequestProof`, instead of
+    /// assuming it on the bare ghost projection `self.get()`.
+    pub proof fn lemma_get_inv(tracked &self)
+        requires
+            self.req_type() is Get,
+        ensures
+            self.get().servers().inv(),
+    {
+        use_type_invariant(self);
+        if let RequestInner::Get(inner_get) = &self.inner {
+            inner_get.lemma_inv();
+            assert(self.r.value().spec_eq(self.inner));
+            assert(self.get().spec_eq(*inner_get));
+            GetRequest::lemma_spec_eq(self.get(), *inner_get);
+            self.get().servers().lemma_eq_preserves_inv(inner_get.servers());
+        } else {
+            assert(false);
+        }
+    }
+
+    /// Unlocks `self.get_timestamp().servers().inv()` for a genuinely tracked `RequestProof`,
+    /// instead of assuming it on the bare ghost projection `self.get_timestamp()`.
+    pub proof fn lemma_get_timestamp_inv(tracked &self)
+        requires
+            self.req_type() is GetTimestamp,
+        ensures
+            self.get_timestamp().servers().inv(),
+    {
+        use_type_invariant(self);
+        if let RequestInner::GetTimestamp(inner_get_ts) = &self.inner {
+            inner_get_ts.lemma_inv();
+            assert(self.r.value().spec_eq(self.inner));
+            assert(self.get_timestamp().spec_eq(*inner_get_ts));
+            GetTimestampRequest::lemma_spec_eq(self.get_timestamp(), *inner_get_ts);
+            self.get_timestamp().servers().lemma_eq_preserves_inv(inner_get_ts.servers());
+        } else {
+            assert(false);
+        }
+    }
+
+    /// Unlocks `self.write().servers().inv()` for a genuinely tracked `RequestProof`, instead
+    /// of assuming it on the bare ghost projection `self.write()`.
+    pub proof fn lemma_write_inv(tracked &self)
+        requires
+            self.req_type() is Write,
+        ensures
+            self.write().servers().inv(),
+    {
+        use_type_invariant(self);
+        if let RequestInner::Write(inner_write) = &self.inner {
+            inner_write.lemma_inv();
+            assert(self.r.value().spec_eq(self.inner));
+            assert(self.write().spec_eq(*inner_write));
+            WriteRequest::lemma_spec_eq(self.write(), *inner_write);
+            self.write().servers().lemma_eq_preserves_inv(inner_write.servers());
+        } else {
+            assert(false);
+        }
+    }
+
     pub proof fn duplicate(tracked &self) -> (tracked r: Self)
         ensures
             r.id() == self.id(),

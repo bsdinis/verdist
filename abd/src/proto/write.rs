@@ -1,5 +1,5 @@
 use crate::invariants::committed_to::WriteCommitment;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::ServerToken;
 use crate::resource::monotonic_timestamp::MonotonicTimestampResource;
 use crate::timestamp::Timestamp;
@@ -16,7 +16,7 @@ pub struct WriteRequest {
     #[allow(unused)]
     commitment: Tracked<WriteCommitment>,
     #[allow(unused)]
-    servers: Tracked<ServerUniverse>,
+    servers: Tracked<ServerUniverseLb>,
 }
 
 #[allow(unused)]
@@ -33,13 +33,12 @@ impl WriteRequest {
         value: Option<u64>,
         timestamp: Timestamp,
         commitment: Tracked<WriteCommitment>,
-        servers: Tracked<ServerUniverse>,
+        servers: Tracked<ServerUniverseLb>,
     ) -> (r: Self)
         requires
             commitment@.key() == timestamp,
             commitment@.value() == value,
             servers@.inv(),
-            servers@.is_lb(),
         ensures
             r.spec_timestamp() == timestamp,
             r.spec_value() == value,
@@ -54,11 +53,19 @@ impl WriteRequest {
         &&& self.commitment@.key() == self.timestamp
         &&& self.commitment@.value() == self.value
         &&& self.servers@.inv()
-        &&& self.servers@.is_lb()
     }
 
-    pub closed spec fn servers(self) -> ServerUniverse {
+    pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
+    }
+
+    /// Unlocks the facts bundled in `Self::inv()` for a genuinely tracked value, so callers
+    /// don't need to `assume` them on a bare ghost/spec projection.
+    pub proof fn lemma_inv(tracked &self)
+        ensures
+            self.servers().inv(),
+    {
+        use_type_invariant(self);
     }
 
     pub fn server_lower_bound(&mut self, server_id: Ghost<u64>) -> (r: Tracked<
@@ -161,8 +168,7 @@ impl WriteRequest {
         ensures
             #[trigger] a.spec_eq(a),
     {
-        assume(a.servers@.inv());  // TODO(verus): type invariants on spec items
-        ServerUniverse::lemma_eq_refl(a.servers@)
+        ServerUniverseLb::lemma_eq_refl(a.servers@)
     }
 
     pub broadcast proof fn spec_eq_symm(a: Self, b: Self)
@@ -180,10 +186,7 @@ impl WriteRequest {
         ensures
             a.spec_eq(c),
     {
-        assume(a.servers@.inv());  // TODO(verus): type invariants on spec items
-        assume(b.servers@.inv());  // TODO(verus): type invariants on spec items
-        assume(c.servers@.inv());  // TODO(verus): type invariants on spec items
-        ServerUniverse::lemma_eq_trans(a.servers@, b.servers@, c.servers@)
+        ServerUniverseLb::lemma_eq_trans(a.servers@, b.servers@, c.servers@)
     }
 
     pub broadcast proof fn lemma_spec_eq(a: Self, b: Self)
@@ -206,7 +209,7 @@ impl WriteRequest {
         use_type_invariant(self);
         new_commitment = self.commitment.borrow().duplicate();
         new_servers = self.servers.borrow().extract_lbs();
-        ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+        ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         WriteRequest {
             value: self.value,
             timestamp: self.timestamp,
@@ -383,7 +386,7 @@ impl Clone for WriteRequest {
             use_type_invariant(self);
             new_commitment = self.commitment.borrow().duplicate();
             new_servers = self.servers.borrow().extract_lbs();
-            ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+            ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         }
         WriteRequest {
             value: self.value,

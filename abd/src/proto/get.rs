@@ -1,5 +1,5 @@
 use crate::invariants::committed_to::WriteCommitment;
-use crate::invariants::quorum::ServerUniverse;
+use crate::invariants::quorum::ServerUniverseLb;
 use crate::invariants::ServerToken;
 use crate::resource::monotonic_timestamp::MonotonicTimestampResource;
 use crate::timestamp::Timestamp;
@@ -12,7 +12,7 @@ verus! {
 
 pub struct GetRequest {
     #[allow(unused)]
-    servers: Tracked<ServerUniverse>,
+    servers: Tracked<ServerUniverseLb>,
 }
 
 #[allow(unused)]
@@ -29,10 +29,9 @@ pub struct GetResponse {
 
 #[allow(unused)]
 impl GetRequest {
-    pub fn new(servers: Tracked<ServerUniverse>) -> (r: Self)
+    pub fn new(servers: Tracked<ServerUniverseLb>) -> (r: Self)
         requires
             servers@.inv(),
-            servers@.is_lb(),
         ensures
             r.servers() == servers@,
     {
@@ -42,11 +41,19 @@ impl GetRequest {
     #[verifier::type_invariant]
     pub closed spec fn inv(self) -> bool {
         &&& self.servers@.inv()
-        &&& self.servers@.is_lb()
     }
 
-    pub closed spec fn servers(self) -> ServerUniverse {
+    pub closed spec fn servers(self) -> ServerUniverseLb {
         self.servers@
+    }
+
+    /// Unlocks the facts bundled in `Self::inv()` for a genuinely tracked value, so callers
+    /// don't need to `assume` them on a bare ghost/spec projection.
+    pub proof fn lemma_inv(tracked &self)
+        ensures
+            self.servers().inv(),
+    {
+        use_type_invariant(self);
     }
 
     pub fn server_lower_bound(&mut self, server_id: Ghost<u64>) -> (r: Tracked<
@@ -108,8 +115,7 @@ impl GetRequest {
         ensures
             #[trigger] a.spec_eq(a),
     {
-        assume(a.servers@.inv());  // TODO(verus): type invariants on spec items
-        ServerUniverse::lemma_eq_refl(a.servers@)
+        ServerUniverseLb::lemma_eq_refl(a.servers@)
     }
 
     pub broadcast proof fn spec_eq_symm(a: Self, b: Self)
@@ -127,10 +133,7 @@ impl GetRequest {
         ensures
             a.spec_eq(c),
     {
-        assume(a.servers@.inv());  // TODO(verus): type invariants on spec items
-        assume(b.servers@.inv());  // TODO(verus): type invariants on spec items
-        assume(c.servers@.inv());  // TODO(verus): type invariants on spec items
-        ServerUniverse::lemma_eq_trans(a.servers@, b.servers@, c.servers@)
+        ServerUniverseLb::lemma_eq_trans(a.servers@, b.servers@, c.servers@)
     }
 
     pub broadcast proof fn lemma_spec_eq(a: Self, b: Self)
@@ -148,7 +151,7 @@ impl GetRequest {
         let tracked new_servers;
         use_type_invariant(self);
         new_servers = self.servers.borrow().extract_lbs();
-        ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+        ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         GetRequest { servers: Tracked(new_servers) }
     }
 
@@ -387,7 +390,7 @@ impl Clone for GetRequest {
         proof {
             use_type_invariant(self);
             new_servers = self.servers.borrow().extract_lbs();
-            ServerUniverse::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
+            ServerUniverseLb::lemma_eq_timestamp_lb_is_eq(new_servers, self.servers@);
         }
         GetRequest { servers: Tracked(new_servers) }
     }

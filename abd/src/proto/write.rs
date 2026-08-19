@@ -85,32 +85,79 @@ impl WriteRequest {
             use_type_invariant(&*self);
 
             let ghost old_servers = self.servers@;
+            self.servers@.lemma_locs();  // TRIGGER
+            old_servers.lemma_locs();  // TRIGGER
+            old_servers.lemma_inv_lower_bound(server_id@);
 
             let tracked lb = self.servers.borrow_mut().tracked_remove_lb(server_id@);
             let ghost unchanged_servers = self.servers@;
+            old_servers.lemma_dom();
+            unchanged_servers.lemma_dom();
+            assert(!unchanged_servers.dom().contains(server_id@));
 
             new_lb = lb.extract_lower_bound();
             self.servers.borrow_mut().tracked_insert_lb(server_id@, lb);
+            self.servers@.lemma_dom();
+            assert(self.servers@.dom().contains(server_id@));
+            assert(self.servers@.contains_key(server_id@));
 
             assert forall|id| #[trigger] self.servers@.contains_key(id) implies {
                 &&& self.servers@[id]@.loc() == old_servers[id]@.loc()
                 &&& self.servers@[id]@@.timestamp() == old_servers[id]@@.timestamp()
+                &&& self.servers@[id]@@ is LowerBound == old_servers[id]@@ is LowerBound
+                &&& self.servers@[id]@@ is HalfRightToAdvance
+                    == old_servers[id]@@ is HalfRightToAdvance
+                &&& self.servers@[id]@@ is FullRightToAdvance
+                    == old_servers[id]@@ is FullRightToAdvance
             } by {
+                self.servers@.lemma_inv_lower_bound(id);
                 if id != server_id@ {
+                    assert(self.servers@.dom().contains(id));
+                    assert(unchanged_servers.dom().contains(id));
                     assert(unchanged_servers.contains_key(id));  // XXX: trigger
+                    assert(old_servers.dom().contains(id));
                 }
+                old_servers.lemma_inv_lower_bound(id);
+                self.servers@.lemma_index_loc(id);
+                old_servers.lemma_index_loc(id);
             }
 
             assert forall|id| #[trigger] old_servers.contains_key(id) implies {
                 &&& self.servers@[id]@.loc() == old_servers[id]@.loc()
                 &&& self.servers@[id]@@.timestamp() == old_servers[id]@@.timestamp()
+                &&& self.servers@[id]@@ is LowerBound == old_servers[id]@@ is LowerBound
+                &&& self.servers@[id]@@ is HalfRightToAdvance
+                    == old_servers[id]@@ is HalfRightToAdvance
+                &&& self.servers@[id]@@ is FullRightToAdvance
+                    == old_servers[id]@@ is FullRightToAdvance
             } by {
+                old_servers.lemma_inv_lower_bound(id);
                 if id != server_id@ {
+                    assert(old_servers.dom().contains(id));
+                    assert(unchanged_servers.dom().contains(id));
                     assert(unchanged_servers.contains_key(id));  // XXX: trigger
+                    assert(self.servers@.dom().contains(id));
                 }
+                self.servers@.lemma_inv_lower_bound(id);
+                self.servers@.lemma_index_loc(id);
+                old_servers.lemma_index_loc(id);
             }
 
-            assert(self.servers@.locs() == old_servers.locs());  // XXX: trigger
+            self.servers@.lemma_locs();
+            old_servers.lemma_locs();
+            assert(self.servers@.dom() =~= old_servers.dom());
+            assert(self.servers@.locs().dom() == old_servers.locs().dom());
+            assert forall|id: u64| #[trigger]
+                self.servers@.locs().contains_key(id) implies self.servers@.locs()[id]
+                == old_servers.locs()[id] by {
+                assert(self.servers@.dom().contains(id));
+                assert(self.servers@.contains_key(id));
+                assert(old_servers.dom().contains(id));
+                assert(old_servers.contains_key(id));
+                self.servers@.lemma_index_loc(id);
+                old_servers.lemma_index_loc(id);
+            }
+            assert(self.servers@.locs() =~= old_servers.locs());
         }
 
         Tracked(new_lb)
@@ -150,6 +197,7 @@ impl WriteRequest {
         let tracked lb;
         proof {
             use_type_invariant(&self_mut);
+            self_mut.servers@.lemma_inv_lower_bound(server_id);
             lb = self_mut.servers.borrow_mut().tracked_remove_lb(server_id);
         }
 

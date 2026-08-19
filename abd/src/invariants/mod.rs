@@ -170,10 +170,12 @@ pub proof fn initialize_system_state<ML, RL>(tracked zero_perm: PermissionU64) -
         request_map,
         server_tokens,
     };
+    state.servers.lemma_dom();
     assert forall|id| #[trigger]
         state.unclaimed_servers().contains(
             id,
         ) implies state.servers[id]@@ is FullRightToAdvance by {
+        assert(state.servers.dom().contains(id));
         assert(state.servers.contains_key(id));
     }
 

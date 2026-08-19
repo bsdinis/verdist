@@ -443,6 +443,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
+            self.servers().lemma_locs();
         }
     }
 
@@ -453,6 +454,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
+            self.servers().lemma_locs();
             let q = self.spec_get_replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.spec_get_replies(), q, |id: (u64, u64)| id.1);
         }
@@ -492,6 +494,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 self.servers().lemma_quorum_vals_nonempty(self.quorum());
                 let quorum_vals = self.servers().quorum_vals(self.quorum());
                 quorum_vals.find_unique_maximal_ensures(ServerUniverseLb::ts_leq());
+                let witness = self.servers().lemma_quorum_timestamp_witness(self.quorum());
+                assert(self.quorum().contains(witness));
+                assert(self.servers()[witness]@@.timestamp() >= self.spec_max_timestamp());
             }
         }
     }
@@ -539,6 +544,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         servers.tracked_update_lb(server_id, lb);
         old_servers.lemma_leq_quorums(*servers, min_timestamp);
         if max_resp is Some {
+            (*servers).lemma_dom();
             assert forall|id| #[trigger]
                 agree_with_max.contains(id) implies servers[id]@@.timestamp()
                 >= max_resp->Some_0.spec_timestamp() by {
@@ -591,6 +597,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             servers.tracked_update_lb(server_id, lb);
         }
         old_servers.lemma_leq_quorums(*servers, min_timestamp);
+        (*servers).lemma_dom();
         assert forall|id| #[trigger] agree_with_max.contains(id) implies servers[id]@@.timestamp()
             >= max_resp.spec_timestamp() by {
             assert(servers.contains_key(id));  // XXX: trigger
@@ -644,11 +651,16 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
             use_type_invariant(self);
             lbs = self.servers.borrow().extract_lbs();
             lbs.lemma_locs();
+            self.servers@.lemma_locs();
+            self.servers@.lemma_dom();
+            lbs.lemma_dom();
+            assert(lbs.dom() == self.servers@.dom());
             let ghost quorum = self.quorum();
             let ghost max_ts = self.spec_max_timestamp();
             assert forall|id| #[trigger] quorum.contains(id) implies lbs[id]@@.timestamp()
                 >= max_ts by {
                 assert(self.servers@.contains_key(id));
+                assert(lbs.dom().contains(id));
                 assert(lbs.contains_key(id));
             }
 
@@ -917,6 +929,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
         proof {
             assert(!wb_replies@.contains(id));
+            servers@.lemma_locs();
+            servers@.lemma_dom();
+            assert(servers@.locs().dom().contains(id.1));
+            assert(servers@.dom().contains(id.1));
+            assert(servers@.contains_key(id.1));
+            servers@.lemma_index_loc(id.1);
+            let ghost old_servers = *old(servers);
             Self::update_servers(
                 servers.borrow_mut(),
                 get_request@.get().servers(),
@@ -926,6 +945,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 id.1,
                 lb,
             );
+            servers@.lemma_dom();
 
             assert forall|cid|
                 {
@@ -938,6 +958,10 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(get_replies@.insert(id).contains(cid));
                 } else {
+                    old_servers.lemma_dom();
+                    assert(servers@.dom().contains(cid.1));
+                    assert(old_servers.dom().contains(cid.1));
+                    assert(old_servers.contains_key(cid.1));
                     assert(servers@[cid.1]@@.timestamp()
                         == get_request@.get().servers()[cid.1]@@.timestamp());
                 }
@@ -951,17 +975,36 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                         assert(servers@.contains_key(cid));  // trigger
                     }
                 }
+                assert(get_replies@.map(|id: (u64, u64)| id.1) <= servers@.dom());
                 assert forall|cid| #[trigger]
                     get_replies@.contains(cid) implies servers@[cid.1]@@.timestamp()
                     <= max_resp->Some_0.spec_timestamp() by {
                     if cid.1 != id.1 {
+                        assert(get_replies@.map(|id: (u64, u64)| id.1).contains(cid.1));
                         assert(servers@.contains_key(cid.1));  // trigger
                     }
                 }
             }
         }
 
+        let ghost pre_update_get_replies = get_replies@;
         Self::update_max_resp_and_quorum(max_resp, agree_with_max, get_replies, wb_replies, r, id);
+        assert(get_replies@ =~= pre_update_get_replies.insert(id));
+
+        proof {
+            assert forall|cid|
+                {
+                    &&& !#[trigger] get_replies@.contains(cid)
+                    &&& !#[trigger] wb_replies@.contains(cid)
+                    &&& servers@.contains_key(cid.1)
+                    &&& cid.0 == get_request@.key().0
+                } implies servers@[cid.1]@@.timestamp()
+                == get_request@.get().servers()[cid.1]@@.timestamp() by {
+                assert(cid != id);
+                assert(!pre_update_get_replies.insert(id).contains(cid));
+                assert(!wb_replies@.insert(id).contains(cid));
+            }
+        }
     }
 
     fn insert_get(&mut self, id: (u64, u64), resp: Response)
@@ -1171,6 +1214,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
         proof {
             assert(!wb_replies@.contains(id));
+            servers@.lemma_locs();
+            servers@.lemma_dom();
+            assert(servers@.locs().dom().contains(id.1));
+            assert(servers@.dom().contains(id.1));
+            assert(servers@.contains_key(id.1));
+            servers@.lemma_index_loc(id.1);
+            let ghost old_servers = *old(servers);
             Self::update_servers_on_wb(
                 servers.borrow_mut(),
                 get_request@.get().servers(),
@@ -1180,6 +1230,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 id.1,
                 lb,
             );
+            servers@.lemma_dom();
 
             assert forall|cid|
                 {
@@ -1192,13 +1243,34 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(wb_replies@.insert(id).contains(cid));
                 } else {
+                    old_servers.lemma_dom();
+                    assert(servers@.dom().contains(cid.1));
+                    assert(old_servers.dom().contains(cid.1));
+                    assert(old_servers.contains_key(cid.1));
                     assert(servers@[cid.1]@@.timestamp()
                         == get_request@.get().servers()[cid.1]@@.timestamp());
                 }
             }
         }
 
+        let ghost pre_update_wb_replies = wb_replies@;
         Self::update_quorum(agree_with_max, wb_replies, max_resp, get_replies, id);
+        assert(wb_replies@ =~= pre_update_wb_replies.insert(id));
+
+        proof {
+            assert forall|cid|
+                {
+                    &&& !#[trigger] get_replies@.contains(cid)
+                    &&& !#[trigger] wb_replies@.contains(cid)
+                    &&& servers@.contains_key(cid.1)
+                    &&& cid.0 == get_request@.key().0
+                } implies servers@[cid.1]@@.timestamp()
+                == get_request@.get().servers()[cid.1]@@.timestamp() by {
+                assert(cid != id);
+                assert(!get_replies@.insert(id).contains(cid));
+                assert(!pre_update_wb_replies.insert(id).contains(cid));
+            }
+        }
     }
 
     fn insert_write(&mut self, id: (u64, u64), resp: Response)

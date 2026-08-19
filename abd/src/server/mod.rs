@@ -294,6 +294,9 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
                 get_req.servers().lemma_eq_preserves_inv(proof_get_req.servers());
                 ServerUniverseLb::lemma_eq(proof_get_req.servers(), get_req.servers());
                 proof_get_req.servers().lemma_locs();
+                get_req.servers().lemma_locs();
+                proof_get_req.servers().lemma_dom();
+                get_req.servers().lemma_dom();
             }
             if request_inner is GetTimestamp {
                 let get_ts_req = request_inner->GetTimestamp_0;
@@ -303,6 +306,9 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
                 get_ts_req.servers().lemma_eq_preserves_inv(proof_get_ts_req.servers());
                 ServerUniverseLb::lemma_eq(proof_get_ts_req.servers(), get_ts_req.servers());
                 proof_get_ts_req.servers().lemma_locs();
+                get_ts_req.servers().lemma_locs();
+                proof_get_ts_req.servers().lemma_dom();
+                get_ts_req.servers().lemma_dom();
             }
             if request_inner is Write {
                 let write_req = request_inner->Write_0;
@@ -312,6 +318,9 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
                 write_req.servers().lemma_eq_preserves_inv(proof_write_req.servers());
                 ServerUniverseLb::lemma_eq(proof_write_req.servers(), write_req.servers());
                 proof_write_req.servers().lemma_locs();
+                write_req.servers().lemma_locs();
+                proof_write_req.servers().lemma_dom();
+                write_req.servers().lemma_dom();
             }
         }
 

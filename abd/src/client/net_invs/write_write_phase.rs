@@ -283,8 +283,18 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
+            self.servers().lemma_locs();
+            self.servers().lemma_dom();
             let q = self.replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.replies(), q, |id: (u64, u64)| id.1);
+            assert forall|v| #[trigger] q.contains(v) implies self.server_locs().dom().contains(
+                v,
+            ) by {
+                let cid = choose|cid: (u64, u64)| #[trigger]
+                    self.replies().contains(cid) && cid.1 == v;
+                assert(self.servers().contains_key(cid.1));
+                assert(self.servers().dom().contains(v));
+            }
         }
     }
 
@@ -435,7 +445,48 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         assert(lb@ is LowerBound);
 
         proof {
+            servers@.lemma_locs();
+            servers@.lemma_dom();
+            assert(servers@.locs().dom().contains(id.1));
+            assert(servers@.dom().contains(id.1));
+            assert(servers@.contains_key(id.1));
+            servers@.lemma_index_loc(id.1);
+            let ghost old_servers = *old(servers);
             Self::update_servers(servers.borrow_mut(), request@.write().servers(), id.1, lb);
+            servers@.lemma_dom();
+            assert(servers@.dom().contains(id.1));
+            assert(servers@.contains_key(id.1));
+
+            assert forall|cid| #[trigger] old(replies)@.insert(id).contains(cid) implies {
+                &&& cid.0 == id.0
+                &&& servers@.contains_key(cid.1)
+                &&& servers@[cid.1]@@.timestamp() >= request@.write().spec_timestamp()
+            } by {
+                if cid != id {
+                    assert(old(replies)@.contains(cid));
+                    assert(old_servers.contains_key(cid.1));
+                    assert(old_servers.dom().contains(cid.1));
+                    assert(servers@.dom().contains(cid.1));
+                    assert(servers@.contains_key(cid.1));
+                }
+            }
+
+            assert forall|cid|
+                {
+                    &&& !#[trigger] old(replies)@.insert(id).contains(cid)
+                    &&& servers@.contains_key(cid.1)
+                    &&& cid.0 == id.0
+                } implies servers@[cid.1]@@.timestamp()
+                == request@.write().servers()[cid.1]@@.timestamp() by {
+                if cid.1 == id.1 {
+                    assert(old(replies)@.insert(id).contains(cid));
+                } else {
+                    old_servers.lemma_dom();
+                    assert(servers@.dom().contains(cid.1));
+                    assert(old_servers.dom().contains(cid.1));
+                    assert(old_servers.contains_key(cid.1));
+                }
+            }
         }
 
         replies.insert(id);

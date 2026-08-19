@@ -23,8 +23,9 @@ use vstd::set_lib::*;
 verus! {
 
 /// The authoritative snapshot of the server universe
+#[allow(dead_code)]
 pub tracked struct ServerUniverseAuth {
-    pub tracked map: ServerMap,
+    tracked map: ServerMap,
 }
 
 impl ServerUniverseAuth {
@@ -38,7 +39,7 @@ impl ServerUniverseAuth {
         ServerUniverseAuth { map: Map::tracked_empty() }
     }
 
-    pub open spec fn inv(self) -> bool {
+    pub closed spec fn inv(self) -> bool {
         &&& forall|k: u64| #[trigger]
             self.map.contains_key(k) ==> {
                 self.map[k]@@ is HalfRightToAdvance || self.map[k]@@ is FullRightToAdvance
@@ -48,20 +49,31 @@ impl ServerUniverseAuth {
                 == Timestamp::spec_default()
     }
 
-    pub open spec fn dom(self) -> Set<u64> {
+    pub closed spec fn dom(self) -> Set<u64> {
         self.map.dom()
     }
 
-    pub open spec fn contains_key(self, idx: u64) -> bool {
+    pub closed spec fn contains_key(self, idx: u64) -> bool {
         self.map.contains_key(idx)
     }
 
-    pub open spec fn spec_index(self, idx: u64) -> Tracked<MonotonicTimestampResource> {
+    pub closed spec fn spec_index(self, idx: u64) -> Tracked<MonotonicTimestampResource> {
         self.map[idx]
     }
 
-    pub open spec fn locs(self) -> Map<u64, Loc> {
+    pub closed spec fn locs(self) -> Map<u64, Loc> {
         self.map.map_values(|r: Tracked<MonotonicTimestampResource>| r@.loc())
+    }
+
+    /// Get a tracked borrow to a particular resource
+    pub proof fn tracked_borrow(tracked &self, server_id: u64) -> (tracked r:
+        &MonotonicTimestampResource)
+        requires
+            self.contains_key(server_id),
+        ensures
+            *r == self[server_id]@,
+    {
+        self.map.tracked_borrow(server_id).borrow()
     }
 
     pub proof fn lemma_locs(self)
@@ -71,7 +83,63 @@ impl ServerUniverseAuth {
         vlib::map::lemma_map_values_dom(self.map, |r: Tracked<MonotonicTimestampResource>| r@.loc())
     }
 
-    pub open spec fn valid_quorum(self, q: Quorum) -> bool {
+    /// The dom agrees with the contains_key method
+    pub proof fn lemma_dom(self)
+        ensures
+            forall|id: u64| #[trigger] self.dom().contains(id) <==> self.contains_key(id),
+    {
+    }
+
+    /// Indexing commutes with taking the locations
+    pub proof fn lemma_index_loc(self, id: u64)
+        requires
+            self.contains_key(id),
+        ensures
+            self[id]@.loc() == self.locs()[id],
+    {
+    }
+
+    /// All the ids are authorative
+    pub proof fn lemma_inv_advance_right(self, id: u64)
+        requires
+            self.inv(),
+            self.contains_key(id),
+        ensures
+            self[id]@@ is HalfRightToAdvance || self[id]@@ is FullRightToAdvance,
+    {
+    }
+
+    proof fn lemma_map_len(self)
+        ensures
+            self.map.len() == self.dom().len(),
+    {
+    }
+
+    /// Defines a valid quorum
+    pub proof fn lemma_valid_quorum(self, q: Quorum)
+        requires
+            !q.is_empty(),
+            q <= self.dom(),
+            2 * q.len() > self.dom().len(),
+        ensures
+            self.valid_quorum(q),
+    {
+        self.lemma_map_len();
+    }
+
+    /// Defines the reverse of the quorum
+    pub proof fn lemma_valid_quorum_bound(self, q: Quorum)
+        requires
+            self.valid_quorum(q),
+        ensures
+            !q.is_empty(),
+            q <= self.dom(),
+            2 * q.len() > self.dom().len(),
+    {
+        self.lemma_map_len();
+    }
+
+    pub closed spec fn valid_quorum(self, q: Quorum) -> bool {
         &&& !q.is_empty()
         &&& q <= self.dom()
         &&& 2 * q.len() > self.map.len()
@@ -85,7 +153,7 @@ impl ServerUniverseAuth {
         self.quorum_vals(q).find_unique_maximal(Self::ts_leq())
     }
 
-    pub open spec fn quorum_vals(self, q: Quorum) -> Set<Timestamp> {
+    pub closed spec fn quorum_vals(self, q: Quorum) -> Set<Timestamp> {
         self.map.restrict(q).map_values(
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
         ).values()
@@ -232,7 +300,9 @@ impl ServerUniverseAuth {
                 },
     {
         let tracked map = raw_extract_lbs(&self.map);
-        ServerUniverseLb { map }
+        let tracked r = ServerUniverseLb::from_map(map);
+        assert(self.locs() =~= r.locs());
+        r
     }
 
     proof fn lemma_vals(self, q: Quorum) -> (r: (Set<Timestamp>, Timestamp))
@@ -384,10 +454,7 @@ impl ServerUniverseAuth {
         ensures
             self.valid_quorum(q) <==> other.valid_quorum(q),
     {
-        assert(self.locs().dom() == other.locs().dom());
-        assert(self.locs().dom() == self.dom());
-        assert(self.dom() == other.dom());
-        assert(self.map.len() == other.map.len());
+        other.lemma_leq_implies_validity_auth(self, q);
     }
 
     pub proof fn lemma_leq_quorums_lb(self, other: ServerUniverseLb, min: Timestamp)

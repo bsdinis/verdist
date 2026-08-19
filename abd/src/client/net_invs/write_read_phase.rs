@@ -332,6 +332,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     {
         proof {
             use_type_invariant(self);
+            self.servers().lemma_locs();
             let q = self.replies().map(|id: (u64, u64)| id.1);
             vstd::set_lib::lemma_map_size(self.replies(), q, |id: (u64, u64)| id.1);
         }
@@ -405,6 +406,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         let ghost old_servers = *old(servers);
         servers.tracked_update_lb(server_id, lb);
         if max_resp is Some {
+            (*servers).lemma_dom();
             assert forall|id| #[trigger]
                 agree_with_max.contains(id) implies servers[id]@@.timestamp()
                 == max_resp->Some_0.spec_timestamp() by {
@@ -535,6 +537,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         }
         replies.insert(id);
 
+        proof {
+            servers@.lemma_dom();
+        }
         assert(forall|server_id| #[trigger]
             agree_with_max@.contains(server_id) ==> replies@.contains((id.0, server_id)));
     }
@@ -633,6 +638,13 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         assert(lb@ is LowerBound);
 
         proof {
+            servers@.lemma_locs();
+            servers@.lemma_dom();
+            assert(servers@.locs().dom().contains(id.1));
+            assert(servers@.dom().contains(id.1));
+            assert(servers@.contains_key(id.1));
+            servers@.lemma_index_loc(id.1);
+            let ghost old_servers = *old(servers);
             Self::update_servers(
                 servers.borrow_mut(),
                 request@.get_timestamp().servers(),
@@ -641,6 +653,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 id.1,
                 lb,
             );
+            servers@.lemma_dom();
 
             assert forall|cid|
                 {
@@ -652,16 +665,22 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
                 if cid.1 == id.1 {
                     assert(replies@.insert(id).contains(cid));
                 } else {
+                    old_servers.lemma_dom();
+                    assert(servers@.dom().contains(cid.1));
+                    assert(old_servers.dom().contains(cid.1));
+                    assert(old_servers.contains_key(cid.1));
                     assert(servers@[cid.1]@@.timestamp()
                         == request@.get_timestamp().servers()[cid.1]@@.timestamp());
                 }
             }
 
             if *max_resp is Some {
+                assert(replies@.map(|id: (u64, u64)| id.1) <= servers@.dom());
                 assert forall|cid| #[trigger]
                     replies@.contains(cid) implies servers@[cid.1]@@.timestamp()
                     <= max_resp->Some_0.spec_timestamp() by {
                     if cid.1 != id.1 {
+                        assert(replies@.map(|id: (u64, u64)| id.1).contains(cid.1));
                         assert(servers@.contains_key(cid.1));  // trigger
                     }
                 }

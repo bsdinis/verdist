@@ -23,12 +23,13 @@ use vstd::set_lib::*;
 verus! {
 
 /// A lower-bound snapshot of the server universe
+#[allow(dead_code)]
 pub tracked struct ServerUniverseLb {
-    pub tracked map: ServerMap,
+    tracked map: ServerMap,
 }
 
 impl ServerUniverseLb {
-    pub open spec fn inv(self) -> bool {
+    pub closed spec fn inv(self) -> bool {
         &&& forall|k: u64| #[trigger] self.map.contains_key(k) ==> self.map[k]@@ is LowerBound
         &&& forall|id: u64| #[trigger]
             self.contains_key(id) && self[id]@@ is FullRightToAdvance ==> self[id]@@.timestamp()
@@ -41,19 +42,19 @@ impl ServerUniverseLb {
         &&& self.eq(other)
     }
 
-    pub open spec fn dom(self) -> Set<u64> {
+    pub closed spec fn dom(self) -> Set<u64> {
         self.map.dom()
     }
 
-    pub open spec fn contains_key(self, idx: u64) -> bool {
+    pub closed spec fn contains_key(self, idx: u64) -> bool {
         self.map.contains_key(idx)
     }
 
-    pub open spec fn spec_index(self, idx: u64) -> Tracked<MonotonicTimestampResource> {
+    pub closed spec fn spec_index(self, idx: u64) -> Tracked<MonotonicTimestampResource> {
         self.map[idx]
     }
 
-    pub open spec fn locs(self) -> Map<u64, Loc> {
+    pub closed spec fn locs(self) -> Map<u64, Loc> {
         self.map.map_values(|r: Tracked<MonotonicTimestampResource>| r@.loc())
     }
 
@@ -62,6 +63,62 @@ impl ServerUniverseLb {
             self.locs().dom() == self.dom(),
     {
         vlib::map::lemma_map_values_dom(self.map, |r: Tracked<MonotonicTimestampResource>| r@.loc())
+    }
+
+    /// The dom agrees with the contains_key method
+    pub proof fn lemma_dom(self)
+        ensures
+            forall|id: u64| #[trigger] self.dom().contains(id) <==> self.contains_key(id),
+    {
+    }
+
+    /// All elements are lower bounds
+    pub proof fn lemma_inv_lower_bound(self, id: u64)
+        requires
+            self.inv(),
+            self.contains_key(id),
+        ensures
+            self[id]@@ is LowerBound,
+    {
+    }
+
+    /// Indexing commutes with taking the locations
+    pub proof fn lemma_index_loc(self, id: u64)
+        requires
+            self.contains_key(id),
+        ensures
+            self[id]@.loc() == self.locs()[id],
+    {
+    }
+
+    proof fn lemma_map_len(self)
+        ensures
+            self.map.len() == self.dom().len(),
+    {
+    }
+
+    /// Defines a valid quorum
+    pub proof fn lemma_valid_quorum(self, q: Quorum)
+        requires
+            !q.is_empty(),
+            q <= self.dom(),
+            2 * q.len() > self.dom().len(),
+        ensures
+            self.valid_quorum(q),
+    {
+        self.lemma_map_len();
+    }
+
+    /// Defines the reverse of the quorum
+    pub proof fn lemma_valid_quorum_bound(self, q: Quorum)
+        requires
+            self.valid_quorum(q),
+        ensures
+            !q.is_empty(),
+            q <= self.dom(),
+            2 * q.len() > self.dom().len(),
+    {
+        self.lemma_map_len();
     }
 
     pub broadcast proof fn lemma_locs_eq(self, other: Self)
@@ -75,10 +132,15 @@ impl ServerUniverseLb {
     {
         self.lemma_locs();
         other.lemma_locs();
+        self.lemma_dom();
+        other.lemma_dom();
         assert forall|id| #[trigger] self.contains_key(id) implies self[id]@.loc()
             == other[id]@.loc() by {
-            let loc = self.locs()[id];
-            assert(self.map[id]@.loc() == loc);
+            assert(self.dom().contains(id));
+            assert(other.dom().contains(id));
+            assert(other.contains_key(id));
+            self.lemma_index_loc(id);
+            other.lemma_index_loc(id);
         }
     }
 
@@ -91,14 +153,19 @@ impl ServerUniverseLb {
     {
         self.lemma_locs();
         other.lemma_locs();
+        self.lemma_dom();
+        other.lemma_dom();
         assert forall|id| #[trigger] self.contains_key(id) implies self[id]@.loc()
             == other[id]@.loc() by {
-            let loc = self.locs()[id];
-            assert(self.map[id]@.loc() == loc);
+            assert(self.dom().contains(id));
+            assert(other.dom().contains(id));
+            assert(other.contains_key(id));
+            self.lemma_index_loc(id);
+            other.lemma_index_loc(id);
         }
     }
 
-    pub open spec fn valid_quorum(self, q: Quorum) -> bool {
+    pub closed spec fn valid_quorum(self, q: Quorum) -> bool {
         &&& !q.is_empty()
         &&& q <= self.dom()
         &&& 2 * q.len() > self.map.len()
@@ -112,7 +179,7 @@ impl ServerUniverseLb {
         self.quorum_vals(q).find_unique_maximal(Self::ts_leq())
     }
 
-    pub open spec fn quorum_vals(self, q: Quorum) -> Set<Timestamp> {
+    pub closed spec fn quorum_vals(self, q: Quorum) -> Set<Timestamp> {
         self.map.restrict(q).map_values(
             |r: Tracked<MonotonicTimestampResource>| r@@.timestamp(),
         ).values()
@@ -299,6 +366,27 @@ impl ServerUniverseLb {
             self.eq_timestamp(r),
     {
         let tracked map = raw_extract_lbs(&self.map);
+        ServerUniverseLb { map }
+    }
+
+    /// Build a `ServerUniverseLb` out of a raw `ServerMap` all of whose entries are already
+    /// `LowerBound`s. Lets `ServerUniverseAuth::extract_lbs` (which duplicates its own map into a
+    /// fresh `ServerMap` via `raw_extract_lbs`) turn that into a `ServerUniverseLb` without
+    /// naming the private `map` field from outside this module.
+    pub(crate) proof fn from_map(tracked map: ServerMap) -> (tracked r: Self)
+        requires
+            forall|k: u64| #[trigger] map.contains_key(k) ==> map[k]@@ is LowerBound,
+        ensures
+            r.inv(),
+            forall|k: u64| #[trigger] r.contains_key(k) <==> map.contains_key(k),
+            r.dom() == map.dom(),
+            r.locs() == map.map_values(|x: Tracked<MonotonicTimestampResource>| x@.loc()),
+            forall|k: u64| #[trigger]
+                map.contains_key(k) ==> {
+                    &&& r[k]@.loc() == map[k]@.loc()
+                    &&& r[k]@@.timestamp() == map[k]@@.timestamp()
+                },
+    {
         ServerUniverseLb { map }
     }
 
@@ -494,10 +582,18 @@ impl ServerUniverseLb {
         ensures
             self.valid_quorum(q) <==> other.valid_quorum(q),
     {
+        self.lemma_locs();
+        other.lemma_locs();
         assert(self.locs().dom() == other.locs().dom());
-        assert(self.locs().dom() == self.dom());
         assert(self.dom() == other.dom());
-        assert(self.map.len() == other.map.len());
+        if self.valid_quorum(q) {
+            self.lemma_valid_quorum_bound(q);
+            other.lemma_valid_quorum(q);
+        }
+        if other.valid_quorum(q) {
+            other.lemma_valid_quorum_bound(q);
+            self.lemma_valid_quorum(q);
+        }
     }
 
     pub proof fn lemma_leq_retains_unanimity_auth(
@@ -591,16 +687,30 @@ impl ServerUniverseLb {
         assert(exists|id: u64| #[trigger] other.dom().contains(id) && !visited.contains(id));
         let server_id = choose|id: u64| #[trigger]
             other.dom().contains(id) && !visited.contains(id);
+        other.lemma_dom();
+        assert(other.contains_key(server_id));
+        self.lemma_dom();
+        assert(self.dom().contains(server_id));
         assert(self.contains_key(server_id));
         assert(self[server_id]@.loc() == other[server_id]@.loc());
+        self.lemma_inv_lower_bound(server_id);
+        other.lemma_inv_advance_right(server_id);
 
         let tracked Tracked(mut r) = self.map.tracked_remove(server_id);
-        r.lemma_lower_bound(other.map.tracked_borrow(server_id).borrow());
+        r.lemma_lower_bound(other.tracked_borrow(server_id));
         self.map.tracked_insert(server_id, Tracked(r));
 
         other.dom().lemma_set_insert_diff_decreases(visited, server_id);
 
         assert(self.locs() == old(self).locs());
+        assert forall|id: u64| #[trigger]
+            visited.insert(server_id).contains(id) implies self[id]@@.timestamp()
+            <= other[id]@@.timestamp() by {
+            if id != server_id {
+                assert(visited.contains(id));
+                assert(old(self)[id]@@.timestamp() <= other[id]@@.timestamp());
+            }
+        }
         let old_self = *self;
         self.prove_lower_bound(other, visited.insert(server_id));
         Self::lemma_eq_trans(*self, old_self, *old(self));

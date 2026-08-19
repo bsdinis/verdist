@@ -370,7 +370,12 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     let ghost old_replies_servers = replies_servers;
                     replies_servers.lemma_lb(&state.servers);
                     old_replies_servers.lemma_eq(replies_servers);
-                    assert(old_replies_servers.valid_quorum(replies.first_quorum()));
+                    assert(replies.first_quorum() <= replies.server_locs().dom());
+                    assert(replies.server_locs() == old_replies_servers.locs());
+                    assert(replies.first_quorum() <= old_replies_servers.locs().dom());
+                    assert(old_replies_servers.locs().dom() == old_replies_servers.dom());
+                    assert(replies.first_quorum() <= old_replies_servers.dom());
+                    old_replies_servers.lemma_valid_quorum(replies.first_quorum());
                     replies_servers.lemma_leq_implies_validity_auth(state.servers, replies.first_quorum());
                 }
             });
@@ -397,7 +402,12 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     let ghost old_replies_servers = replies_servers;
                     replies_servers.lemma_lb(&state.servers);
                     old_replies_servers.lemma_eq(replies_servers);
-                    assert(old_replies_servers.valid_quorum(replies.quorum()));
+                    assert(replies.quorum() <= replies.server_locs().dom());
+                    assert(replies.server_locs() == old_replies_servers.locs());
+                    assert(replies.quorum() <= old_replies_servers.locs().dom());
+                    assert(old_replies_servers.locs().dom() == old_replies_servers.dom());
+                    assert(replies.quorum() <= old_replies_servers.dom());
+                    old_replies_servers.lemma_valid_quorum(replies.quorum());
                     replies_servers.lemma_leq_implies_validity_auth(state.servers, replies.quorum());
                     replies_servers.lemma_leq_retains_unanimity_auth(state.servers, replies.quorum(), max_ts);
                     state.servers.lemma_quorum_lb(replies.quorum(), max_ts);
@@ -534,7 +544,12 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 let ghost old_replies_servers = replies_servers;
                 replies_servers.lemma_lb(&state.servers);
                 old_replies_servers.lemma_eq(replies_servers);
-                assert(old_replies_servers.valid_quorum(wb_replies.quorum()));
+                assert(wb_replies.quorum() <= wb_replies.server_locs().dom());
+                assert(wb_replies.server_locs() == old_replies_servers.locs());
+                assert(wb_replies.quorum() <= old_replies_servers.locs().dom());
+                assert(old_replies_servers.locs().dom() == old_replies_servers.dom());
+                assert(wb_replies.quorum() <= old_replies_servers.dom());
+                old_replies_servers.lemma_valid_quorum(wb_replies.quorum());
                 replies_servers.lemma_leq_implies_validity_auth(state.servers, wb_replies.quorum());
                 replies_servers.lemma_leq_retains_unanimity_auth(state.servers, wb_replies.quorum(), max_ts);
                 assert(state.servers.unanimous_quorum(wb_replies.quorum(), max_ts));
@@ -788,7 +803,12 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     let ghost old_replies_servers = replies_servers;
                     let ghost quorum = get_ts_replies.quorum();
                     old_replies_servers.lemma_eq(replies_servers);
-                    assert(old_replies_servers.valid_quorum(quorum));
+                    assert(quorum <= get_ts_replies.server_locs().dom());
+                    assert(get_ts_replies.server_locs() == replies_servers.locs());
+                    assert(quorum <= replies_servers.locs().dom());
+                    assert(replies_servers.locs().dom() == replies_servers.dom());
+                    assert(quorum <= replies_servers.dom());
+                    old_replies_servers.lemma_valid_quorum(quorum);
 
                     ServerUniverseLb::lemma_leq_trans(replies_orig_servers, old_replies_servers, replies_servers);
                     replies_orig_servers.lemma_leq_implies_validity(replies_servers, quorum);
@@ -937,7 +957,13 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     let ghost quorum = write_replies.quorum();
                     replies_servers.lemma_lb(&state.servers);
                     old_replies_servers.lemma_eq(replies_servers);
-                    assert(old_replies_servers.valid_quorum(quorum));
+                    assert(quorum <= write_replies.server_locs().dom());
+                    assert(write_replies.server_locs() == old_replies_servers.locs());
+                    assert(quorum <= old_replies_servers.locs().dom());
+                    assert(old_replies_servers.locs().dom() == old_replies_servers.dom());
+                    assert(quorum <= old_replies_servers.dom());
+                    old_replies_servers.lemma_valid_quorum(quorum);
+                    replies_servers.lemma_leq_implies_validity_auth(state.servers, quorum);
 
                     replies_servers.lemma_leq_retains_unanimity_auth(state.servers, quorum, exec_ts);
                     state.linearization_queue.lemma_write_token(&token);

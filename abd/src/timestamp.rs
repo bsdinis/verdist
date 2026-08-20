@@ -36,7 +36,7 @@ impl vstd::std_specs::cmp::OrdSpecImpl for Timestamp {
     }
 
     open spec fn cmp_spec(&self, other: &Self) -> std::cmp::Ordering {
-        if self.seqno == other.seqno && self.client_id == other.client_id {
+        if self.seqno == other.seqno && self.client_id == other.client_id && self.client_ctr == other.client_ctr {
             std::cmp::Ordering::Equal
         } else if self.seqno < other.seqno || (self.seqno == other.seqno && self.client_id
             < other.client_id) || (self.seqno == other.seqno && self.client_id == other.client_id

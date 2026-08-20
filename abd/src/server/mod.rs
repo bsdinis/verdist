@@ -342,6 +342,7 @@ pub fn create_server<L, C, ML, RL>(
     requires
         server_ids@.contains(my_server_id),
         num_threads > 0,
+        listener.spec_id() == my_server_id,
 {
     let tracked state_inv;
     proof {

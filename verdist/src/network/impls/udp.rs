@@ -183,12 +183,14 @@ impl UdpListener {
 pub struct UdpConnector<A: ToSocketAddrs> {
     listening_addr: A,
     local_ip: IpAddr,
+    #[allow(dead_code)]
+    server_id: u64,
 }
 
 impl<A: ToSocketAddrs> UdpConnector<A> {
     #[verifier::external_body]
-    pub fn new(listening_addr: A, local_ip: IpAddr) -> std::io::Result<Self> {
-        Ok(UdpConnector { listening_addr, local_ip })
+    pub fn new(listening_addr: A, local_ip: IpAddr, server_id: u64) -> std::io::Result<Self> {
+        Ok(UdpConnector { listening_addr, local_ip, server_id })
     }
 }
 
@@ -346,6 +348,11 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
     for <'de>R: serde::Deserialize<'de>,
     S: Clone + serde::Serialize,
  {
+    #[verifier::external_body]
+    closed spec fn spec_id(self) -> u64 {
+        self.id
+    }
+
     #[allow(unused_variables)]
     #[verifier::external_body]
     fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
@@ -390,10 +397,15 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
     A: ToSocketAddrs,
  {
     #[verifier::external_body]
-    fn connect<F>(&self, local_id: u64, gen_pred: F) -> Result<
+    closed spec fn spec_id(self) -> u64 {
+        self.server_id
+    }
+
+    #[verifier::external_body]
+    fn connect<F>(&self, local_id: u64, gen_pred: F) -> (r: Result<
         ServerChannel<K, R, S>,
         ConnectError,
-    > where F: FnOnce(&Self, u64) -> Ghost<K> {
+    >) where F: FnOnce(&Self, u64) -> Ghost<K> {
         vlib::veprintln!(
             "[client|{:>3}]: connecting to server", local_id,
         );

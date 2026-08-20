@@ -28,6 +28,8 @@ pub struct ModelledListener<R, S> {
 #[verifier::reject_recursive_types(R)]
 #[verifier::reject_recursive_types(S)]
 pub struct ModelledConnector<R, S> {
+    #[allow(dead_code)]
+    server_id: u64,
     registering_tx: Sender<u64>,
     connection_rx: Receiver<(u64, Sender<S>, Receiver<R>)>,
 }
@@ -182,6 +184,11 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for ModelledListener<R, S> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
     S: Clone,
  {
+    #[verifier::external_body]
+    closed spec fn spec_id(self) -> u64 {
+        self.id
+    }
+
     #[allow(unused_variables)]
     #[verifier::external_body]
     fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
@@ -215,10 +222,15 @@ impl<K, R, S> Connector<ServerChannel<K, R, S>> for ModelledConnector<R, S> wher
     S: Clone,
  {
     #[verifier::external_body]
-    fn connect<F>(&self, local_id: u64, gen_pred: F) -> Result<
+    closed spec fn spec_id(self) -> u64 {
+        self.server_id
+    }
+
+    #[verifier::external_body]
+    fn connect<F>(&self, local_id: u64, gen_pred: F) -> (r: Result<
         ServerChannel<K, R, S>,
         ConnectError,
-    > where F: FnOnce(&Self, u64) -> Ghost<K> {
+    >) where F: FnOnce(&Self, u64) -> Ghost<K> {
         vlib::veprintln!(
             "[client|{:>3}]: connecting to server", local_id,
         );
@@ -239,7 +251,7 @@ pub fn listen_channel<R, S>(server_id: u64) -> (ModelledListener<R, S>, Modelled
     let (connection_tx, connection_rx) = unbounded();
     let listener = ModelledListener { id: server_id, registering_rx, connection_tx };
 
-    let connector = ModelledConnector { registering_tx, connection_rx };
+    let connector = ModelledConnector { server_id, registering_tx, connection_rx };
 
     (listener, connector)
 }

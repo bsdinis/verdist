@@ -38,10 +38,16 @@ use invariant::get_invariant_state;
 
 verus! {
 
-fn connect<C, Conn>(connector: &Conn, client_id: u64) -> Result<BufChannel<C>, ConnectError> where
+fn connect<C, Conn>(connector: &Conn, client_id: u64) -> (r: Result<
+    BufChannel<C>,
+    ConnectError,
+>) where
     Conn: Connector<C>,
     C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
- {
+
+    ensures
+        r is Ok ==> r->Ok_0.spec_id() == (client_id, connector.spec_id()),
+{
     let channel = connector.connect(
         client_id,
         |_connector, _client_id|
@@ -64,24 +70,37 @@ fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
     Conn: Connector<C>,
     C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
 
+    requires
+        forall|i: int, j: int|
+            0 <= i < connectors.len() && 0 <= j < connectors.len() && i != j
+                ==> #[trigger] connectors@[i].spec_id() != #[trigger] connectors@[j].spec_id(),
     ensures
         r is Ok ==> {
             let v = r->Ok_0;
             &&& connectors.len() == v.len()
-            &&& forall|idx| 0 <= idx < v@.len() ==> #[trigger] v@[idx].spec_id().0 == client_id
-            &&& forall|i, j|
-                0 <= i < j < v@.len() ==> #[trigger] v@[i].spec_id() != #[trigger] v@[j].spec_id()
+            &&& forall|idx|
+                0 <= idx < v@.len() ==> #[trigger] v@[idx].spec_id() == (
+                    client_id,
+                    connectors@[idx].spec_id(),
+                )
         },
 {
-    let mut v = Vec::with_capacity(connectors.len());
-    for connector in connectors {
-        let conn = connect(connector, client_id)?;
+    let mut v: Vec<BufChannel<C>> = Vec::with_capacity(connectors.len());
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..connectors.len()
+        invariant
+            v@.len() == idx,
+            idx <= connectors@.len(),
+            forall|i: int|
+                0 <= i < v@.len() ==> #[trigger] v@[i].spec_id() == (
+                    client_id,
+                    connectors@[i].spec_id(),
+                ),
+    {
+        let conn = connect(&connectors[idx], client_id)?;
         v.push(conn);
     }
 
-    proof {
-        admit();  // XXX(assume): this is trivial but seems like something should be able to get
-    }
     Ok(v)
 }
 
@@ -108,6 +127,12 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
     requires
         connectors.len() == args.servers@.len(),
         args.servers@.len() > 0,
+        // Each connector targets a distinct server -- true by construction, since callers build
+        // one connector per entry of a server_id -> config map (see e.g. abd-example's client.rs,
+        // which iterates a HashMap<u64, ServerConfig>, whose keys are unique).
+        forall|i: int, j: int|
+            0 <= i < connectors.len() && 0 <= j < connectors.len() ==> (i == j
+                <==> #[trigger] connectors@[i].spec_id() == #[trigger] connectors@[j].spec_id()),
 {
     let (client_ctr, client_ctr_perm) = PAtomicU64::new(0);
     let (request_ctr, request_ctr_perm) = PAtomicU64::new(0);
@@ -118,16 +143,20 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
         OwnedReadPerm,
     >(&server_ids, args.client_id, client_ctr_perm, request_ctr_perm);
 
-    let pool = connect_all(connectors, args.client_id)?;
+    let channels_vec = connect_all(connectors, args.client_id)?;
     vlib::veprintln!("[client|{:>3}]: finished connecting\n", args.client_id);
-    let pool = FlawlessPool::new(pool);
+    let pool = FlawlessPool::new(channels_vec);
     assert(pool.spec_len() == connectors.len());
 
-    // TODO(connector): connector trait should preserve the ids
+    assert(forall|cid| #[trigger]
+        pool.spec_channels().dom().contains(cid) ==> {
+            let c = pool.spec_channels()[cid];
+            cid.0 == args.client_id
+        });
+
     assume(forall|cid| #[trigger]
         pool.spec_channels().dom().contains(cid) ==> {
             let c = pool.spec_channels()[cid];
-            &&& cid.0 == args.client_id
             &&& state_inv.constant().server_locs.contains_key(cid.1)
             &&& state_inv.constant().request_map_ids.request_auth_id == c.constant().request_map_id
             &&& state_inv.constant().commitments_ids.commitment_id == c.constant().commitment_id

@@ -135,6 +135,7 @@ pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> E
     C,
 > where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
     requires
+        listener.spec_id() == server_id,
         num_threads > 0,
 {
     let tracked state_inv;

@@ -88,19 +88,29 @@ pub trait Channel {
     spec fn constant(self) -> Self::K;
 }
 
-pub trait Listener<C> where C: Channel {
+pub trait Listener<C> where C: Channel<Id = (u64, u64)> {
+    spec fn spec_id(self) -> u64;
+
     fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> C::K>) -> (r: Result<C, TryListenError>)
         ensures
-            r is Ok ==> r->Ok_0.constant() == gen_pred(self),
+            r is Ok ==> {
+                &&& r->Ok_0.constant() == gen_pred(self)
+                &&& r->Ok_0.spec_id().0 == self.spec_id()
+            },
     ;
 }
 
-pub trait Connector<C> where C: Channel {
+pub trait Connector<C> where C: Channel<Id = (u64, u64)> {
+    spec fn spec_id(self) -> u64;
+
     fn connect<F>(&self, local_id: u64, gen_pred: F) -> (r: Result<C, ConnectError>) where
         F: FnOnce(&Self, u64) -> Ghost<C::K>,
 
         ensures
-            r is Ok ==> gen_pred.ensures((self, local_id), Ghost(r->Ok_0.constant())),
+            r is Ok ==> {
+                &&& gen_pred.ensures((self, local_id), Ghost(r->Ok_0.constant()))
+                &&& r->Ok_0.spec_id() == (local_id, self.spec_id())
+            },
     ;
 }
 

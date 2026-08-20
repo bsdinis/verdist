@@ -39,7 +39,7 @@ fn main() {
                 .values()
                 .map(|server_conf| {
                     let addr = server_conf.addr.expect("server addr should be set");
-                    verdist::network::udp::UdpConnector::new(addr, args.client_addr)
+                    verdist::network::udp::UdpConnector::new(addr, args.client_addr, server_conf.id)
                         .expect("failed to create connector")
                 })
                 .collect::<Vec<_>>();
@@ -52,7 +52,7 @@ fn main() {
                 .values()
                 .map(|server_conf| {
                     let addr = server_conf.addr.expect("server addr should be set");
-                    verdist::network::tcp::TcpConnector::new(addr)
+                    verdist::network::tcp::TcpConnector::new(addr, server_conf.id)
                         .expect("failed to create connector")
                 })
                 .collect::<Vec<_>>();

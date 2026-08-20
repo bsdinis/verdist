@@ -20,14 +20,18 @@ fn main() {
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
-            let connector =
-                verdist::network::udp::UdpConnector::new(args.server_addr, args.client_addr)
-                    .expect("failed to create connector");
+            let connector = verdist::network::udp::UdpConnector::new(
+                args.server_addr,
+                args.client_addr,
+                args.server_id,
+            )
+            .expect("failed to create connector");
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
-            let connector = verdist::network::tcp::TcpConnector::new(args.server_addr)
-                .expect("failed to create connector");
+            let connector =
+                verdist::network::tcp::TcpConnector::new(args.server_addr, args.server_id)
+                    .expect("failed to create connector");
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
     }

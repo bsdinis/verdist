@@ -178,6 +178,7 @@ impl<S, L, C> Server<S, L, C> where
     pub fn new(service: S, listener: L, channel_inv: Ghost<C::K>, num_shards: usize) -> (r: Self)
         requires
             channel_inv@ == service.channel_inv(),
+            listener.spec_id() == service.spec_id(),
             num_shards > 0,
         ensures
             r.spec_server_id() == service.spec_id(),
@@ -204,6 +205,7 @@ impl<S, L, C> Server<S, L, C> where
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.connected.len() > 0
+        &&& self.listener.spec_id() == self.service.spec_id()
         &&& forall|i: int|
             0 <= i < self.connected.len() ==> {
                 &&& #[trigger] self.connected[i].pred().server_id == self.service.spec_id()
@@ -242,6 +244,7 @@ impl<S, L, C> Server<S, L, C> where
     fn accept(&self, channel: C)
         requires
             channel.constant() == self.service.channel_inv(),
+            channel.spec_id().0 == self.service.spec_id(),
     {
         proof {
             use_type_invariant(self);
@@ -252,7 +255,6 @@ impl<S, L, C> Server<S, L, C> where
         assert(self.connected[shard as int].pred().server_id == self.service.spec_id());
         assert(self.connected[shard as int].pred().channel_inv == self.service.channel_inv());
         let (mut guard, handle) = self.connected[shard].acquire_write();
-        assume(channel.spec_id().0 == self.service.spec_id());  // TODO(connector)
         guard.push(channel);
         assert(ConnectionsInv::inv(self.connected[shard as int].pred(), guard));
         handle.release_write(guard);
@@ -274,6 +276,10 @@ impl<S, L, C> Server<S, L, C> where
             match self.listener.try_accept(Ghost(|l| self.service.channel_inv())) {
                 Ok(channel) => {
                     assert(channel.constant() == self.service.channel_inv());
+                    proof {
+                        use_type_invariant(self);
+                    }
+                    assert(channel.spec_id().0 == self.service.spec_id());
                     self.accept(channel)
                 },
                 Err(TryListenError::Empty) => {

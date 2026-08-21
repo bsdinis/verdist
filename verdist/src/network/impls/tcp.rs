@@ -39,7 +39,13 @@ pub struct TypedTcpStream<R, S> {
 impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     pub fn new(stream: TcpStream) -> Self {
         stream.set_nonblocking(false).expect("this should never fail");
-        stream.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect("this should never fail");
+        stream.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect(
+            "this should never fail",
+        );
+        // ABD's protocol messages (get/get_timestamp/write requests, quorum replies) are small;
+        // without this, Nagle's algorithm (sender-side) interacting with delayed ACKs
+        // (receiver-side) can add tens of milliseconds of latency per hop.
+        stream.set_nodelay(true).expect("this should never fail");
         TypedTcpStream { inner: stream, _marker: PhantomData }
     }
 

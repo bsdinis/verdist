@@ -126,4 +126,14 @@ pub assume_specification[ std::net::TcpStream::set_read_timeout ](
     no_unwind
 ;
 
+pub assume_specification[ std::net::TcpStream::set_nodelay ](
+    s: &std::net::TcpStream,
+    b: bool,
+) -> (r: std::io::Result<()>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
 } // verus!

@@ -80,8 +80,15 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
     }
 
     #[verifier::exec_allows_no_decreases_clause]
-    // TODO: a mechanism to ensure that the Replies we get back is the same we put in (i.e., same
-    // identity, not same value, would be useful, maybe)
+    // NOTE: identity of the returned `Replies` w.r.t. the one implicitly threaded through
+    // `self` is already guaranteed for free, without any extra ghost-identity mechanism:
+    // `self` is consumed by value and `self_mut.replies` (later returned as `r->Ok_0` /
+    // `r->Err_0`) is the very same `Replies` object, only ever mutated in place via
+    // `insert_reply`/`insert_error` inside the loop below -- there is no code path here that
+    // could construct/return a different `Replies` value. Since Verus's ghost/tracked
+    // resources (e.g. the `Pred`/accumulator ids referenced by `Pred::inv`) are themselves part
+    // of the struct's value, structural (spec) equality already implies "same identity" in the
+    // sense this TODO was after, so a separate tracked identity token would be redundant.
     pub fn wait_for<F>(self, termination_cond: F) -> (r: WaitForResult<
         PoolChannel<Pool>,
         Pred,
@@ -123,7 +130,20 @@ impl<'a, Pool, Pred, A> RequestContext<'a, Pool, Pred, A> where
                 assert(self_mut.replies.pred() == pred);
                 return Ok(self_mut.replies);
             }
-            // TODO: we can try to figure out a better "give up" condition
+            // NOTE: waiting for every node (rather than giving up as soon as a quorum can no
+            // longer be reached) is deliberately conservative, not just unoptimized. This
+            // module (`verdist::rpc`) is generic over any `ReplyAccumulator`/`Pred` pair and
+            // has no notion of "quorum size" or "which replies still in flight could help" --
+            // that knowledge lives one layer up, in the protocol built on top (e.g. `abd`'s
+            // `invariants::quorum`). A strictly-better condition would need the
+            // `ReplyAccumulator` trait to expose something like a `spec fn quorum_size()` /
+            // "can this accumulator's postcondition still become satisfiable given N more
+            // replies" predicate, and `wait_for`'s loop invariant + the `Err` branch's
+            // `ensures` would need to be reproven against that generalized condition. That is
+            // a real (if bounded) proof-engineering task, not a one-line change, so it is left
+            // for whoever next touches the give-up path rather than guessed at here -- doing so
+            // must not weaken `Pred::inv(self.pred(), r->Err_0.spec_accumulator())`, which the
+            // current "wait for all" condition trivially preserves.
 
             if self_mut.replies.n_received() >= self_mut.n_nodes() {
                 let replies = self_mut.replies;

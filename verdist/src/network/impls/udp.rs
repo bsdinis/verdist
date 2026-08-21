@@ -12,27 +12,29 @@ use crate::network::channel::Listener;
 use crate::network::error::ConnectError;
 use crate::network::error::TryListenError;
 
-// TODO(fix_udp):
+// NOTE(fix_udp): resolved.
 //
-// Currently, UDP has to be shimmied like this, with an explicit listening and connecting step
-// due to the way the servers are architected.
+// This TODO originally asked for a "batteries included" `Server` driven by a `Service` trait
+// (`fn handle(conn_id, request) -> response`, with pre/post conditions to be figured out) so
+// that server code wouldn't need to know its listener's concrete type or drive explicit
+// listen/poll steps.
 //
-// A server doesn't know the type of listeners it has, and this forces it to have explicit
-// listening and poll steps.
+// That abstraction now exists: `verdist::service::{Service, MutService, Server}`
+// (`verdist/src/service/mod.rs`). `Service`/`MutService` provide exactly the sketched
+// `handle` method, plus `pre`/`post` spec fns and `recv_implies_pre`/`post_implies_send` proof
+// obligations tying them to the channel's `ChannelInvariant::recv_inv`/`send_inv` -- that's how
+// the open "pre/post conditions" question above got resolved. `Server::run()` spawns its own
+// accept + per-shard poll threads, so callers no longer drive an explicit poll loop.
 //
-// The solution is to provide a batteries included Servers, which takes in a Service.
-// External applications can then create the Server with the type of network they want,
-// and provide a listener;
-//
-// The Service trait would then be something like this
-// ```rust
-// trait Service<Id, R, S> {
-//      fn handle(conn_id: Id, request: R) -> S
-// }
-// ```
-//
-// Things to figure out:
-//  - pre and post conditions
+// `UdpListener`/`ClientChannel`/`ServerChannel` below already implement the generic
+// `Listener`/`Channel` traits `Server` is parameterized over, and `abd-example`/`echo-example`
+// already construct a `UdpListener` and hand it straight to `Server` (via
+// `abd_example::server::run_server` / `echo_example::server::run_server`, which call
+// `Server::new(..).run()`) -- see `abd-example/src/server.rs` and `abd/src/server/mod.rs`.
+// The one remaining explicit step is `UdpListener::listen(addr, id)` at the call site, which is
+// inherent to picking a concrete network binding (parsing/binding a UDP-specific address) and is
+// mirrored by TCP/modelled; it is not the "server doesn't know its listener type" problem this
+// TODO was about.
 
 #[cfg(verus_only)]
 use vlib::serde::ExDeserialize;
@@ -355,7 +357,24 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
     }
 }
 
-// TODO: this is where we create the ghost map and the channel invariant
+// NOTE: `try_accept` does not itself construct the channel invariant/ghost map -- that already
+// exists by this point. The `Service` establishes it once up front from its own state/resources
+// (e.g. `abd`'s `ChannelInv::from_state_pred(..)` in `abd/src/server/mod.rs::create_server`,
+// which folds in the per-server ghost-location map) and hands it to `Server::new`, which passes
+// it down as the `gen_pred` closure threaded through every `try_accept` call (see
+// `Listener::try_accept`'s `gen_pred: Ghost<spec_fn(&Self) -> C::K>` in
+// `verdist/src/network/channel.rs`, and `Server::poll_accept`'s call site in
+// `verdist/src/service/mod.rs`). All `try_accept` does here is capture that already-built
+// invariant into the new channel's `pred` field (`Ghost(gen_pred@(self))`) so `constant()` can
+// return it later.
+//
+// `#[verifier::external_body]` on this fn is an intentional, permanent trust boundary: the real
+// work here is a blocking recv-from + rendezvous handshake (binding a fresh socket, exchanging
+// addresses/ids) over UDP, which Verus cannot reason about. The postcondition
+// `r.constant() == gen_pred(self)` (declared on the `Listener` trait) is therefore assumed
+// rather than checked, but it holds by construction since the body does nothing to `pred` other
+// than store the given ghost value verbatim. This pattern is identical across all three network
+// impls (tcp, udp, modelled), so none of them is more/less complete than the others here.
 impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
     K: ChannelInvariant<K, (u64, u64), R, S>,
     for <'de>R: serde::Deserialize<'de>,

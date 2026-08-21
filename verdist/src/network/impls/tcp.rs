@@ -343,7 +343,24 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
     }
 }
 
-// TODO: this is where we create the ghost map and the channel invariant
+// NOTE: `try_accept` does not itself construct the channel invariant/ghost map -- that already
+// exists by this point. The `Service` establishes it once up front from its own state/resources
+// (e.g. `abd`'s `ChannelInv::from_state_pred(..)` in `abd/src/server/mod.rs::create_server`,
+// which folds in the per-server ghost-location map) and hands it to `Server::new`, which passes
+// it down as the `gen_pred` closure threaded through every `try_accept` call (see
+// `Listener::try_accept`'s `gen_pred: Ghost<spec_fn(&Self) -> C::K>` in
+// `verdist/src/network/channel.rs`, and `Server::poll_accept`'s call site in
+// `verdist/src/service/mod.rs`). All `try_accept` does here is capture that already-built
+// invariant into the new channel's `pred` field (`Ghost(gen_pred@(self))`) so `constant()` can
+// return it later.
+//
+// `#[verifier::external_body]` on this fn is an intentional, permanent trust boundary: the real
+// work here is a blocking accept + client-id handshake over a raw socket, which Verus cannot
+// reason about. The postcondition `r.constant() == gen_pred(self)` (declared on the `Listener`
+// trait) is therefore assumed rather than checked, but it holds by construction since the body
+// does nothing to `pred` other than store the given ghost value verbatim. This pattern is
+// identical across all three network impls (tcp, udp, modelled), so none of them is more/less
+// complete than the others here.
 impl<K, R, S> Listener<ClientChannel<K, R, S>> for TcpListener where
     K: ChannelInvariant<K, (u64, u64), R, S>,
     for <'de>R: serde::Deserialize<'de>,

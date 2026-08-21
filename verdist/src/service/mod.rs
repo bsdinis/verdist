@@ -133,6 +133,47 @@ pub trait Service {
     ;
 }
 
+/// Upper bound on how many connections `Server::poll_shard` scans in a single call -- see
+/// `PollCursor`.
+const MAX_POLL_BATCH: usize = 64;
+
+/// Round-robins which slice of a shard's connections `poll_shard` actually touches on a given
+/// call, instead of scanning every connection every call (see §3 of Performance.md). Opaque to
+/// Verus -- it's a pure scheduling hint, not part of any correctness invariant, and is only ever
+/// touched by the single dedicated worker thread for its shard (see `Server::run`), so a plain
+/// relaxed atomic (no torn reads on any real platform, no concurrent writers) is sound without
+/// needing `vstd`'s ghost-permission-tracked atomics.
+#[verifier::external_body]
+pub struct PollCursor {
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for PollCursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PollCursor {
+    #[verifier::external_body]
+    pub fn new() -> Self {
+        PollCursor { next: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    /// Returns the start index of the next batch of size `min(batch, len)` (mod `len`), and
+    /// advances internal state so a subsequent call continues where this one left off.
+    #[verifier::external_body]
+    pub fn advance(&self, len: usize, batch: usize) -> usize {
+        use std::sync::atomic::Ordering;
+        if len == 0 {
+            return 0;
+        }
+        let start = self.next.load(Ordering::Relaxed) % len;
+        self.next.store((start + batch) % len, Ordering::Relaxed);
+        start
+    }
+}
+
 pub struct ConnectionsInv<K> {
     pub channel_inv: K,
     pub server_id: u64,
@@ -163,6 +204,8 @@ pub struct Server<S, L, C> where
     /// Connected clients, sharded across independent locks so that `connected.len()` worker
     /// threads can each poll their own shard without contending on the others.
     connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>>,
+    /// One round-robin cursor per shard (see `PollCursor`), same length as `connected`.
+    cursors: Vec<PollCursor>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -186,10 +229,12 @@ impl<S, L, C> Server<S, L, C> where
         let id = service.id();
         let ghost connected_inv = ConnectionsInv { channel_inv: channel_inv@, server_id: id };
         let mut connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>> = Vec::new();
+        let mut cursors: Vec<PollCursor> = Vec::new();
         let mut i = 0;
         while i < num_shards
             invariant
                 connected.len() == i,
+                cursors.len() == i,
                 forall|j: int|
                     0 <= j < connected@.len() ==> #[trigger] connected@[j].pred() == connected_inv,
             decreases num_shards - i,
@@ -197,14 +242,16 @@ impl<S, L, C> Server<S, L, C> where
             let empty: Vec<C> = Vec::new();
             assert(connected_inv.inv(empty));
             connected.push(RwLock::new(empty, Ghost(connected_inv)));
+            cursors.push(PollCursor::new());
             i += 1;
         }
-        Server { service, listener, connected }
+        Server { service, listener, connected, cursors }
     }
 
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.connected.len() > 0
+        &&& self.cursors.len() == self.connected.len()
         &&& self.listener.spec_id() == self.service.spec_id()
         &&& forall|i: int|
             0 <= i < self.connected.len() ==> {
@@ -316,10 +363,15 @@ impl<S, L, C> Server<S, L, C> where
     ///
     /// Only holds a *read* lock while scanning/handling connections (every op here --
     /// `try_recv`/`Service::handle`/`send` -- only needs `&self`/`&C`), so the accept thread can
-    /// still register new connections in this shard, and (once other shards stop sharing this
-    /// lock -- N/A here, locks are per-shard) nothing else in the shard is blocked by a slow
-    /// handler. The write lock is only taken afterwards, and only for the `retain()` that drops
-    /// dead connections.
+    /// still register new connections in this shard, and nothing else in the shard is blocked by
+    /// a slow handler. The write lock is only taken afterwards, and only for the `retain()` that
+    /// drops dead connections.
+    ///
+    /// Only scans up to `MAX_POLL_BATCH` connections per call (round-robin across calls via
+    /// `self.cursors[shard]`) instead of every connection in the shard every time (see §3 of
+    /// Performance.md) -- cost per call is bounded regardless of how many idle long-lived
+    /// connections have accumulated in the shard; full coverage is still reached, just spread
+    /// out over multiple calls.
     pub fn poll_shard(&self, shard: usize) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
@@ -336,52 +388,64 @@ impl<S, L, C> Server<S, L, C> where
         assert(connected_pred.server_id == self.service.spec_id());
         assert(connected_pred.channel_inv == self.service.channel_inv());
         let connected = read_handle.borrow();
-        let iterator = connected.iter();
-        #[allow(unused_variables)]
-        let mut idx = 0usize;
-        #[allow(unused_assignments, clippy::explicit_counter_loop)]
-        for channel in it: iterator
+        assert(connected_pred.inv(*connected));
+
+        let len = connected.len();
+        let batch = if len < MAX_POLL_BATCH {
+            len
+        } else {
+            MAX_POLL_BATCH
+        };
+        let start = self.cursors[shard].advance(len, batch);
+
+        let mut i = 0usize;
+        while i < batch
             invariant
-                self.connected[shard as int].pred() == connected_pred,
+                connected_pred == self.connected[shard as int].pred(),
                 connected_pred.server_id == self.service.spec_id(),
                 connected_pred.channel_inv == self.service.channel_inv(),
-                idx == it.index,
-                forall|idx|
-                    0 <= idx < connected@.len() ==> {
-                        let chan = #[trigger] connected@[idx];
-                        &&& it.snapshot@.remaining()[idx] == chan
-                        &&& connected_pred.channel_inv == chan.constant()
-                        &&& connected_pred.server_id == chan.spec_id().0
-                    },
+                connected_pred.inv(*connected),
+                connected@.len() == len,
+                batch <= len,
+            decreases batch - i,
         {
-            if idx < connected.len() {
-                use crate::network::error::TryRecvError;
-                assert(channel == connected@[it.index@]);  // TRIGGER
-                match channel.try_recv() {
-                    Ok(req) => {
-                        assert(self.service.channel_inv() == channel.constant());
-                        assert(C::K::recv_inv(channel.constant(), channel.spec_id(), req));
-                        proof {
-                            self.service.recv_implies_pre(channel.spec_id(), req);
-                        }
-                        let response = self.service.handle(channel.id(), req);
-                        proof {
-                            self.service.post_implies_send(channel.spec_id(), req, response);
-                        }
-                        assert(C::K::send_inv(channel.constant(), channel.spec_id(), response));
-                        if channel.send(&response).is_err() {
-                            drop.insert(channel.id());
-                        }
-                    },
-                    Err(TryRecvError::Empty) => {},
-                    Err(e) => {
-                        vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.service.id());
+            use crate::network::error::TryRecvError;
+            assume(start + i < usize::MAX);  // XXX: overflow, mirrors poll_accept's `idx`
+            let idx = (start + i) % len;
+            assert(0 <= idx < connected@.len()) by {
+                assert(len > 0);
+            };
+            let channel = &connected[idx];
+            assert(*channel == connected@[idx as int]);  // TRIGGER
+            assert(connected_pred.inv(*connected));
+            assert({
+                let chan = connected@[idx as int];
+                &&& connected_pred.channel_inv == chan.constant()
+                &&& connected_pred.server_id == chan.spec_id().0
+            });
+            match channel.try_recv() {
+                Ok(req) => {
+                    assert(self.service.channel_inv() == channel.constant());
+                    assert(C::K::recv_inv(channel.constant(), channel.spec_id(), req));
+                    proof {
+                        self.service.recv_implies_pre(channel.spec_id(), req);
+                    }
+                    let response = self.service.handle(channel.id(), req);
+                    proof {
+                        self.service.post_implies_send(channel.spec_id(), req, response);
+                    }
+                    assert(C::K::send_inv(channel.constant(), channel.spec_id(), response));
+                    if channel.send(&response).is_err() {
                         drop.insert(channel.id());
-                    },
-                }
+                    }
+                },
+                Err(TryRecvError::Empty) => {},
+                Err(e) => {
+                    vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.service.id());
+                    drop.insert(channel.id());
+                },
             }
-            assume(idx < usize::MAX);  // XXX: overflow
-            idx += 1;
+            i += 1;
         }
         read_handle.release_read();
 

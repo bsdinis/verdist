@@ -313,6 +313,13 @@ impl<S, L, C> Server<S, L, C> where
 
     /// Polls, handles, and drops dead connections within a single shard. Meant to be driven by
     /// one dedicated worker thread per shard -- see `run()`.
+    ///
+    /// Only holds a *read* lock while scanning/handling connections (every op here --
+    /// `try_recv`/`Service::handle`/`send` -- only needs `&self`/`&C`), so the accept thread can
+    /// still register new connections in this shard, and (once other shards stop sharing this
+    /// lock -- N/A here, locks are per-shard) nothing else in the shard is blocked by a slow
+    /// handler. The write lock is only taken afterwards, and only for the `retain()` that drops
+    /// dead connections.
     pub fn poll_shard(&self, shard: usize) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
@@ -323,11 +330,12 @@ impl<S, L, C> Server<S, L, C> where
 
         }
         let mut drop = HashSet::new();
-        let (mut connected, handle) = self.connected[shard].acquire_write();
+        let read_handle = self.connected[shard].acquire_read();
 
         let ghost connected_pred = self.connected[shard as int].pred();
         assert(connected_pred.server_id == self.service.spec_id());
         assert(connected_pred.channel_inv == self.service.channel_inv());
+        let connected = read_handle.borrow();
         let iterator = connected.iter();
         #[allow(unused_variables)]
         let mut idx = 0usize;
@@ -375,7 +383,13 @@ impl<S, L, C> Server<S, L, C> where
             assume(idx < usize::MAX);  // XXX: overflow
             idx += 1;
         }
+        read_handle.release_read();
 
+        if drop.is_empty() {
+            return true;
+        }
+
+        let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
         let filter_fn = |c: &C| !drop.contains(&c.id());
         connected.retain(filter_fn);

@@ -106,4 +106,24 @@ pub assume_specification[ std::net::TcpStream::set_nonblocking ](
     no_unwind
 ;
 
+pub assume_specification[ std::net::UdpSocket::set_read_timeout ](
+    s: &std::net::UdpSocket,
+    dur: Option<std::time::Duration>,
+) -> (r: std::io::Result<()>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
+pub assume_specification[ std::net::TcpStream::set_read_timeout ](
+    s: &std::net::TcpStream,
+    dur: Option<std::time::Duration>,
+) -> (r: std::io::Result<()>)
+    ensures
+        r is Ok,  // BSD: I cannot see this failing
+
+    no_unwind
+;
+
 } // verus!

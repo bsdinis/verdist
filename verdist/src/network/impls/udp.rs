@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
+use std::time::Duration;
 
 use crate::network::channel::Channel;
 use crate::network::channel::ChannelInvariant;
@@ -42,6 +43,17 @@ use vstd::prelude::*;
 
 verus! {
 
+/// How long a `recv`/`recv_from` call is allowed to block before giving up and reporting "no
+/// data yet" (`WouldBlock`/`TimedOut`), same as the old non-blocking + spin design would report
+/// immediately. Mirrors `network::impls::tcp::RECV_TIMEOUT_MILLIS`.
+const RECV_TIMEOUT_MILLIS: u64 = 2;
+
+/// Read timeouts surface as `WouldBlock` on some platforms and `TimedOut` on others; both mean
+/// "no data within `RECV_TIMEOUT`", same as the non-blocking design's `WouldBlock`.
+fn is_recv_timeout(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut
+}
+
 const BUF_SIZE: usize = 1 << 12;
 
 /// Udp Socket that unmarshals receiving types (R) and marshals sending types (S)
@@ -52,7 +64,8 @@ pub struct TypedUdpSocket<R, S> {
 
 impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     pub fn new(socket: UdpSocket) -> Self {
-        socket.set_nonblocking(true).expect("this should never fail");
+        socket.set_nonblocking(false).expect("this should never fail");
+        socket.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect("this should never fail");
         TypedUdpSocket { inner: socket, _marker: PhantomData }
     }
 
@@ -84,7 +97,7 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         let res = self.inner.recv(&mut buf);
         let r = match res {
             Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if is_recv_timeout(&e) => {
                 return Ok(None);
             },
             Err(e) => {
@@ -104,7 +117,7 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         let mut buf = [0;BUF_SIZE];
         let (r, addr) = match self.inner.recv_from(&mut buf) {
             Ok(x) => x,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if is_recv_timeout(&e) => {
                 return Ok(None);
             },
             Err(e) => {

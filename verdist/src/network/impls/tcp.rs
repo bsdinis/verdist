@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
+use std::time::Duration;
 
 use crate::network::channel::Channel;
 use crate::network::channel::ChannelInvariant;
@@ -21,6 +22,14 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Timeout for receive
+const RECV_TIMEOUT_MILLIS: u64 = 2;
+
+/// Detect if IO errors are timeouts
+fn is_recv_timeout(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut
+}
+
 /// Tcp Socket that unmarshals receiving types (R) and marshals sending types (S)
 pub struct TypedTcpStream<R, S> {
     inner: TcpStream,
@@ -29,7 +38,8 @@ pub struct TypedTcpStream<R, S> {
 
 impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     pub fn new(stream: TcpStream) -> Self {
-        stream.set_nonblocking(true).expect("this should never fail");
+        stream.set_nonblocking(false).expect("this should never fail");
+        stream.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect("this should never fail");
         TypedTcpStream { inner: stream, _marker: PhantomData }
     }
 
@@ -55,30 +65,36 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(value)
     }
 
+    /// Fills `buf` completely, retrying through recv-timeouts by resuming from where the
+    /// previous attempt left off (tracked in `filled`) rather than restarting `read_exact` from
+    /// `buf[0]`
+    ///
+    /// If `bail_if_empty` is set, returns `Ok(false)` (without having consumed anything) the
+    /// first time a timeout occurs with zero bytes of *this* field read so far
     #[verifier::external_body]
-    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
-        let mut len_bytes = [0u8;4];
-        // TcpStream implements Read, which takes in a mut ref
-        // However, &TcpStream also implements Read, so this is how we get around it
-        let mut stream = &self.inner;
-        match stream.read_exact(&mut len_bytes) {
-            Ok(()) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(None);
-            },
-            Err(e) => {
-                return Err(e);
-            },
-        }
-        let len = u32::from_ne_bytes(len_bytes) as usize;
-
-        let mut buf = vec![0u8; len];
-        loop {
-            match stream.read_exact(&mut buf) {
-                Ok(()) => {
-                    break;
+    fn read_exact_or_none(
+        stream: &mut &TcpStream,
+        buf: &mut [u8],
+        bail_if_empty: bool,
+    ) -> Result<bool, std::io::Error> {
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            match stream.read(&mut buf[filled..]) {
+                Ok(0) => {
+                    return Err(
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "peer closed connection mid-message",
+                        ),
+                    );
                 },
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(n) => {
+                    filled += n;
+                },
+                Err(e) if is_recv_timeout(&e) && bail_if_empty && filled == 0 => {
+                    return Ok(false);
+                },
+                Err(e) if is_recv_timeout(&e) => {
                     continue;
                 },
                 Err(e) => {
@@ -86,6 +102,22 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                 },
             }
         }
+        Ok(true)
+    }
+
+    #[verifier::external_body]
+    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
+        // TcpStream implements Read, which takes in a mut ref
+        // However, &TcpStream also implements Read, so this is how we get around it
+        let mut stream = &self.inner;
+        let mut len_bytes = [0u8;4];
+        if !Self::read_exact_or_none(&mut stream, &mut len_bytes, true)? {
+            return Ok(None);
+        }
+        let len = u32::from_ne_bytes(len_bytes) as usize;
+
+        let mut buf = vec![0u8; len];
+        Self::read_exact_or_none(&mut stream, &mut buf, false)?;
         let res = Self::deserialize(&buf)?;
         Ok(Some(res))
     }

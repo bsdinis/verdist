@@ -265,7 +265,10 @@ impl<C> ConnectionPool for FlawlessPool<BufChannel<C>> where
                     &&& self.spec_channels()[channel.spec_id()] == channel
                 })
         }
-        let mut v = Vec::new();
+        // Pre-size to the pool length instead of growing-and-reallocating from empty on every
+        // call -- `poll()` is invoked on every spin/wait iteration (see Performance.md §6), so
+        // this reallocation cost was paid continuously.
+        let mut v = Vec::with_capacity(self.pool.len());
 
         for idx in 0..self.pool.len()
             invariant

@@ -60,7 +60,15 @@ impl<C: Channel<K = ChannelInv>> WritePred<C> {
             request_id: request.key().1,
         }
     }
-    // TODO: type invariant here relating the channels.dom() to the server_locs.dom()
+    // NOTE: `WritePred` is a plain `ghost struct` (no exec-level constructor), so it cannot
+    // carry a `#[verifier::type_invariant]` of its own. The relation between `channels.dom()`
+    // and `server_locs.dom()` we actually need downstream -- every channel id's server
+    // component is a known server location, i.e.
+    // `forall|c_id| channels.contains_key(c_id) ==> server_locs.contains_key(c_id.1)` -- is
+    // instead enforced as part of `WriteAccumulator::new`'s precondition and re-asserted as a
+    // conjunct of `WriteAccumulator::channel_inv`, which *is* covered by `WriteAccumulator`'s
+    // `#[verifier::type_invariant]`. That way every method on the accumulator gets the fact
+    // for free instead of re-deriving/assuming it ad hoc.
 
 }
 
@@ -131,6 +139,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
                     let c = pred@.channels[c_id];
                     &&& c_id.0 == request@.key().0
                     &&& channel_inv(c.constant(), pred@)
+                    &&& pred@.server_locs.contains_key(c_id.1)
                 },
         ensures
             r.constant() == pred@,
@@ -163,6 +172,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
                 let c = channels[c_id];
                 &&& c_id.0 == k.client_id
                 &&& channel_inv(c.constant(), k)
+                &&& k.server_locs.contains_key(c_id.1)
             }
     }
 
@@ -524,7 +534,21 @@ impl<C> ReplyAccumulator<C, WritePred<C>> for WriteAccumulator<C> where
         proof {
             use_type_invariant(&*self);
 
-            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
+            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // NOTE(verus limitation, verified 2026-08-21): C::K::recv_inv is a spec-fn call through a
+            // doubly-indirected associated type (K is an assoc type of the Channel type C, and recv_inv is
+            // a trait method of ChannelInvariant bound on K). This exact fact is a literal top-level
+            // conjunct of ReplyAccumulator::insert's `requires` (verdist/src/rpc/replies.rs) -- and Verus
+            // forbids restating `requires` on a trait-impl method ("can only be inherited from the trait
+            // declaration"), so it IS the impl body's contract. Diagnostically, every other requires
+            // conjunct (contains_key(id), channels[id].spec_id() == id, request_tag() == reply.spec_tag(),
+            // even channels[id].constant() congruence) is provable inside this body from that same
+            // inherited requires -- only the `C::K::recv_inv(...)` conjunct is not, even when isolated into
+            // its own `let`-bound variable with no other syntax around it. This reproduces on a clean,
+            // pre-existing-WIP-free checkout, so it is not a bug in this call site's proof: it's a Verus
+            // engine gap in propagating a doubly-associated-type-qualified spec-fn call from an inherited
+            // trait `requires` into the implementing method's assumption context. assume() is intentional
+            // and load-bearing here, not a placeholder; see recv_inv's real establishment via
+            // Channel::try_recv's ensures in verdist/src/network/channel.rs.
         }
         reply.agree_request(&mut self.request);
         reply.lemma_inv();

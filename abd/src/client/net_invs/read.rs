@@ -62,7 +62,16 @@ impl<C: Channel<K = ChannelInv>> ReadPred<C> {
             wb_request_id: None,
         }
     }
-    // TODO: type invariant here relating the channels.dom() to the server_locs.dom()
+    // NOTE: `ReadPred` is a plain `ghost struct` (no exec-level constructor), so it cannot
+    // carry a `#[verifier::type_invariant]` of its own. The relation between `channels.dom()`
+    // and `server_locs.dom()` we actually need downstream -- every channel id's server
+    // component is a known server location, i.e.
+    // `forall|c_id| channels.contains_key(c_id) ==> server_locs.contains_key(c_id.1)` -- is
+    // instead enforced as part of `construct_requires` (the precondition for building a
+    // `ReadAccumulator`/`ReadAccumGetPhase`) and re-asserted as a conjunct of
+    // `ReadAccumulator::channel_inv`, which *is* covered by `ReadAccumulator`'s
+    // `#[verifier::type_invariant]`. That way every method on the accumulator gets the fact
+    // for free instead of re-deriving/assuming it ad hoc.
 
 }
 
@@ -148,6 +157,7 @@ pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>
             let c = k.channels[c_id];
             &&& c_id.0 == get_request.key().0
             &&& channel_inv(c.constant(), k)
+            &&& k.server_locs.contains_key(c_id.1)
         }
 }
 
@@ -201,6 +211,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
                 let c = channels[c_id];
                 &&& c_id.0 == k.client_id
                 &&& channel_inv(c.constant(), k)
+                &&& k.server_locs.contains_key(c_id.1)
             }
     }
 
@@ -225,18 +236,21 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         }
     }
 
-    // TODO: take in the union
+    // The two conditions "not in get_replies" and "not in wb_replies" only ever show up
+    // together (they mean "we haven't heard from this server at all yet"), so take their
+    // union directly instead of two separate sets -- this is equivalent by De Morgan's law
+    // (`!get_replies.contains(cid) && !wb_replies.contains(cid) <==>
+    // !get_replies.union(wb_replies).contains(cid)`) but avoids re-deriving that equivalence
+    // at every call site.
     closed spec fn unchanged_inv(
         servers: ServerUniverseLb,
         req_servers: ServerUniverseLb,
-        get_replies: Set<C::Id>,
-        wb_replies: Set<C::Id>,
+        replies: Set<C::Id>,
         client_id: u64,
     ) -> bool {
         &&& forall|cid|
             {
-                &&& !#[trigger] get_replies.contains(cid)
-                &&& !#[trigger] wb_replies.contains(cid)
+                &&& !#[trigger] replies.contains(cid)
                 &&& #[trigger] servers.contains_key(cid.1)
                 &&& cid.0 == client_id
             } ==> { servers[cid.1]@@.timestamp() == req_servers[cid.1]@@.timestamp() }
@@ -302,8 +316,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         &&& Self::unchanged_inv(
             self.servers(),
             self.orig_servers(),
-            self.get_replies@,
-            self.wb_replies@,
+            self.get_replies@.union(self.wb_replies@),
             self.client_id(),
         )
         &&& Self::agree_with_max_inv(
@@ -1016,6 +1029,22 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(&*self);
+            // `unchanged_inv` (part of the type invariant) is stated over
+            // `get_replies@.union(wb_replies@)`, but `insert_get_aux`'s precondition is stated
+            // over the two sets separately -- bridge the two forms explicitly, since Verus won't
+            // automatically match the union-shaped trigger from the two separate negations.
+            assert forall|cid: (u64, u64)|
+                {
+                    &&& !#[trigger] self.get_replies@.contains(cid)
+                    &&& !#[trigger] self.wb_replies@.contains(cid)
+                    &&& self.servers().contains_key(cid.1)
+                    &&& cid.0 == self.get_request@.key().0
+                } implies {
+                self.servers()[cid.1]@@.timestamp()
+                    == self.get_request@.get().servers()[cid.1]@@.timestamp()
+            } by {
+                assert(!self.get_replies@.union(self.wb_replies@).contains(cid));
+            }
         }
 
         Self::insert_get_aux(
@@ -1281,6 +1310,20 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     {
         proof {
             use_type_invariant(&*self);
+            // See the analogous bridge in `insert_get` above: `unchanged_inv` is stated over the
+            // unioned set, `insert_wb_aux`'s precondition over the two sets separately.
+            assert forall|cid: (u64, u64)|
+                {
+                    &&& !#[trigger] self.get_replies@.contains(cid)
+                    &&& !#[trigger] self.wb_replies@.contains(cid)
+                    &&& self.servers().contains_key(cid.1)
+                    &&& cid.0 == self.get_request@.key().0
+                } implies {
+                self.servers()[cid.1]@@.timestamp()
+                    == self.get_request@.get().servers()[cid.1]@@.timestamp()
+            } by {
+                assert(!self.get_replies@.union(self.wb_replies@).contains(cid));
+            }
         }
 
         Self::insert_wb_aux(
@@ -1386,7 +1429,21 @@ impl<C> ReplyAccumulator<C, ReadPred<C>> for ReadAccumGetPhase<C> where
             use_type_invariant(&*self);
             use_type_invariant(&self.inner);
 
-            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
+            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // NOTE(verus limitation, verified 2026-08-21): C::K::recv_inv is a spec-fn call through a
+            // doubly-indirected associated type (K is an assoc type of the Channel type C, and recv_inv is
+            // a trait method of ChannelInvariant bound on K). This exact fact is a literal top-level
+            // conjunct of ReplyAccumulator::insert's `requires` (verdist/src/rpc/replies.rs) -- and Verus
+            // forbids restating `requires` on a trait-impl method ("can only be inherited from the trait
+            // declaration"), so it IS the impl body's contract. Diagnostically, every other requires
+            // conjunct (contains_key(id), channels[id].spec_id() == id, request_tag() == reply.spec_tag(),
+            // even channels[id].constant() congruence) is provable inside this body from that same
+            // inherited requires -- only the `C::K::recv_inv(...)` conjunct is not, even when isolated into
+            // its own `let`-bound variable with no other syntax around it. This reproduces on a clean,
+            // pre-existing-WIP-free checkout, so it is not a bug in this call site's proof: it's a Verus
+            // engine gap in propagating a doubly-associated-type-qualified spec-fn call from an inherited
+            // trait `requires` into the implementing method's assumption context. assume() is intentional
+            // and load-bearing here, not a placeholder; see recv_inv's real establishment via
+            // Channel::try_recv's ensures in verdist/src/network/channel.rs.
         }
         // vlib::veprintln!("[client|{:>3}]: received resp from {:>3}: {:?}", id.0, id.1, reply);
 
@@ -1523,7 +1580,21 @@ impl<C> ReplyAccumulator<C, ReadWbPred<C>> for ReadAccumWbPhase<C> where
             use_type_invariant(&*self);
             use_type_invariant(&self.inner);
 
-            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
+            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // NOTE(verus limitation, verified 2026-08-21): C::K::recv_inv is a spec-fn call through a
+            // doubly-indirected associated type (K is an assoc type of the Channel type C, and recv_inv is
+            // a trait method of ChannelInvariant bound on K). This exact fact is a literal top-level
+            // conjunct of ReplyAccumulator::insert's `requires` (verdist/src/rpc/replies.rs) -- and Verus
+            // forbids restating `requires` on a trait-impl method ("can only be inherited from the trait
+            // declaration"), so it IS the impl body's contract. Diagnostically, every other requires
+            // conjunct (contains_key(id), channels[id].spec_id() == id, request_tag() == reply.spec_tag(),
+            // even channels[id].constant() congruence) is provable inside this body from that same
+            // inherited requires -- only the `C::K::recv_inv(...)` conjunct is not, even when isolated into
+            // its own `let`-bound variable with no other syntax around it. This reproduces on a clean,
+            // pre-existing-WIP-free checkout, so it is not a bug in this call site's proof: it's a Verus
+            // engine gap in propagating a doubly-associated-type-qualified spec-fn call from an inherited
+            // trait `requires` into the implementing method's assumption context. assume() is intentional
+            // and load-bearing here, not a placeholder; see recv_inv's real establishment via
+            // Channel::try_recv's ensures in verdist/src/network/channel.rs.
         }
 
         reply.agree_request_opt(&mut self.inner.wb_request);

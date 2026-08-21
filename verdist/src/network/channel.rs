@@ -114,6 +114,10 @@ pub trait Connector<C> where C: Channel<Id = (u64, u64)> {
     ;
 }
 
+/// Upper bound on how many distinct out-of-order (wrong-tag) messages `BufChannel::try_recv_tag`
+/// will buffer at once. See `try_recv_tag`'s insert path for why this is needed.
+const MAX_BUFFERED_TAGS: usize = 1024;
+
 #[allow(dead_code)]
 struct BufChannelInv<K, Id, S> {
     ghost channel_inv: K,
@@ -191,7 +195,21 @@ impl<C> BufChannel<C> where C: Channel, C::R: TaggedMessage, C::Id: std::fmt::De
             Ok(r) => {
                 // vlib::veprintln!("[client]: received message on channel {:?} (wrong tag)", self.id());
                 let (mut guard, handle) = self.buffered.acquire_write();
-                guard.insert(r.tag(), r);
+                // Bound how many distinct out-of-order tags can accumulate: normally this is
+                // bounded by the number of concurrently in-flight request tags on this
+                // connection, but nothing enforces that bound here. Rather than growing
+                // unboundedly if a client/server pipelines pathologically many concurrent
+                // requests, drop the newly-arrived (still-unwanted) message once the buffer is
+                // already saturated -- its sender is expected to retry/timeout independently at
+                // a higher layer, same as if this message had been lost on the wire.
+                if guard.len() < MAX_BUFFERED_TAGS || guard.contains_key(&r.tag()) {
+                    guard.insert(r.tag(), r);
+                } else {
+                    vlib::veprintln!(
+                        "[channel|{:?}]: warning: out-of-order tag buffer full ({} entries), dropping message with tag {}",
+                        self.id(), MAX_BUFFERED_TAGS, r.tag()
+                    );
+                }
                 handle.release_write(guard);
                 Ok(None)
             },

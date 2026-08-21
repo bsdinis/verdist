@@ -15,7 +15,6 @@ use abd::invariants::StateInvariant;
 
 verus! {
 
-// TODO(bsdinis): use new return value syntax binding
 #[allow(unused, clippy::type_complexity)]
 pub fn get_invariant_state<ML, RL>(
     server_ids: &Ghost<Set<u64>>,

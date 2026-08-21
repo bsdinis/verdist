@@ -13,10 +13,30 @@ pub trait ExToSocketAddrs {
 #[allow(dead_code)]
 pub struct ExSocketAddr(std::net::SocketAddr);
 
+pub uninterp spec fn spec_socket_addr_ip(addr: std::net::SocketAddr) -> std::net::IpAddr;
+
+pub uninterp spec fn spec_socket_addr_port(addr: std::net::SocketAddr) -> u16;
+
+#[verifier::allow_in_spec]
+pub assume_specification[ std::net::SocketAddr::ip ](addr: &std::net::SocketAddr) -> (r:
+    std::net::IpAddr)
+    returns
+        spec_socket_addr_ip(*addr),
+    no_unwind
+;
+
+#[verifier::allow_in_spec]
+pub assume_specification[ std::net::SocketAddr::port ](addr: &std::net::SocketAddr) -> (r: u16)
+    returns
+        spec_socket_addr_port(*addr),
+    no_unwind
+;
+
 pub assume_specification[ std::net::SocketAddr::new ](ip: std::net::IpAddr, port: u16) -> (r:
     std::net::SocketAddr)
-// TODO: specify port ip
-
+    ensures
+        r.ip() == ip,
+        r.port() == port,
     no_unwind
 ;
 

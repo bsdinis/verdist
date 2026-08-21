@@ -48,6 +48,35 @@ pub enum ConnectError {
 //
 impl Error for TryListenError {
     /* TODO(verus): verus bug
+    Uncommenting this `source()` impl (returning `Option<&(dyn Error + 'static)>`) makes
+    `cargo verus verify -p verdist` fail during Verus's internal "Trait-Conflict-Checker" pass
+    (rust_verify/src/trait_check.rs, which re-emits a synthetic `dummyrs.rs` using placeholder
+    types like `struct Dyn<const N: usize, A>(Box<A>, [bool])` to check that the axioms Verus
+    generates for trait impls don't conflict). The checker fails to also derive that its `Dyn<N, ()>`
+    placeholder for the `dyn Error` trait object satisfies `Error`'s supertrait bounds (`Debug`,
+    `Display`), and emits:
+
+        error[E0277]: the trait bound `Dyn<0, ()>: T151_Display` is not satisfied
+        error[E0277]: the trait bound `Dyn<0, ()>: T152_Debug` is not satisfied
+        note: This error was found in Verus's Trait-Conflict-Checker
+        error: could not compile `verdist` (lib) due to 2 previous errors
+
+    Reproduced against Verus 0.2026.08.13 (commit 8fe3542, dirty checkout at ../verus). This
+    reproduces with a single `source()` impl uncommented (i.e. it isn't specific to having several
+    at once), and is independent of the pre-existing unrelated "field expression for an opaque
+    datatype" errors in network/impls/{tcp,udp,modelled}.rs that also currently break
+    `cargo verus verify -p verdist` (those abort compilation earlier, before this pass runs, so
+    that bug was masked until those are also fixed).
+
+    Searched https://github.com/verus-lang/verus/issues for a matching tracked issue (checked
+    #1310 "[Trait-conflict-checker] Trait bound is not satisfied (external impl of a trait)",
+    #1519, #1547, #1601, #1172, and discussion #1047 "Supporting dyn soundly") but none matches
+    this exact "Dyn<N, A> doesn't satisfy the impl's supertrait bounds" shape closely enough to
+    link with confidence. #1310 is the closest analog (same Trait-Conflict-Checker component,
+    same "synthetic placeholder type doesn't satisfy trait bound" pattern, just via a different
+    placeholder family `C<N, A>` instead of `Dyn<N, A>`, and a different trait). If filing a new
+    issue, this comment plus the error above should be enough for a minimal repro.
+
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TryListenError::Io(io) => Some(io),
@@ -88,8 +117,7 @@ impl From<crossbeam_channel::TryRecvError> for TryListenError {
 #[cfg(verus_only)]
 impl FromSpecImpl<crossbeam_channel::TryRecvError> for TryListenError {
     open spec fn obeys_from_spec() -> bool {
-        false  // TODO(crossbeam)
-
+        true
     }
 
     open spec fn from_spec(value: crossbeam_channel::TryRecvError) -> TryListenError {
@@ -104,7 +132,9 @@ impl FromSpecImpl<crossbeam_channel::TryRecvError> for TryListenError {
 // TryRecvError
 //
 impl Error for TryRecvError {
-    /* TODO(verus): verus bug
+    /* TODO(verus): verus bug -- same as TryListenError's `Error` impl above, see its comment
+    for the full repro/error and the upstream-issue search notes.
+
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TryRecvError::Io(io) => Some(io),
@@ -145,8 +175,7 @@ impl From<crossbeam_channel::TryRecvError> for TryRecvError {
 #[cfg(verus_only)]
 impl FromSpecImpl<crossbeam_channel::TryRecvError> for TryRecvError {
     open spec fn obeys_from_spec() -> bool {
-        false  // TODO(crossbeam)
-
+        true
     }
 
     open spec fn from_spec(value: crossbeam_channel::TryRecvError) -> TryRecvError {
@@ -161,7 +190,9 @@ impl FromSpecImpl<crossbeam_channel::TryRecvError> for TryRecvError {
 // SendError
 //
 impl Error for SendError {
-    /* TODO(verus): verus bug
+    /* TODO(verus): verus bug -- same as TryListenError's `Error` impl above, see its comment
+    for the full repro/error and the upstream-issue search notes.
+
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             SendError::Io(io) => Some(io),
@@ -209,7 +240,9 @@ impl FromSpecImpl<std::io::Error> for SendError {
 // InvokeError
 //
 impl Error for InvokeError {
-    /* TODO(verus): verus bug
+    /* TODO(verus): verus bug -- same as TryListenError's `Error` impl above, see its comment
+    for the full repro/error and the upstream-issue search notes.
+
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             InvokeError::Io(io) => Some(io),
@@ -271,7 +304,9 @@ impl FromSpecImpl<TryRecvError> for InvokeError {
 // ConnectError
 //
 impl Error for ConnectError {
-    /* TODO(verus): verus bug
+    /* TODO(verus): verus bug -- same as TryListenError's `Error` impl above, see its comment
+    for the full repro/error and the upstream-issue search notes.
+
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             ConnectError::Io(io) => Some(io),

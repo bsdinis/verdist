@@ -25,6 +25,8 @@ pub struct ExSendError<S>(crossbeam_channel::SendError<S>);
 pub assume_specification[ crossbeam_channel::TryRecvError::is_empty ](
     err: &crossbeam_channel::TryRecvError,
 ) -> (b: bool)
+    ensures
+        b == (*err is Empty),
     no_unwind
 ;
 

@@ -22,14 +22,12 @@ pub struct BroadcastPool<'a, Pool> {
     pub pool: &'a Pool,
 }
 
-// TODO: remove request generic
-impl<'a, Pool, Request> BroadcastPool<'a, Pool> where
+impl<'a, Pool> BroadcastPool<'a, Pool> where
     Pool: ConnectionPool,
     ChannelResp<Pool>: TaggedMessage,
     ChannelId<Pool>: std::fmt::Debug,
-    Pool::C: Channel<S = Request>,
     ChannelResp<Pool>: TaggedMessage + std::fmt::Debug,
-    Request: TaggedMessage + Clone + std::fmt::Debug,
+    <Pool::C as Channel>::S: TaggedMessage + Clone + std::fmt::Debug,
  {
     pub fn new(pool: &'a Pool) -> (r: BroadcastPool<'a, Pool>)
         ensures
@@ -44,7 +42,7 @@ impl<'a, Pool, Request> BroadcastPool<'a, Pool> where
 
     pub fn broadcast_filter<Pred, A, F>(
         self,
-        request: Request,
+        request: <Pool::C as Channel>::S,
         pred: Ghost<Pred>,
         accum: A,
         filter_fn: F,
@@ -105,8 +103,12 @@ impl<'a, Pool, Request> BroadcastPool<'a, Pool> where
         RequestContext::new(self.pool, request.tag(), pred, accum)
     }
 
-    pub fn broadcast<Pred, A>(self, request: Request, pred: Ghost<Pred>, accum: A) -> (r:
-        RequestContext<'a, Pool, Pred, A>) where
+    pub fn broadcast<Pred, A>(
+        self,
+        request: <Pool::C as Channel>::S,
+        pred: Ghost<Pred>,
+        accum: A,
+    ) -> (r: RequestContext<'a, Pool, Pred, A>) where
         Pred: InvariantPredicate<Pred, A>,
         A: ReplyAccumulator<PoolChannel<Pool>, Pred>,
 

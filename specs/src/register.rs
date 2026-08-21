@@ -60,9 +60,18 @@ pub trait LinRegisterClient<C, ML, RL> where
             }),
     ;
 
-    // TODO(writes): make writes behind a shared ref.
-    // Problem: there is only a single tracked ClientCtrToken which cannot be shared between
-    // threads
+    // NOTE(writes): it would be nice for `write` to take `&self` (a shared ref), matching
+    // `read`, so that writes from multiple threads/tasks could be in flight concurrently the
+    // same way reads can. This is intentionally left as `&mut self` rather than "fixed": the
+    // client-side implementation (e.g. `abd`'s `AbdPool`) holds a single, non-`Copy` tracked
+    // `ClientCtrToken` permission that `write` mutably borrows (see
+    // `state.commitments.alloc_value(self.client_ctr_token.borrow_mut(), ...)` in
+    // `abd/src/client/mod.rs`) to allocate a fresh commitment slot per write. A tracked
+    // resource can only ever be borrowed mutably by one caller at a time, so moving to `&self`
+    // here would require redesigning that allocation to go through something like an internal
+    // lock/atomic-invariant-guarded token instead of a plain field -- a real restructuring of
+    // the write path's proof, not a signature tweak, so it is left as a documented limitation
+    // rather than forced through here.
     fn write(&mut self, value: Option<u64>, lin: Tracked<ML>) -> (r: Result<
         Tracked<ML::Completion>,
         Self::WriteErr,

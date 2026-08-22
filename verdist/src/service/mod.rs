@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use vstd::prelude::*;
 use vstd::rwlock::RwLock;
@@ -136,6 +137,12 @@ pub trait Service {
 /// Upper bound on how many connections `Server::poll_shard` scans in a single call -- see
 /// `PollCursor`.
 const MAX_POLL_BATCH: usize = 64;
+
+/// How long an idle worker thread sleeps in `poll_shard` when its shard currently has zero
+/// connections (see §10 of Performance.md) -- a shard's `try_recv` timeout (§1) never fires in
+/// this case since there is nothing to call it on, so without this the worker would otherwise
+/// spin at full rate acquiring the (momentarily empty) read lock over and over.
+const EMPTY_SHARD_BACKOFF_MILLIS: u64 = 2;
 
 /// Round-robins which slice of a shard's connections `poll_shard` actually touches on a given
 /// call, instead of scanning every connection every call (see §3 of Performance.md). Opaque to
@@ -391,6 +398,11 @@ impl<S, L, C> Server<S, L, C> where
         assert(connected_pred.inv(*connected));
 
         let len = connected.len();
+        if len == 0 {
+            read_handle.release_read();
+            std::thread::sleep(Duration::from_millis(EMPTY_SHARD_BACKOFF_MILLIS));
+            return true;
+        }
         let batch = if len < MAX_POLL_BATCH {
             len
         } else {

@@ -144,6 +144,12 @@ const MAX_POLL_BATCH: usize = 64;
 /// spin at full rate acquiring the (momentarily empty) read lock over and over.
 const EMPTY_SHARD_BACKOFF_MILLIS: u64 = 2;
 
+/// How long the accept thread sleeps in `poll_accept` when a call accepted nothing at all (see
+/// §9 of Performance.md) -- `std::net::TcpListener` has no accept-timeout equivalent to §1's
+/// per-socket read timeout, so without this the accept thread's `while self.poll_accept() {}`
+/// would spin at full rate regardless of whether any client is trying to connect.
+const ACCEPT_BACKOFF_MILLIS: u64 = 2;
+
 /// Round-robins which slice of a shard's connections `poll_shard` actually touches on a given
 /// call, instead of scanning every connection every call (see §3 of Performance.md). Opaque to
 /// Verus -- it's a pure scheduling hint, not part of any correctness invariant, and is only ever
@@ -337,6 +343,13 @@ impl<S, L, C> Server<S, L, C> where
                     self.accept(channel)
                 },
                 Err(TryListenError::Empty) => {
+                    if i == 10 {
+                        // Nothing was accepted this call -- back off instead of immediately
+                        // re-looping (see §9 of Performance.md; `std::net::TcpListener` has no
+                        // accept-timeout API, so this is the cheap poll-and-sleep mitigation
+                        // rather than a true blocking accept).
+                        std::thread::sleep(Duration::from_millis(ACCEPT_BACKOFF_MILLIS));
+                    }
                     break;
                 },
                 Err(TryListenError::Disconnected | TryListenError::NoFreePorts) => {
@@ -464,7 +477,6 @@ impl<S, L, C> Server<S, L, C> where
         if drop.is_empty() {
             return true;
         }
-
         let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
         let filter_fn = |c: &C| !drop.contains(&c.id());

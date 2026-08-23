@@ -82,12 +82,7 @@ pub fn eprintln(s: &str) {
     eprintln!("{s}");
 }
 
-#[allow(dead_code)]
-#[verifier::external_type_specification]
-#[verifier::external_body]
-pub struct ExFmtArguments<'a>(std::fmt::Arguments<'a>);
-
-pub assume_specification[ std::fmt::format ](_0: std::fmt::Arguments<'_>) -> std::string::String
-;
-
+// ExFmtArguments/the `std::fmt::format` spec used to be declared here, but
+// vstd::std_specs::fmt now provides both natively (as ExArguments and the
+// `alloc::fmt::format` spec), so declaring them again here is a duplicate specification error.
 } // verus!

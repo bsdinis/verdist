@@ -212,6 +212,20 @@ impl PollCursor {
     }
 }
 
+/// Trivial invariant for the `mio::Poll` handles backing `Server::run_epoll` (see §9/§10 of
+/// Performance.md). A `Poll` handle is pure scheduling state, not part of any correctness
+/// invariant -- there is nothing to state about it beyond "some `mio::Poll` value lives here" --
+/// so this exists only to get verified interior mutability for `mio::Poll::poll`'s `&mut self`
+/// requirement through `Server`'s `&self` methods, the same role `RwLock` already plays for
+/// `connected`.
+pub struct TrivialPollInv;
+
+impl vstd::rwlock::RwLockPredicate<mio::Poll> for TrivialPollInv {
+    open spec fn inv(self, v: mio::Poll) -> bool {
+        true
+    }
+}
+
 pub struct ConnectionsInv<K> {
     pub channel_inv: K,
     pub server_id: u64,
@@ -244,6 +258,24 @@ pub struct Server<S, L, C> where
     connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>>,
     /// One round-robin cursor per shard (see `PollCursor`), same length as `connected`.
     cursors: Vec<PollCursor>,
+    /// Poll handle for the listener socket -- used by `run_epoll`'s accept thread to block on
+    /// real fd readiness instead of spinning/backing off (see §9 of Performance.md). Unused by
+    /// the plain `run` driver.
+    // TODO(epoll): dead_code until Server::run_epoll (a later commit) reads these.
+    #[allow(dead_code)]
+    accept_poll: RwLock<mio::Poll, TrivialPollInv>,
+    /// Registry clone for `accept_poll`, kept separately since `Registry`'s methods only need
+    /// `&self` -- registering the listener fd never contends with the accept thread's blocking
+    /// `poll()` call the way sharing `accept_poll`'s lock would.
+    #[allow(dead_code)]
+    accept_registry: mio::Registry,
+    /// One Poll handle per shard (same length as `connected`), used by `run_epoll`'s worker
+    /// threads.
+    #[allow(dead_code)]
+    shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>>,
+    /// One Registry clone per shard, same length as `connected`.
+    #[allow(dead_code)]
+    shard_registries: Vec<mio::Registry>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -268,11 +300,15 @@ impl<S, L, C> Server<S, L, C> where
         let ghost connected_inv = ConnectionsInv { channel_inv: channel_inv@, server_id: id };
         let mut connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>> = Vec::new();
         let mut cursors: Vec<PollCursor> = Vec::new();
+        let mut shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>> = Vec::new();
+        let mut shard_registries: Vec<mio::Registry> = Vec::new();
         let mut i = 0;
         while i < num_shards
             invariant
                 connected.len() == i,
                 cursors.len() == i,
+                shard_polls.len() == i,
+                shard_registries.len() == i,
                 forall|j: int|
                     0 <= j < connected@.len() ==> #[trigger] connected@[j].pred() == connected_inv,
             decreases num_shards - i,
@@ -281,15 +317,37 @@ impl<S, L, C> Server<S, L, C> where
             assert(connected_inv.inv(empty));
             connected.push(RwLock::new(empty, Ghost(connected_inv)));
             cursors.push(PollCursor::new());
+            let poll = mio::Poll::new().expect("mio::Poll::new should not fail");
+            let registry = poll.registry().try_clone().expect(
+                "mio::Registry::try_clone should not fail",
+            );
+            shard_polls.push(RwLock::new(poll, Ghost(TrivialPollInv)));
+            shard_registries.push(registry);
             i += 1;
         }
-        Server { service, listener, connected, cursors }
+        let accept_poll_raw = mio::Poll::new().expect("mio::Poll::new should not fail");
+        let accept_registry = accept_poll_raw.registry().try_clone().expect(
+            "mio::Registry::try_clone should not fail",
+        );
+        let accept_poll = RwLock::new(accept_poll_raw, Ghost(TrivialPollInv));
+        Server {
+            service,
+            listener,
+            connected,
+            cursors,
+            accept_poll,
+            accept_registry,
+            shard_polls,
+            shard_registries,
+        }
     }
 
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.connected.len() > 0
         &&& self.cursors.len() == self.connected.len()
+        &&& self.shard_polls.len() == self.connected.len()
+        &&& self.shard_registries.len() == self.connected.len()
         &&& self.listener.spec_id() == self.service.spec_id()
         &&& forall|i: int|
             0 <= i < self.connected.len() ==> {

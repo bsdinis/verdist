@@ -51,6 +51,9 @@ pub struct ExRegistry(mio::Registry);
 pub struct ExEvents(mio::Events);
 
 pub assume_specification[ mio::Poll::new ]() -> (r: std::io::Result<mio::Poll>)
+    ensures
+        r is Ok,  // creating an epoll/kqueue instance failing (fd exhaustion) is not modeled
+
     no_unwind
 ;
 
@@ -69,6 +72,9 @@ pub assume_specification[ mio::Poll::poll ](
 pub assume_specification[ mio::Registry::try_clone ](r: &mio::Registry) -> (r2: std::io::Result<
     mio::Registry,
 >)
+    ensures
+        r2 is Ok,  // duplicating an fd (dup(2)) failing is not modeled
+
     no_unwind
 ;
 

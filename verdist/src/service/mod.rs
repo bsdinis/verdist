@@ -731,3 +731,30 @@ where
         });
     }
 }
+
+// Same unverifiable-for-structural-reasons category as `run` above (scoped threads), not a new
+// exception -- `run_epoll` differs from `run` only in which per-iteration method each thread
+// calls (`poll_accept_epoll`/`poll_shard_epoll`, see the verified impl block above, instead of
+// `poll_accept`/`poll_shard`), never in the threading shell itself.
+impl<S, L, C> Server<S, L, C>
+where
+    S: Service<Request = C::R, Response = C::S, ChanInv = C::K> + Sync,
+    L: RawFdListener<C> + Sync,
+    C: RawFdChannel<Id = (u64, u64)> + Send + Sync,
+{
+    /// Same thread topology as `run` (one accept thread, one worker thread per shard), but each
+    /// thread blocks on real fd readiness (via `mio`/epoll, see `poll_accept_epoll`/
+    /// `poll_shard_epoll`) instead of `run`'s busy-backoff, structurally resolving §9/§10 of
+    /// Performance.md instead of just mitigating them. Only usable when both `L` and `C` have a
+    /// real OS fd (TCP/UDP) -- the in-process `modelled` network keeps using `run`.
+    pub fn run_epoll(&self) {
+        std::thread::scope(|s| {
+            s.spawn(|| while self.poll_accept_epoll() {});
+            for shard in 0..self.num_shards() {
+                s.spawn(move || loop {
+                    self.poll_shard_epoll(shard);
+                });
+            }
+        });
+    }
+}

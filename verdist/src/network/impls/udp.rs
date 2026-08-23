@@ -3,12 +3,15 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use crate::network::channel::Channel;
 use crate::network::channel::ChannelInvariant;
 use crate::network::channel::Connector;
 use crate::network::channel::Listener;
+use crate::network::channel::RawFdChannel;
+use crate::network::channel::RawFdListener;
 use crate::network::error::ConnectError;
 use crate::network::error::TryListenError;
 
@@ -179,6 +182,12 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
     pub fn peer_addr(&self) -> SocketAddr {
         self.inner.peer_addr().expect("peer addr should be set")
     }
+
+    /// The underlying socket's raw fd, for `Server::run_epoll` to register with an `mio::Poll`
+    /// instance (see `crate::network::channel::RawFdChannel`).
+    pub fn raw_fd(&self) -> i32 {
+        self.inner.as_raw_fd()
+    }
 }
 
 #[verifier::external_body]
@@ -316,6 +325,21 @@ impl<K, R, S> Channel for ClientChannel<K, R, S> where
     }
 }
 
+// `ClientChannel` is itself `#[verifier::external_body]` (see its definition above), which makes
+// every one of its fields opaque to Verus even from its own impl blocks -- exactly like `id()`
+// above, this is a mechanical consequence of that pre-existing annotation on the struct, not new
+// hidden logic: `raw_fd` is a trivial one-line field delegation, same shape/risk as `id()`.
+impl<K, R, S> RawFdChannel for ClientChannel<K, R, S> where
+    K: ChannelInvariant<K, (u64, u64), R, S>,
+    for <'de>R: serde::Deserialize<'de>,
+    S: Clone + serde::Serialize,
+ {
+    #[verifier::external_body]
+    fn raw_fd(&self) -> i32 {
+        self.socket.raw_fd()
+    }
+}
+
 impl<K, R, S> Channel for ServerChannel<K, R, S> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
     for <'de>R: serde::Deserialize<'de>,
@@ -421,6 +445,19 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
         vlib::veprintln!("[server|{:>3}]: accepted connection from client {client_id} (channel_id: {:?})", self.id, chan.id());
 
         Ok(chan)
+    }
+}
+
+// Same mechanical note as `ClientChannel`'s `RawFdChannel` impl above: `UdpListener` is itself
+// `#[verifier::external_body]`, so this trivial field delegation needs the annotation too.
+impl<K, R, S> RawFdListener<ClientChannel<K, R, S>> for UdpListener where
+    K: ChannelInvariant<K, (u64, u64), R, S>,
+    for <'de>R: serde::Deserialize<'de>,
+    S: Clone + serde::Serialize,
+ {
+    #[verifier::external_body]
+    fn raw_fd(&self) -> i32 {
+        self.listening_socket.raw_fd()
     }
 }
 

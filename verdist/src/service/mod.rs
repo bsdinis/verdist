@@ -139,6 +139,16 @@ pub trait Service {
 /// `PollCursor`.
 const MAX_POLL_BATCH: usize = 64;
 
+/// Upper bound on how many connections `Server::sync_shard_registrations` (re-)registers with
+/// epoll in a single call -- same bounded-batch mitigation as `MAX_POLL_BATCH`/`PollCursor`
+/// above (§3 of Performance.md), applied to the registration-sync scan the mio/epoll rewrite
+/// introduced: without this, a very large shard would pay an O(shard-size) registration pass on
+/// every accept. A connection not covered by this call's batch still gets picked up within a
+/// bounded number of subsequent accept-thread iterations (round-robin, same as `PollCursor`), or
+/// -- worst case -- once `poll_shard_epoll`'s own fallback timeout elapses and it falls back to
+/// `poll_shard`'s direct scan regardless of epoll registration state.
+const MAX_SYNC_BATCH: usize = 64;
+
 /// How long an idle worker thread sleeps in `poll_shard` when its shard currently has zero
 /// connections (see §10 of Performance.md) -- a shard's `try_recv` timeout (§1) never fires in
 /// this case since there is nothing to call it on, so without this the worker would otherwise
@@ -270,21 +280,21 @@ pub struct Server<S, L, C> where
     /// Poll handle for the listener socket -- used by `run_epoll`'s accept thread to block on
     /// real fd readiness instead of spinning/backing off (see §9 of Performance.md). Unused by
     /// the plain `run` driver.
-    // TODO(epoll): dead_code until Server::run_epoll (a later commit) reads these.
-    #[allow(dead_code)]
     accept_poll: RwLock<mio::Poll, TrivialPollInv>,
     /// Registry clone for `accept_poll`, kept separately since `Registry`'s methods only need
     /// `&self` -- registering the listener fd never contends with the accept thread's blocking
     /// `poll()` call the way sharing `accept_poll`'s lock would.
-    #[allow(dead_code)]
     accept_registry: mio::Registry,
     /// One Poll handle per shard (same length as `connected`), used by `run_epoll`'s worker
     /// threads.
-    #[allow(dead_code)]
     shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>>,
     /// One Registry clone per shard, same length as `connected`.
-    #[allow(dead_code)]
     shard_registries: Vec<mio::Registry>,
+    /// One round-robin cursor per shard (same length as `connected`), bounding
+    /// `sync_shard_registrations`'s per-call scan the same way `cursors` bounds `poll_shard`'s
+    /// (see §3 of Performance.md) -- separate from `cursors` since the two scans track
+    /// independent progress through `connected[shard]` and must not interfere with each other.
+    sync_cursors: Vec<PollCursor>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -311,6 +321,7 @@ impl<S, L, C> Server<S, L, C> where
         let mut cursors: Vec<PollCursor> = Vec::new();
         let mut shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>> = Vec::new();
         let mut shard_registries: Vec<mio::Registry> = Vec::new();
+        let mut sync_cursors: Vec<PollCursor> = Vec::new();
         let mut i = 0;
         while i < num_shards
             invariant
@@ -318,6 +329,7 @@ impl<S, L, C> Server<S, L, C> where
                 cursors.len() == i,
                 shard_polls.len() == i,
                 shard_registries.len() == i,
+                sync_cursors.len() == i,
                 forall|j: int|
                     0 <= j < connected@.len() ==> #[trigger] connected@[j].pred() == connected_inv,
             decreases num_shards - i,
@@ -332,6 +344,7 @@ impl<S, L, C> Server<S, L, C> where
             );
             shard_polls.push(RwLock::new(poll, Ghost(TrivialPollInv)));
             shard_registries.push(registry);
+            sync_cursors.push(PollCursor::new());
             i += 1;
         }
         let accept_poll_raw = mio::Poll::new().expect("mio::Poll::new should not fail");
@@ -348,6 +361,7 @@ impl<S, L, C> Server<S, L, C> where
             accept_registry,
             shard_polls,
             shard_registries,
+            sync_cursors,
         }
     }
 
@@ -357,6 +371,7 @@ impl<S, L, C> Server<S, L, C> where
         &&& self.cursors.len() == self.connected.len()
         &&& self.shard_polls.len() == self.connected.len()
         &&& self.shard_registries.len() == self.connected.len()
+        &&& self.sync_cursors.len() == self.connected.len()
         &&& self.listener.spec_id() == self.service.spec_id()
         &&& forall|i: int|
             0 <= i < self.connected.len() ==> {
@@ -599,12 +614,14 @@ impl<S, L, C> Server<S, L, C> where
     L: RawFdListener<C>,
     C: RawFdChannel<Id = (u64, u64)>,
  {
-    /// Registers every connection currently in `shard`'s list with that shard's `mio::Poll`
-    /// registry, tolerating an already-registered fd as a no-op. Self-correcting: recomputes
-    /// from `connected[shard]`'s current ground truth every call rather than tracking exact
-    /// accept/drop transitions -- and there is nothing to do on the drop side at all, since
-    /// closing a socket (which `poll_shard`'s `retain` already does for dropped connections)
-    /// automatically removes it from any `Poll`'s interest list, standard kernel behavior.
+    /// Registers up to `MAX_SYNC_BATCH` connections from `shard`'s list (round-robin across
+    /// calls via `sync_cursors[shard]`, same bounded-batch mitigation as `poll_shard`'s scan --
+    /// see `MAX_SYNC_BATCH`) with that shard's `mio::Poll` registry, tolerating an
+    /// already-registered fd as a no-op. Self-correcting: recomputes from `connected[shard]`'s
+    /// current ground truth every call rather than tracking exact accept/drop transitions -- and
+    /// there is nothing to do on the drop side at all, since closing a socket (which
+    /// `poll_shard`'s `retain` already does for dropped connections) automatically removes it
+    /// from any `Poll`'s interest list, standard kernel behavior.
     fn sync_shard_registrations(&self, shard: usize)
         requires
             (shard as int) < self.spec_num_shards(),
@@ -616,15 +633,32 @@ impl<S, L, C> Server<S, L, C> where
         let read_handle = self.connected[shard].acquire_read();
         let connected = read_handle.borrow();
         let len = connected.len();
+        if len == 0 {
+            read_handle.release_read();
+            return;
+        }
+        let batch = if len < MAX_SYNC_BATCH {
+            len
+        } else {
+            MAX_SYNC_BATCH
+        };
+        let start = self.sync_cursors[shard].advance(len, batch);
+
         let mut i = 0usize;
-        while i < len
+        while i < batch
             invariant
-                i <= len,
+                i <= batch,
+                batch <= len,
                 len == connected@.len(),
                 shard < self.shard_registries.len(),
-            decreases len - i,
+            decreases batch - i,
         {
-            let fd = connected[i].raw_fd();
+            assume(start + i < usize::MAX);  // XXX: overflow, mirrors poll_shard's `idx`
+            let idx = (start + i) % len;
+            assert(0 <= idx < connected@.len()) by {
+                assert(len > 0);
+            };
+            let fd = connected[idx].raw_fd();
             match vlib::mio::mio_register_readable(&self.shard_registries[shard], fd, fd as usize) {
                 Ok(()) => {},
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},

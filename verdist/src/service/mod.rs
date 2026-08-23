@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use vstd::atomic_ghost::atomic_with_ghost;
 use vstd::prelude::*;
 use vstd::rwlock::RwLock;
 #[cfg(verus_only)]
@@ -150,15 +151,26 @@ const EMPTY_SHARD_BACKOFF_MILLIS: u64 = 2;
 /// would spin at full rate regardless of whether any client is trying to connect.
 const ACCEPT_BACKOFF_MILLIS: u64 = 2;
 
+/// Trivial invariant for `PollCursor`'s backing atomic: the value is a pure scheduling hint, not
+/// part of any correctness invariant, so there is no ghost state (`G = ()`) and nothing to relate
+/// it to (`atomic_inv` is unconditionally `true`).
+struct PollCursorPred;
+
+impl vstd::atomic_ghost::AtomicInvariantPredicate<(), usize, ()> for PollCursorPred {
+    closed spec fn atomic_inv(k: (), v: usize, g: ()) -> bool {
+        true
+    }
+}
+
 /// Round-robins which slice of a shard's connections `poll_shard` actually touches on a given
-/// call, instead of scanning every connection every call (see §3 of Performance.md). Opaque to
-/// Verus -- it's a pure scheduling hint, not part of any correctness invariant, and is only ever
-/// touched by the single dedicated worker thread for its shard (see `Server::run`), so a plain
-/// relaxed atomic (no torn reads on any real platform, no concurrent writers) is sound without
-/// needing `vstd`'s ghost-permission-tracked atomics.
-#[verifier::external_body]
+/// call, instead of scanning every connection every call (see §3 of Performance.md). Backed by
+/// `vstd::atomic_ghost::AtomicUsize`, a fully verified sequentially-consistent atomic, so no
+/// `external_body`/`assume` is needed even though it's shared (via `&self`) across the accept
+/// thread and every per-shard worker thread (see `Server::run`) -- in practice only the single
+/// worker thread owning a given shard ever calls `advance` on that shard's cursor, but nothing
+/// here relies on that for soundness.
 pub struct PollCursor {
-    next: std::sync::atomic::AtomicUsize,
+    next: vstd::atomic_ghost::AtomicUsize<(), (), PollCursorPred>,
 }
 
 impl Default for PollCursor {
@@ -168,21 +180,34 @@ impl Default for PollCursor {
 }
 
 impl PollCursor {
-    #[verifier::external_body]
-    pub fn new() -> Self {
-        PollCursor { next: std::sync::atomic::AtomicUsize::new(0) }
+    #[verifier::type_invariant]
+    closed spec fn inv(self) -> bool {
+        self.next.well_formed()
+    }
+
+    pub fn new() -> (r: Self) {
+        let next = vstd::atomic_ghost::AtomicUsize::new(Ghost(()), 0, Tracked(()));
+        let result = PollCursor { next };
+        assert(result.inv());
+        result
     }
 
     /// Returns the start index of the next batch of size `min(batch, len)` (mod `len`), and
     /// advances internal state so a subsequent call continues where this one left off.
-    #[verifier::external_body]
     pub fn advance(&self, len: usize, batch: usize) -> usize {
-        use std::sync::atomic::Ordering;
+        proof {
+            use_type_invariant(self);
+        }
         if len == 0 {
             return 0;
         }
-        let start = self.next.load(Ordering::Relaxed) % len;
-        self.next.store((start + batch) % len, Ordering::Relaxed);
+        let cur = atomic_with_ghost!(&self.next => load(); ghost g => {});
+        let start = cur % len;
+        // wrapping_add: `start`/`batch` are just scheduling state, not part of any correctness
+        // invariant, so on the (practically unreachable) usize wraparound the resulting `next` is
+        // still a harmless in-bounds index -- no need to prove `start + batch` doesn't overflow.
+        let next = (start.wrapping_add(batch)) % len;
+        atomic_with_ghost!(&self.next => store(next); ghost g => {});
         start
     }
 }

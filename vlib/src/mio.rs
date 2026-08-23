@@ -15,17 +15,22 @@
 //! for no benefit. Instead, "register/deregister one fd for read-readiness" is collapsed into two
 //! minimal named leaf functions below, each given a single `assume_specification` -- a tighter
 //! trust boundary than assembling `Token`/`SourceFd`/`Interest` from verified code would be.
-
 use vstd::prelude::*;
 
 /// Registers `fd` on `registry` for read-readiness notifications, keyed by `fd` itself (raw fds
 /// are unique among a process's open files while open, so no separate token allocator is
 /// needed). Real `mio::Token`/`SourceFd`/`Interest` construction lives entirely in this one
 /// plain function's body rather than being reconstructed by verified callers.
-pub fn mio_register_readable(registry: &mio::Registry, fd: i32, token: usize) -> std::io::Result<
-    (),
-> {
-    registry.register(&mut mio::unix::SourceFd(&fd), mio::Token(token), mio::Interest::READABLE)
+pub fn mio_register_readable(
+    registry: &mio::Registry,
+    fd: i32,
+    token: usize,
+) -> std::io::Result<()> {
+    registry.register(
+        &mut mio::unix::SourceFd(&fd),
+        mio::Token(token),
+        mio::Interest::READABLE,
+    )
 }
 
 /// Drops the readiness registration for `fd`.
@@ -90,9 +95,8 @@ pub assume_specification[ mio_register_readable ](
     no_unwind
 ;
 
-pub assume_specification[ mio_deregister ](registry: &mio::Registry, fd: i32) -> (res: std::io::Result<
-    (),
->)
+pub assume_specification[ mio_deregister ](registry: &mio::Registry, fd: i32) -> (res:
+    std::io::Result<()>)
     no_unwind
 ;
 

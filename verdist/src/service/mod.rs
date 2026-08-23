@@ -9,7 +9,7 @@ use vstd::rwlock::RwLockPredicate;
 #[cfg(verus_only)]
 use vstd::std_specs::iter::IteratorSpec;
 
-use crate::network::channel::{Channel, ChannelInvariant, Listener};
+use crate::network::channel::{Channel, ChannelInvariant, Listener, RawFdChannel, RawFdListener};
 
 verus! {
 
@@ -150,6 +150,15 @@ const EMPTY_SHARD_BACKOFF_MILLIS: u64 = 2;
 /// per-socket read timeout, so without this the accept thread's `while self.poll_accept() {}`
 /// would spin at full rate regardless of whether any client is trying to connect.
 const ACCEPT_BACKOFF_MILLIS: u64 = 2;
+
+/// How long `poll_shard_epoll`/`poll_accept_epoll` block in `mio::Poll::poll` before giving up
+/// and re-scanning anyway -- a safety net against a missed registration/race, not the primary
+/// wake mechanism: real work wakes instantly via epoll readiness (registering a new fd with a
+/// `Poll` instance another thread is already blocked in `poll()` on wakes that thread promptly
+/// if the fd is/becomes ready, standard kernel behavior). Deliberately much larger than
+/// §1/§9/§10's busy-backoff constants above, since a correctly-registered fd set means this
+/// thread is genuinely idle for the whole interval, not repeatedly re-checking.
+const EPOLL_FALLBACK_MILLIS: u64 = 100;
 
 /// Trivial invariant for `PollCursor`'s backing atomic: the value is a pure scheduling hint, not
 /// part of any correctness invariant, so there is no ghost state (`G = ()`) and nothing to relate
@@ -578,6 +587,121 @@ impl<S, L, C> Server<S, L, C> where
         handle.release_write(connected);
 
         true
+    }
+}
+
+/// `run_epoll`'s verified per-iteration methods -- see §9/§10 of Performance.md. Separate from
+/// the fully-generic impl block above (bounded by `Channel`/`Listener`) because these need real
+/// fds: `C: RawFdChannel`, `L: RawFdListener<C>`. Not implemented by the in-process `modelled`
+/// network, which has no real fd and keeps using `run`/`poll_shard`/`poll_accept` unmodified.
+impl<S, L, C> Server<S, L, C> where
+    S: Service<Request = C::R, Response = C::S, ChanInv = C::K>,
+    L: RawFdListener<C>,
+    C: RawFdChannel<Id = (u64, u64)>,
+ {
+    /// Registers every connection currently in `shard`'s list with that shard's `mio::Poll`
+    /// registry, tolerating an already-registered fd as a no-op. Self-correcting: recomputes
+    /// from `connected[shard]`'s current ground truth every call rather than tracking exact
+    /// accept/drop transitions -- and there is nothing to do on the drop side at all, since
+    /// closing a socket (which `poll_shard`'s `retain` already does for dropped connections)
+    /// automatically removes it from any `Poll`'s interest list, standard kernel behavior.
+    fn sync_shard_registrations(&self, shard: usize)
+        requires
+            (shard as int) < self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        assert(shard < self.shard_registries.len());
+        let read_handle = self.connected[shard].acquire_read();
+        let connected = read_handle.borrow();
+        let len = connected.len();
+        let mut i = 0usize;
+        while i < len
+            invariant
+                i <= len,
+                len == connected@.len(),
+                shard < self.shard_registries.len(),
+            decreases len - i,
+        {
+            let fd = connected[i].raw_fd();
+            match vlib::mio::mio_register_readable(&self.shard_registries[shard], fd, fd as usize) {
+                Ok(()) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(e) => {
+                    vlib::veprintln!(
+                        "[server|{:>3}]: warning: failed to register fd {fd} with epoll: {e:?}",
+                        self.service.id(),
+                    );
+                },
+            }
+            i += 1;
+        }
+        read_handle.release_read();
+    }
+
+    /// Blocks (via real epoll/kqueue readiness, with `EPOLL_FALLBACK_MILLIS` as a safety-net
+    /// timeout) until `shard` likely has work, then runs the existing, unmodified `poll_shard`.
+    /// Meant to be driven by `run_epoll`'s per-shard worker thread in place of `poll_shard` alone.
+    pub fn poll_shard_epoll(&self, shard: usize) -> bool
+        requires
+            (shard as int) < self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let (mut poll, poll_handle) = self.shard_polls[shard].acquire_write();
+        let mut events = mio::Events::with_capacity(1);
+        let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        poll_handle.release_write(poll);
+        self.poll_shard(shard)
+    }
+
+    /// Blocks (via real epoll/kqueue readiness on the listener fd, with the same fallback
+    /// timeout) until a connection is likely pending, then runs the existing, unmodified
+    /// `poll_accept`, then syncs every shard's fd registrations so any newly-accepted
+    /// connections are registered promptly (see `sync_shard_registrations`) -- registering the
+    /// listener fd itself is idempotent (tolerates already-registered) so no separate one-time
+    /// setup is needed. Meant to be driven by `run_epoll`'s accept thread in place of
+    /// `poll_accept` alone.
+    pub fn poll_accept_epoll(&self) -> bool
+        requires
+            self.spec_num_shards() > 0,
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let listener_fd = self.listener.raw_fd();
+        match vlib::mio::mio_register_readable(
+            &self.accept_registry,
+            listener_fd,
+            listener_fd as usize,
+        ) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => {
+                vlib::veprintln!(
+                    "[server|{:>3}]: warning: failed to register listener fd {listener_fd} with epoll: {e:?}",
+                    self.service.id(),
+                );
+            },
+        }
+        let (mut poll, poll_handle) = self.accept_poll.acquire_write();
+        let mut events = mio::Events::with_capacity(1);
+        let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        poll_handle.release_write(poll);
+        let result = self.poll_accept();
+        let num_shards = self.num_shards();
+        let mut shard = 0usize;
+        while shard < num_shards
+            invariant
+                num_shards == self.spec_num_shards(),
+            decreases num_shards - shard,
+        {
+            self.sync_shard_registrations(shard);
+            shard += 1;
+        }
+        result
     }
 }
 

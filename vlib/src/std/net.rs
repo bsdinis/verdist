@@ -156,4 +156,22 @@ pub assume_specification[ std::net::TcpStream::set_nodelay ](
     no_unwind
 ;
 
+pub assume_specification[ <std::net::TcpStream as std::os::fd::AsRawFd>::as_raw_fd ](
+    s: &std::net::TcpStream,
+) -> (fd: std::os::fd::RawFd)
+    no_unwind
+;
+
+pub assume_specification[ <std::net::TcpListener as std::os::fd::AsRawFd>::as_raw_fd ](
+    l: &std::net::TcpListener,
+) -> (fd: std::os::fd::RawFd)
+    no_unwind
+;
+
+pub assume_specification[ <std::net::UdpSocket as std::os::fd::AsRawFd>::as_raw_fd ](
+    s: &std::net::UdpSocket,
+) -> (fd: std::os::fd::RawFd)
+    no_unwind
+;
+
 } // verus!

@@ -100,6 +100,24 @@ pub trait Listener<C> where C: Channel<Id = (u64, u64)> {
     ;
 }
 
+/// A `Channel` backed by a real OS file descriptor, letting `Server::run_epoll` register it with
+/// an `mio::Poll` instance to block on real readiness instead of spinning/backing off (see §9/§10
+/// of Performance.md). Kept separate from `Channel` itself (rather than a required method on it)
+/// so channels with no real fd -- the in-process `modelled` network -- are unaffected; only the
+/// TCP/UDP implementations implement this.
+///
+/// `raw_fd` carries no correctness obligation of its own: it is a pure scheduling hint (which fd
+/// to watch), never something any `recv_inv`/`send_inv` proof depends on, so it needs no
+/// `requires`/`ensures` beyond returning *some* `i32`.
+pub trait RawFdChannel: Channel {
+    fn raw_fd(&self) -> i32;
+}
+
+/// The `Listener`-side analogue of `RawFdChannel`, for the listening socket itself.
+pub trait RawFdListener<C>: Listener<C> where C: Channel<Id = (u64, u64)> {
+    fn raw_fd(&self) -> i32;
+}
+
 pub trait Connector<C> where C: Channel<Id = (u64, u64)> {
     spec fn spec_id(self) -> u64;
 

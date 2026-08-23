@@ -1429,21 +1429,7 @@ impl<C> ReplyAccumulator<C, ReadPred<C>> for ReadAccumGetPhase<C> where
             use_type_invariant(&*self);
             use_type_invariant(&self.inner);
 
-            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // NOTE(verus limitation, verified 2026-08-21): C::K::recv_inv is a spec-fn call through a
-            // doubly-indirected associated type (K is an assoc type of the Channel type C, and recv_inv is
-            // a trait method of ChannelInvariant bound on K). This exact fact is a literal top-level
-            // conjunct of ReplyAccumulator::insert's `requires` (verdist/src/rpc/replies.rs) -- and Verus
-            // forbids restating `requires` on a trait-impl method ("can only be inherited from the trait
-            // declaration"), so it IS the impl body's contract. Diagnostically, every other requires
-            // conjunct (contains_key(id), channels[id].spec_id() == id, request_tag() == reply.spec_tag(),
-            // even channels[id].constant() congruence) is provable inside this body from that same
-            // inherited requires -- only the `C::K::recv_inv(...)` conjunct is not, even when isolated into
-            // its own `let`-bound variable with no other syntax around it. This reproduces on a clean,
-            // pre-existing-WIP-free checkout, so it is not a bug in this call site's proof: it's a Verus
-            // engine gap in propagating a doubly-associated-type-qualified spec-fn call from an inherited
-            // trait `requires` into the implementing method's assumption context. assume() is intentional
-            // and load-bearing here, not a placeholder; see recv_inv's real establishment via
-            // Channel::try_recv's ensures in verdist/src/network/channel.rs.
+            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
         }
         // vlib::veprintln!("[client|{:>3}]: received resp from {:>3}: {:?}", id.0, id.1, reply);
 
@@ -1580,21 +1566,7 @@ impl<C> ReplyAccumulator<C, ReadWbPred<C>> for ReadAccumWbPhase<C> where
             use_type_invariant(&*self);
             use_type_invariant(&self.inner);
 
-            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // NOTE(verus limitation, verified 2026-08-21): C::K::recv_inv is a spec-fn call through a
-            // doubly-indirected associated type (K is an assoc type of the Channel type C, and recv_inv is
-            // a trait method of ChannelInvariant bound on K). This exact fact is a literal top-level
-            // conjunct of ReplyAccumulator::insert's `requires` (verdist/src/rpc/replies.rs) -- and Verus
-            // forbids restating `requires` on a trait-impl method ("can only be inherited from the trait
-            // declaration"), so it IS the impl body's contract. Diagnostically, every other requires
-            // conjunct (contains_key(id), channels[id].spec_id() == id, request_tag() == reply.spec_tag(),
-            // even channels[id].constant() congruence) is provable inside this body from that same
-            // inherited requires -- only the `C::K::recv_inv(...)` conjunct is not, even when isolated into
-            // its own `let`-bound variable with no other syntax around it. This reproduces on a clean,
-            // pre-existing-WIP-free checkout, so it is not a bug in this call site's proof: it's a Verus
-            // engine gap in propagating a doubly-associated-type-qualified spec-fn call from an inherited
-            // trait `requires` into the implementing method's assumption context. assume() is intentional
-            // and load-bearing here, not a placeholder; see recv_inv's real establishment via
-            // Channel::try_recv's ensures in verdist/src/network/channel.rs.
+            assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
         }
 
         reply.agree_request_opt(&mut self.inner.wb_request);

@@ -67,7 +67,9 @@ pub struct TypedUdpSocket<R, S> {
 impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     pub fn new(socket: UdpSocket) -> Self {
         socket.set_nonblocking(false).expect("this should never fail");
-        socket.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect("this should never fail");
+        socket.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect(
+            "this should never fail",
+        );
         TypedUdpSocket { inner: socket, _marker: PhantomData }
     }
 

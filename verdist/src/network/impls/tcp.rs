@@ -78,11 +78,10 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
     /// If `bail_if_empty` is set, returns `Ok(false)` (without having consumed anything) the
     /// first time a timeout occurs with zero bytes of *this* field read so far
     #[verifier::external_body]
-    fn read_exact_or_none(
-        stream: &mut &TcpStream,
-        buf: &mut [u8],
-        bail_if_empty: bool,
-    ) -> Result<bool, std::io::Error> {
+    fn read_exact_or_none(stream: &mut &TcpStream, buf: &mut [u8], bail_if_empty: bool) -> Result<
+        bool,
+        std::io::Error,
+    > {
         let mut filled = 0usize;
         while filled < buf.len() {
             match stream.read(&mut buf[filled..]) {

@@ -122,6 +122,8 @@ pub mod server {
     use std::sync::Arc;
     use verdist::network::channel::Channel;
     use verdist::network::channel::Listener;
+    use verdist::network::channel::RawFdChannel;
+    use verdist::network::channel::RawFdListener;
 
     // Why is this unverified:
     // - minor: no support for tracing
@@ -151,5 +153,20 @@ pub mod server {
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run();
+    }
+
+    /// Same as `run_server`, but drives the server with `Server::run_epoll` (real epoll-driven
+    /// blocking, see §9/§10 of Performance.md) instead of `Server::run`'s backoff-based polling.
+    /// Only usable with fd-backed networks (TCP/UDP) -- the in-process modelled network has no
+    /// real fd, so it keeps using `run_server`.
+    pub fn run_server_epoll<L, C>(server_id: u64, listener: L, num_threads: usize)
+    where
+        L: RawFdListener<C> + Sync,
+        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+    {
+        let server = create_server::<_, _>(server_id, listener, num_threads);
+        vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
+
+        server.run_epoll();
     }
 }

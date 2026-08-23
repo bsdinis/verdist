@@ -21,22 +21,40 @@ fn main() {
         cli::NetworkType::Udp => {
             let listener = verdist::network::udp::UdpListener::listen(args.addr(), args.server_id)
                 .expect("failed to create listener");
-            abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
-                &server_ids,
-                args.server_id,
-                listener,
-                args.num_threads,
-            );
+            if args.epoll {
+                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                );
+            } else {
+                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                );
+            }
         }
         cli::NetworkType::Tcp => {
             let listener = verdist::network::tcp::TcpListener::listen(args.addr(), args.server_id)
                 .expect("failed to create listener");
-            abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
-                &server_ids,
-                args.server_id,
-                listener,
-                args.num_threads,
-            );
+            if args.epoll {
+                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                );
+            } else {
+                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                );
+            }
         }
     }
 }

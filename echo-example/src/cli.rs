@@ -71,6 +71,16 @@ pub struct ServerArgs {
     #[arg(long, value_enum, default_value_t)]
     pub network: NetworkType,
 
+    /// Use mio/epoll-driven blocking instead of the default backoff-based polling loop
+    /// (TCP/UDP only, ignored for the modelled network). See §9/§10 of Performance.md.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub epoll: bool,
+
+    /// Explicitly keep the default backoff-based polling loop -- present for symmetry with
+    /// --epoll; omitting --epoll already means this.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_epoll: bool,
+
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,
 }

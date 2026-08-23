@@ -66,6 +66,16 @@ pub struct ServerParsedArgs {
     #[arg(long)]
     pub num_threads: Option<usize>,
 
+    /// Use mio/epoll-driven blocking instead of the default backoff-based polling loop
+    /// (TCP/UDP only, ignored for the modelled network). See §9/§10 of Performance.md.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub epoll: bool,
+
+    /// Explicitly keep the default backoff-based polling loop -- present for symmetry with
+    /// --epoll; omitting --epoll already means this.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_epoll: bool,
+
     #[arg(short, long)]
     pub config: std::path::PathBuf,
 }
@@ -99,6 +109,10 @@ pub struct ServerArgs {
 
     /// What network type to run
     pub network: NetworkType,
+
+    /// Use mio/epoll-driven blocking instead of the default backoff-based polling loop
+    /// (TCP/UDP only, ignored for the modelled network)
+    pub epoll: bool,
 
     /// Servers in the system
     pub servers: HashMap<u64, ServerConfig>,
@@ -183,6 +197,8 @@ impl ServerArgs {
                     config.num_threads.filter(|n| *n != 0),
                 ).unwrap_or_else(default_num_threads),
                 network: config.network,
+                // --no-epoll always wins if both are (redundantly) given.
+                epoll: args.epoll && !args.no_epoll,
                 servers: config.servers,
             },
         )

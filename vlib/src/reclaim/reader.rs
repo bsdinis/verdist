@@ -72,4 +72,10 @@ impl ReaderSlot {
     }
 }
 
+impl Default for ReaderSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 } // verus!

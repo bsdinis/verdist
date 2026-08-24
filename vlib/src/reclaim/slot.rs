@@ -9,11 +9,13 @@
 //!     `dealloc` is kept alongside so the *specific* allocation currently installed can be freed
 //!     later without needing a separate, install-spanning field.
 //!
-//! A `Slot<T>` is created once (`new_vacant`), then installed/reinstalled any number of times
-//! via `take`/`put`: `take` unconditionally swaps the slot to `Vacant` and hands back whatever
-//! was there (always safe to call); `put` installs a fresh value, but requires the caller to
-//! already hold a `Vacant` witness (obtained from a prior `take`, or from `new_vacant` itself) --
-//! so installing over a still-`Occupied` slot is a static type error, not a runtime race.
+//! A `Slot<T>` is created once (`new_vacant`/`new_occupied`), then installed/reinstalled any
+//! number of times via `take`/`put`: `take` unconditionally swaps the slot to `Vacant` and hands
+//! back whatever was there (always safe to call); `put` requires an `old: SlotState<T>` argument
+//! satisfying `is_vacant()`. Note this is *not* a real type-level guarantee against double-install
+//! -- `Vacant` is a zero-content variant, so any caller can trivially fabricate one regardless of
+//! the slot's actual live state. It's `EpochAtomicPtr`'s job (not `Slot`'s) to only ever call
+//! `put` using a witness genuinely obtained from a preceding `take` on the same slot.
 //!
 //! What `Slot` deliberately does *not* decide: whether it's actually *safe* to reclaim an
 //! `Occupied` value (i.e. that every share ever split off it has been returned, `frac() == 1`).
@@ -21,9 +23,9 @@
 //! as it was for the one-shot design.
 use crate::reclaim::frac_ptr;
 
+use vstd::atomic_ghost::atomic_with_ghost;
 use vstd::atomic_ghost::AtomicInvariantPredicate;
 use vstd::atomic_ghost::AtomicPtr;
-use vstd::atomic_ghost::atomic_with_ghost;
 use vstd::prelude::*;
 use vstd::raw_ptr::Dealloc;
 use vstd::raw_ptr::PointsTo;
@@ -72,20 +74,43 @@ impl<T> Slot<T> {
         result
     }
 
-    // Unconditionally swaps the slot to `Vacant`, handing back whatever was there. Always safe
-    // to call -- it's the *caller's* job to know whether what comes back is actually reclaimable
-    // (frac() == 1) before trying to free it, or to `put` a fresh value in its place.
-    pub fn take(&self) -> (result: Tracked<SlotState<T>>) {
+    // Convenience for the very first install, avoiding an awkward `new_vacant` + `put` dance
+    // (`put` needs a `Vacant` witness in hand, which `new_vacant` doesn't hand back).
+    pub fn new_occupied(v: T) -> (result: Self)
+        requires
+            core::mem::size_of::<T>() != 0,
+    {
+        let (ptr, Tracked(points_to), Tracked(dealloc)) = frac_ptr::epoch_alloc(v);
+        let tracked frac = Frac::new(points_to);
+        let gate = AtomicPtr::new(Ghost(()), ptr, Tracked(SlotState::Occupied { frac, dealloc }));
+        let result = Slot { gate };
+        assert(result.inv());
+        result
+    }
+
+    // Unconditionally swaps the slot to `Vacant`, handing back the physical pointer it was
+    // gating (needed to actually free the backing memory) together with whatever ghost state was
+    // there. Always safe to call -- it's the *caller's* job to know whether what comes back is
+    // actually reclaimable (frac() == 1) before trying to free it, or to `put` a fresh value in
+    // its place.
+    pub fn take(&self) -> (result: (*mut T, Tracked<SlotState<T>>))
+        ensures
+            result.1@ is Occupied ==> {
+                &&& result.1@->Occupied_frac.resource().ptr() == result.0
+                &&& result.1@->Occupied_frac.resource().is_init()
+            },
+    {
         proof {
             use_type_invariant(self);
         }
         let tracked mut out: Option<SlotState<T>> = None;
         let null_ptr: *mut T = core::ptr::null_mut();
-        atomic_with_ghost!(&self.gate => store(null_ptr); ghost g => {
+        let old_ptr =
+            atomic_with_ghost!(&self.gate => swap(null_ptr); ghost g => {
             out = Some(g);
             g = SlotState::Vacant;
         });
-        Tracked(out.tracked_unwrap())
+        (old_ptr, Tracked(out.tracked_unwrap()))
     }
 
     // Installs a fresh value, consuming a `Vacant` witness (from `take` or `new_vacant`) as
@@ -105,16 +130,25 @@ impl<T> Slot<T> {
         });
     }
 
-    // Peels off half of the currently-installed occupant's accumulator, if any. `None` if the
-    // slot is (or becomes, per the caller's own retry logic) vacant -- callers relying on "this
-    // slot is definitely occupied right now" must establish that externally (e.g. the
-    // `EpochAtomicPtr` invariant that its current index always names an occupied slot).
-    pub fn split_share(&self) -> (result: Tracked<Option<Frac<PointsTo<T>>>>) {
+    // Peels off half of the currently-installed occupant's accumulator, if any, together with
+    // the physical pointer it currently gates (captured in the *same* atomic operation, so
+    // they're guaranteed consistent -- the share's `resource().ptr()` matches the returned
+    // pointer). `None` if the slot is vacant -- callers relying on "this slot is definitely
+    // occupied right now" must establish that externally (e.g. the `EpochAtomicPtr` invariant
+    // that its current index always names an occupied slot).
+    pub fn split_share(&self) -> (result: (*mut T, Tracked<Option<Frac<PointsTo<T>>>>))
+        ensures
+            result.1@ is Some ==> {
+                &&& result.1@->Some_0.resource().ptr() == result.0
+                &&& result.1@->Some_0.resource().is_init()
+            },
+    {
         proof {
             use_type_invariant(self);
         }
         let tracked mut share_out: Option<Frac<PointsTo<T>>> = None;
-        atomic_with_ghost!(&self.gate => load(); ghost g => {
+        let ptr =
+            atomic_with_ghost!(&self.gate => load(); ghost g => {
             g = match g {
                 SlotState::Vacant => SlotState::Vacant,
                 SlotState::Occupied { frac: mut frac, dealloc } => {
@@ -123,7 +157,7 @@ impl<T> Slot<T> {
                 },
             };
         });
-        Tracked(share_out)
+        (ptr, Tracked(share_out))
     }
 
     // Merges a previously-split share back in. Requires the slot to currently be `Occupied` by
@@ -173,7 +207,8 @@ pub fn reclaim<T>(ptr: *mut T, Tracked(occupant): Tracked<SlotState<T>>) -> (res
         occupant->Occupied_dealloc.addr() == ptr.addr(),
         occupant->Occupied_dealloc.size() == core::mem::size_of::<T>(),
         occupant->Occupied_dealloc.align() == core::mem::align_of::<T>(),
-        occupant->Occupied_dealloc.provenance() == occupant->Occupied_frac.resource().ptr()@.provenance,
+        occupant->Occupied_dealloc.provenance()
+            == occupant->Occupied_frac.resource().ptr()@.provenance,
     ensures
         result == occupant->Occupied_frac.resource().value(),
 {

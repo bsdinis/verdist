@@ -15,14 +15,14 @@
 //! sound, regardless of whether `T` is `Copy`.
 use vstd::layout::layout_for_type_is_valid;
 use vstd::prelude::*;
-use vstd::raw_ptr::Dealloc;
-use vstd::raw_ptr::PointsTo;
-use vstd::raw_ptr::SharedReference;
 use vstd::raw_ptr::allocate;
 use vstd::raw_ptr::cast_ptr_to_thin_ptr;
 use vstd::raw_ptr::deallocate;
 use vstd::raw_ptr::ptr_mut_write;
 use vstd::raw_ptr::ptr_ref2;
+use vstd::raw_ptr::Dealloc;
+use vstd::raw_ptr::PointsTo;
+use vstd::raw_ptr::SharedReference;
 use vstd::resource::frac_opt::Frac;
 
 verus! {
@@ -52,7 +52,11 @@ pub fn epoch_alloc<T>(v: T) -> (result: (*mut T, Tracked<PointsTo<T>>, Tracked<D
 
 // Frees memory previously allocated by `epoch_alloc`. Only ever called by the collector, once
 // it has established no reader can still be dereferencing `ptr` (all `Frac` shares returned).
-pub fn epoch_free<T>(ptr: *mut T, Tracked(points_to): Tracked<PointsTo<T>>, Tracked(dealloc): Tracked<Dealloc>)
+pub fn epoch_free<T>(
+    ptr: *mut T,
+    Tracked(points_to): Tracked<PointsTo<T>>,
+    Tracked(dealloc): Tracked<Dealloc>,
+)
     requires
         points_to.ptr() == ptr,
         points_to.is_init(),
@@ -82,10 +86,10 @@ pub fn epoch_free<T>(ptr: *mut T, Tracked(points_to): Tracked<PointsTo<T>>, Trac
 // `opens_invariants none` requirement). Callers obtain `share` by peeling it off an
 // invariant-protected `Frac<PointsTo<T>>` accumulator (see `Generation::split_share`) *before*
 // calling this, and return it (see `Generation::return_share`) once done with the reference.
-pub fn borrow_shared<'a, T>(ptr: *const T, Tracked(share): Tracked<&'a Frac<PointsTo<T>>>) -> (result: SharedReference<
-    'a,
-    T,
->)
+pub fn borrow_shared<'a, T>(
+    ptr: *const T,
+    Tracked(share): Tracked<&'a Frac<PointsTo<T>>>,
+) -> (result: SharedReference<'a, T>)
     requires
         share.resource().ptr() == ptr,
         share.resource().is_init(),

@@ -14,11 +14,13 @@
 use vstd::resource::algebra::ResourceAlgebra;
 use vstd::resource::pcm::Resource;
 use vstd::resource::pcm::PCM;
-#[cfg(verus_only)]
 use vstd::resource::Loc;
-
 #[cfg(verus_only)]
-use vstd::resource::*;
+use vstd::resource::copy_duplicable_part;
+#[cfg(verus_only)]
+use vstd::resource::update_and_redistribute;
+#[cfg(verus_only)]
+use vstd::resource::update_mut;
 
 use vstd::prelude::*;
 
@@ -380,6 +382,12 @@ impl EpochGlobal {
             lb_out = g.extract_lower_bound();
         });
         (v, Tracked(lb_out))
+    }
+}
+
+impl Default for EpochGlobal {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

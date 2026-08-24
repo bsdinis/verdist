@@ -499,7 +499,7 @@ impl<S, L, C> Server<S, L, C> where
     /// Performance.md) -- cost per call is bounded regardless of how many idle long-lived
     /// connections have accumulated in the shard; full coverage is still reached, just spread
     /// out over multiple calls.
-    pub fn poll_shard(&self, shard: usize) -> bool
+    pub fn poll_shard(&self, shard: usize, drop_scratch: &mut HashSet<C::Id>) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
     {
@@ -508,7 +508,7 @@ impl<S, L, C> Server<S, L, C> where
             broadcast use vstd::seq_lib::group_filter_ensures;
 
         }
-        let mut drop = HashSet::new();
+        drop_scratch.clear();
         let read_handle = self.connected[shard].acquire_read();
 
         let ghost connected_pred = self.connected[shard as int].pred();
@@ -568,25 +568,25 @@ impl<S, L, C> Server<S, L, C> where
                     }
                     assert(C::K::send_inv(channel.constant(), channel.spec_id(), response));
                     if channel.send(&response).is_err() {
-                        drop.insert(channel.id());
+                        drop_scratch.insert(channel.id());
                     }
                 },
                 Err(TryRecvError::Empty) => {},
                 Err(e) => {
                     vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.service.id());
-                    drop.insert(channel.id());
+                    drop_scratch.insert(channel.id());
                 },
             }
             i += 1;
         }
         read_handle.release_read();
 
-        if drop.is_empty() {
+        if drop_scratch.is_empty() {
             return true;
         }
         let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
-        let filter_fn = |c: &C| !drop.contains(&c.id());
+        let filter_fn = |c: &C| !drop_scratch.contains(&c.id());
         connected.retain(filter_fn);
         proof {
             let ghost server_inv = self.connected[shard as int].pred();
@@ -682,14 +682,19 @@ impl<S, L, C> Server<S, L, C> where
     /// immediately, not block. See `claude-files/UdpReadRegression.md` for the regression this
     /// addresses: without this, every idle connection a shard has ever accepted (UDP never
     /// signals a connection as dead) cost a real blocking timeout on every single poll.
-    fn poll_shard_ready(&self, shard: usize, ready: &std::collections::HashSet<i32>) -> bool
+    fn poll_shard_ready(
+        &self,
+        shard: usize,
+        ready: &std::collections::HashSet<i32>,
+        drop_scratch: &mut HashSet<C::Id>,
+    ) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
     {
         proof {
             use_type_invariant(self);
         }
-        let mut drop = HashSet::new();
+        drop_scratch.clear();
         let read_handle = self.connected[shard].acquire_read();
 
         let ghost connected_pred = self.connected[shard as int].pred();
@@ -736,13 +741,13 @@ impl<S, L, C> Server<S, L, C> where
                         }
                         assert(C::K::send_inv(channel.constant(), channel.spec_id(), response));
                         if channel.send(&response).is_err() {
-                            drop.insert(channel.id());
+                            drop_scratch.insert(channel.id());
                         }
                     },
                     Err(TryRecvError::Empty) => {},
                     Err(e) => {
                         vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.service.id());
-                        drop.insert(channel.id());
+                        drop_scratch.insert(channel.id());
                     },
                 }
             }
@@ -750,12 +755,12 @@ impl<S, L, C> Server<S, L, C> where
         }
         read_handle.release_read();
 
-        if drop.is_empty() {
+        if drop_scratch.is_empty() {
             return true;
         }
         let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
-        let filter_fn = |c: &C| !drop.contains(&c.id());
+        let filter_fn = |c: &C| !drop_scratch.contains(&c.id());
         connected.retain(filter_fn);
         proof {
             let ghost server_inv = self.connected[shard as int].pred();
@@ -779,7 +784,12 @@ impl<S, L, C> Server<S, L, C> where
     /// epoll reported nothing at all (see `poll_shard_ready`'s doc and
     /// `claude-files/UdpReadRegression.md`). Meant to be driven by `run_epoll`'s per-shard worker
     /// thread in place of `poll_shard` alone.
-    pub fn poll_shard_epoll(&self, shard: usize) -> bool
+    pub fn poll_shard_epoll(
+        &self,
+        shard: usize,
+        ready_scratch: &mut std::collections::HashSet<i32>,
+        drop_scratch: &mut HashSet<C::Id>,
+    ) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
     {
@@ -789,9 +799,9 @@ impl<S, L, C> Server<S, L, C> where
         let (mut poll, poll_handle) = self.shard_polls[shard].acquire_write();
         let mut events = mio::Events::with_capacity(MAX_POLL_BATCH);
         let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
-        let ready = vlib::mio::mio_ready_fds(&events);
+        vlib::mio::mio_fill_ready_fds(&events, ready_scratch);
         poll_handle.release_write(poll);
-        if ready.is_empty() {
+        if ready_scratch.is_empty() {
             // Nothing reported ready before the fallback timeout elapsed -- either the shard is
             // genuinely idle, or some connection hasn't been registered with epoll yet (a race
             // with `sync_shard_registrations`, itself bounded/round-robin). Fall back to the
@@ -799,9 +809,9 @@ impl<S, L, C> Server<S, L, C> where
             // *only* place the O(shard size) * RECV_TIMEOUT_MILLIS blind scan runs, and it only
             // runs when nothing else was pending anyway -- see `claude-files/UdpReadRegression.md`
             // for why the previous unconditional-every-call version of this was the regression.
-            return self.poll_shard(shard);
+            return self.poll_shard(shard, drop_scratch);
         }
-        self.poll_shard_ready(shard, &ready)
+        self.poll_shard_ready(shard, ready_scratch, drop_scratch)
     }
 
     /// Blocks (via real epoll/kqueue readiness on the listener fd, with the same fallback
@@ -871,8 +881,15 @@ where
         std::thread::scope(|s| {
             s.spawn(|| while self.poll_accept() {});
             for shard in 0..self.num_shards() {
-                s.spawn(move || loop {
-                    self.poll_shard(shard);
+                s.spawn(move || {
+                    // Owned by this shard's single dedicated worker thread and reused across
+                    // every `poll_shard` call instead of allocating a fresh `HashSet` each time
+                    // (the overwhelmingly common case is nothing to drop) -- see
+                    // claude-files/UdpConcurrencyBottleneck.md's allocation-cleanup follow-up.
+                    let mut drop_scratch = std::collections::HashSet::new();
+                    loop {
+                        self.poll_shard(shard, &mut drop_scratch);
+                    }
                 });
             }
         });
@@ -898,8 +915,14 @@ where
         std::thread::scope(|s| {
             s.spawn(|| while self.poll_accept_epoll() {});
             for shard in 0..self.num_shards() {
-                s.spawn(move || loop {
-                    self.poll_shard_epoll(shard);
+                s.spawn(move || {
+                    // Same rationale as `run`'s `drop_scratch` -- owned by this shard's single
+                    // worker thread, reused across calls instead of allocating fresh every poll.
+                    let mut ready_scratch = std::collections::HashSet::new();
+                    let mut drop_scratch = std::collections::HashSet::new();
+                    loop {
+                        self.poll_shard_epoll(shard, &mut ready_scratch, &mut drop_scratch);
+                    }
                 });
             }
         });

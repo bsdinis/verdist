@@ -4,6 +4,7 @@ pub mod map;
 pub mod mio;
 pub mod monotonic;
 pub mod print;
+pub mod reclaim;
 pub mod serde;
 pub mod set;
 pub mod std;

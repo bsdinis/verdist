@@ -220,6 +220,15 @@ impl PollCursor {
         if len == 0 {
             return 0;
         }
+        if batch == len {
+            // The caller's `(start + i) % len` loop for `i in 0..batch` visits every index
+            // exactly once regardless of `start` once a single batch already covers the whole
+            // shard -- skip the atomic load/store round-robin bookkeeping entirely rather than
+            // pay for state that can't affect which connections get scanned. `next` is left
+            // untouched, which is fine: nothing depends on it advancing on a call that already
+            // achieves full coverage on its own.
+            return 0;
+        }
         let cur = atomic_with_ghost!(&self.next => load(); ghost g => {});
         let start = cur % len;
         // wrapping_add: `start`/`batch` are just scheduling state, not part of any correctness
@@ -787,6 +796,7 @@ impl<S, L, C> Server<S, L, C> where
     pub fn poll_shard_epoll(
         &self,
         shard: usize,
+        events_scratch: &mut mio::Events,
         ready_scratch: &mut std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
     ) -> bool
@@ -797,9 +807,8 @@ impl<S, L, C> Server<S, L, C> where
             use_type_invariant(self);
         }
         let (mut poll, poll_handle) = self.shard_polls[shard].acquire_write();
-        let mut events = mio::Events::with_capacity(MAX_POLL_BATCH);
-        let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
-        vlib::mio::mio_fill_ready_fds(&events, ready_scratch);
+        let _ = poll.poll(events_scratch, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        vlib::mio::mio_fill_ready_fds(events_scratch, ready_scratch);
         poll_handle.release_write(poll);
         if ready_scratch.is_empty() {
             // Nothing reported ready before the fallback timeout elapsed -- either the shard is
@@ -821,7 +830,7 @@ impl<S, L, C> Server<S, L, C> where
     /// listener fd itself is idempotent (tolerates already-registered) so no separate one-time
     /// setup is needed. Meant to be driven by `run_epoll`'s accept thread in place of
     /// `poll_accept` alone.
-    pub fn poll_accept_epoll(&self) -> bool
+    pub fn poll_accept_epoll(&self, events_scratch: &mut mio::Events) -> bool
         requires
             self.spec_num_shards() > 0,
     {
@@ -844,8 +853,7 @@ impl<S, L, C> Server<S, L, C> where
             },
         }
         let (mut poll, poll_handle) = self.accept_poll.acquire_write();
-        let mut events = mio::Events::with_capacity(1);
-        let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        let _ = poll.poll(events_scratch, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
         poll_handle.release_write(poll);
         let result = self.poll_accept();
         let num_shards = self.num_shards();
@@ -913,15 +921,28 @@ where
     /// real OS fd (TCP/UDP) -- the in-process `modelled` network keeps using `run`.
     pub fn run_epoll(&self) {
         std::thread::scope(|s| {
-            s.spawn(|| while self.poll_accept_epoll() {});
+            s.spawn(|| {
+                // Owned by the accept thread and reused across calls instead of allocating a
+                // fresh `mio::Events` every poll -- same rationale as `ready_scratch`/
+                // `drop_scratch` below (mio's own docs recommend exactly this: "a single
+                // `Events` instance is created ... and reused on each call to `Poll::poll`").
+                let mut events_scratch = mio::Events::with_capacity(1);
+                while self.poll_accept_epoll(&mut events_scratch) {}
+            });
             for shard in 0..self.num_shards() {
                 s.spawn(move || {
                     // Same rationale as `run`'s `drop_scratch` -- owned by this shard's single
                     // worker thread, reused across calls instead of allocating fresh every poll.
+                    let mut events_scratch = mio::Events::with_capacity(MAX_POLL_BATCH);
                     let mut ready_scratch = std::collections::HashSet::new();
                     let mut drop_scratch = std::collections::HashSet::new();
                     loop {
-                        self.poll_shard_epoll(shard, &mut ready_scratch, &mut drop_scratch);
+                        self.poll_shard_epoll(
+                            shard,
+                            &mut events_scratch,
+                            &mut ready_scratch,
+                            &mut drop_scratch,
+                        );
                     }
                 });
             }

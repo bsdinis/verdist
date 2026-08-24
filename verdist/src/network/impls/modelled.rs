@@ -206,12 +206,11 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for ModelledListener<R, S> where
         self.id
     }
 
+    type Raw = (u64, Sender<S>, Receiver<R>);
+
     #[allow(unused_variables)]
     #[verifier::external_body]
-    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
-        ClientChannel<K, R, S>,
-        TryListenError,
-    >) {
+    fn try_accept_raw(&self) -> Result<(u64, Self::Raw), TryListenError> {
         let client_id = self.registering_rx.try_recv()?;
         vlib::veprintln!(
             "[server|{:>3}]: accepting a connection from client {client_id}", self.id
@@ -224,6 +223,16 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for ModelledListener<R, S> where
             |_x| TryListenError::Disconnected,
         )?;
 
+        Ok((client_id, (client_id, resp_tx, req_rx)))
+    }
+
+    #[allow(unused_variables)]
+    #[verifier::external_body]
+    fn wrap_raw(&self, raw: Self::Raw, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
+        ClientChannel<K, R, S>,
+        TryListenError,
+    >) {
+        let (client_id, resp_tx, req_rx) = raw;
         let pred = Ghost(gen_pred@(self));
 
         let chan = ClientChannel::new(client_id, self.id, pred, resp_tx, req_rx);

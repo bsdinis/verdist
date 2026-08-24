@@ -449,7 +449,20 @@ impl<S, L, C> Server<S, L, C> where
             decreases i,
         {
             use crate::network::error::TryListenError;
-            match self.listener.try_accept(Ghost(|l| self.service.channel_inv())) {
+            // NOTE(ownership-transfer step 3/9): this still runs `try_accept_raw` immediately
+            // followed by `wrap_raw` on the same thread -- deliberately, so this commit
+            // validates the `Listener` trait split in isolation from the accept-thread/
+            // worker-thread ownership-transfer restructuring (step 4+ of
+            // claude-files/ServerOwnershipTransferPlan.md). `wrap_raw` is expected to only ever
+            // fail if the underlying `try_accept_raw` payload is somehow malformed, which
+            // shouldn't happen in practice -- logged and dropped rather than treated as fatal.
+            let raw_result = match self.listener.try_accept_raw() {
+                Ok((_client_id, raw)) => {
+                    self.listener.wrap_raw(raw, Ghost(|l| self.service.channel_inv()))
+                },
+                Err(e) => Err(e),
+            };
+            match raw_result {
                 Ok(channel) => {
                     assert(channel.constant() == self.service.channel_inv());
                     proof {

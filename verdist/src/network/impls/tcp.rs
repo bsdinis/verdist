@@ -394,12 +394,11 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for TcpListener where
         self.id
     }
 
+    type Raw = (TcpStream, u64);
+
     #[allow(unused_variables)]
     #[verifier::external_body]
-    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
-        ClientChannel<K, R, S>,
-        TryListenError,
-    >) {
+    fn try_accept_raw(&self) -> Result<(u64, Self::Raw), TryListenError> {
         let (mut stream, addr) = match self.listener.accept() {
             Ok(res) => res,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -417,6 +416,16 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for TcpListener where
         let client_id = u64::from_ne_bytes(client_id_buf);
         stream.set_nonblocking(true).expect("this should never fail");
 
+        Ok((client_id, (stream, client_id)))
+    }
+
+    #[allow(unused_variables)]
+    #[verifier::external_body]
+    fn wrap_raw(&self, raw: Self::Raw, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
+        ClientChannel<K, R, S>,
+        TryListenError,
+    >) {
+        let (stream, client_id) = raw;
         let pred = Ghost(gen_pred@(self));
         let tstream = TypedTcpStream::new(stream);
         let chan = ClientChannel::new(pred, self.id, client_id, tstream);

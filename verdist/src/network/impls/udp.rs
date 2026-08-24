@@ -411,12 +411,11 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
         self.id
     }
 
+    type Raw = (UdpSocket, u64);
+
     #[allow(unused_variables)]
     #[verifier::external_body]
-    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
-        ClientChannel<K, R, S>,
-        TryListenError,
-    >) {
+    fn try_accept_raw(&self) -> Result<(u64, Self::Raw), TryListenError> {
         let ((client_id, connect_addr), addr) = match self.listening_socket.try_recv_from() {
             Ok(Some(x)) => { x },
             Ok(None) => {
@@ -436,8 +435,19 @@ impl<K, R, S> Listener<ClientChannel<K, R, S>> for UdpListener where
 
         self.listening_socket.send_to(&(self.id, socket.local_addr().unwrap()), addr)?;
 
-        let pred = Ghost(gen_pred@(self));
         socket.connect(connect_addr)?;
+
+        Ok((client_id, (socket, client_id)))
+    }
+
+    #[allow(unused_variables)]
+    #[verifier::external_body]
+    fn wrap_raw(&self, raw: Self::Raw, gen_pred: Ghost<spec_fn(&Self) -> K>) -> (r: Result<
+        ClientChannel<K, R, S>,
+        TryListenError,
+    >) {
+        let (socket, client_id) = raw;
+        let pred = Ghost(gen_pred@(self));
         let tsocket = TypedUdpSocket::new(socket);
 
         let chan = ClientChannel::new(pred, self.id, client_id, tsocket);

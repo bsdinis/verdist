@@ -91,7 +91,28 @@ pub trait Channel {
 pub trait Listener<C> where C: Channel<Id = (u64, u64)> {
     spec fn spec_id(self) -> u64;
 
-    fn try_accept(&self, gen_pred: Ghost<spec_fn(&Self) -> C::K>) -> (r: Result<C, TryListenError>)
+    /// Ghost-free payload produced by the OS-level accept step (e.g. an accepted socket plus
+    /// the peer's claimed client id) -- carries nothing invariant-relevant, so it can safely
+    /// cross a `crossbeam_channel` handoff to another thread (see `vlib::crossbeam`'s
+    /// `Sender::send`/`Receiver::try_recv` specs, which make no claim about a value's content
+    /// surviving the trip -- `Raw` must therefore be a type no proof ever depends on the
+    /// content of).
+    type Raw;
+
+    /// Pure OS-level accept: no `Ghost` predicate, no invariant-carrying postcondition beyond
+    /// ordinary `Result` well-typedness. Meant to be called from a dedicated accept thread; the
+    /// returned `u64` is the peer's claimed client id, used only as a shard-routing key -- it is
+    /// not itself a channel-id-invariant claim (that's established by `wrap_raw`, below).
+    fn try_accept_raw(&self) -> Result<(u64, Self::Raw), TryListenError>;
+
+    /// Wraps previously-accepted raw material into a typed, invariant-carrying `C`. Same
+    /// shape/postcondition the old single-step `try_accept` had -- meant to be called by
+    /// whichever thread will own the resulting channel (e.g. the worker thread that owns the
+    /// shard this connection is being added to), right after receiving `raw`.
+    fn wrap_raw(&self, raw: Self::Raw, gen_pred: Ghost<spec_fn(&Self) -> C::K>) -> (r: Result<
+        C,
+        TryListenError,
+    >)
         ensures
             r is Ok ==> {
                 &&& r->Ok_0.constant() == gen_pred(self)

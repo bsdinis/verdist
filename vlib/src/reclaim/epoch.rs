@@ -11,7 +11,6 @@
 //! `fetch_add_wrapping` plus a "physical value == ghost epoch mod 2^64" invariant, at the cost
 //! of needing wraparound-aware comparisons wherever epochs are compared) that should be made
 //! explicitly rather than folded in here silently.
-
 use vstd::resource::algebra::ResourceAlgebra;
 use vstd::resource::pcm::Resource;
 use vstd::resource::pcm::PCM;
@@ -194,7 +193,9 @@ impl EpochResource {
             r.0@ is HalfRightToAdvance,
             r.1@ is HalfRightToAdvance,
     {
-        let half = EpochResourceValue::HalfRightToAdvance { value: self@->FullRightToAdvance_value };
+        let half = EpochResourceValue::HalfRightToAdvance {
+            value: self@->FullRightToAdvance_value,
+        };
         let tracked (left, right) = self.r.split(half, half);
         (EpochResource { r: left }, EpochResource { r: right })
     }
@@ -305,15 +306,19 @@ pub open spec fn epoch_modulus() -> nat {
 
 pub struct EpochGlobalPred;
 
-impl vstd::atomic_ghost::AtomicInvariantPredicate<(), u64, EpochResource> for EpochGlobalPred {
-    open spec fn atomic_inv(k: (), v: u64, g: EpochResource) -> bool {
+// `K = Loc` (the resource's own location) rather than `()`: this lets a `ReaderSlot`
+// (added in a later step) statically pin itself to *this specific* `EpochGlobal` instance
+// via `EpochGlobal::loc()`, rather than being tied to an arbitrary/unrelated counter.
+impl vstd::atomic_ghost::AtomicInvariantPredicate<Loc, u64, EpochResource> for EpochGlobalPred {
+    open spec fn atomic_inv(k: Loc, v: u64, g: EpochResource) -> bool {
         &&& g@ is FullRightToAdvance
         &&& g@.epoch() % epoch_modulus() == v as nat
+        &&& g.loc() == k
     }
 }
 
 pub struct EpochGlobal {
-    counter: vstd::atomic_ghost::AtomicU64<(), EpochResource, EpochGlobalPred>,
+    counter: vstd::atomic_ghost::AtomicU64<Loc, EpochResource, EpochGlobalPred>,
 }
 
 impl EpochGlobal {
@@ -321,15 +326,20 @@ impl EpochGlobal {
         self.counter.well_formed()
     }
 
+    pub closed spec fn loc(&self) -> Loc {
+        self.counter.constant()
+    }
+
     pub fn new() -> (result: Self)
         ensures
             result.well_formed(),
     {
         let tracked r = EpochResource::alloc();
+        let loc = Ghost(r.loc());
         proof {
             vstd::arithmetic::div_mod::lemma_small_mod(0, epoch_modulus());
         }
-        let counter = vstd::atomic_ghost::AtomicU64::new(Ghost(()), 0, Tracked(r));
+        let counter = vstd::atomic_ghost::AtomicU64::new(loc, 0, Tracked(r));
         EpochGlobal { counter }
     }
 
@@ -351,6 +361,25 @@ impl EpochGlobal {
             vstd::arithmetic::div_mod::lemma_mod_adds(g@.epoch() as int, 1, epoch_modulus() as int);
             g.advance(g@.epoch() + 1);
         })
+    }
+
+    // Reads the current (wrapped) epoch together with a durable "epoch was >= this value at
+    // some point" witness for that *exact* value, atomically -- so callers (e.g. `ReaderSlot::pin`)
+    // don't race between a plain `load()` and a separate ghost extraction.
+    pub fn current(&self) -> (result: (u64, Tracked<EpochResource>))
+        requires
+            self.well_formed(),
+        ensures
+            result.1@@ is LowerBound,
+            result.1@@.epoch() % epoch_modulus() == result.0 as nat,
+            result.1@.loc() == self.loc(),
+    {
+        let tracked mut lb_out = EpochResource::alloc();
+        let v =
+            vstd::atomic_ghost::atomic_with_ghost!(&self.counter => load(); ghost g => {
+            lb_out = g.extract_lower_bound();
+        });
+        (v, Tracked(lb_out))
     }
 }
 

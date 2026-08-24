@@ -38,6 +38,14 @@ pub fn mio_deregister(registry: &mio::Registry, fd: i32) -> std::io::Result<()> 
     registry.deregister(&mut mio::unix::SourceFd(&fd))
 }
 
+/// Collects the fds reported ready by a completed `Poll::poll` call, keyed by
+/// `mio_register_readable`'s registration token (== the fd itself, see that function's doc).
+/// Lets a caller dispatch only to the connections epoll actually reported as readable instead of
+/// scanning every registered connection.
+pub fn mio_ready_fds(events: &mio::Events) -> std::collections::HashSet<i32> {
+    events.iter().map(|e| e.token().0 as i32).collect()
+}
+
 verus! {
 
 #[verifier::external_type_specification]
@@ -97,6 +105,12 @@ pub assume_specification[ mio_register_readable ](
 
 pub assume_specification[ mio_deregister ](registry: &mio::Registry, fd: i32) -> (res:
     std::io::Result<()>)
+    no_unwind
+;
+
+pub assume_specification[ mio_ready_fds ](events: &mio::Events) -> (r: std::collections::HashSet<
+    i32,
+>)
     no_unwind
 ;
 

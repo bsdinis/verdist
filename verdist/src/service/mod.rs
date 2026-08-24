@@ -674,9 +674,111 @@ impl<S, L, C> Server<S, L, C> where
         read_handle.release_read();
     }
 
+    /// Like `poll_shard`, but only calls `try_recv()` on connections whose fd is in `ready` --
+    /// every other connection in the shard is skipped with no syscall at all, avoiding the
+    /// up-to-`RECV_TIMEOUT_MILLIS` blocking cost `try_recv()` pays on a connection with nothing
+    /// to read. `poll_shard_epoll` only calls this once epoll has reported specific fds as
+    /// readable, so every connection it does call `try_recv()` on is expected to return data
+    /// immediately, not block. See `claude-files/UdpReadRegression.md` for the regression this
+    /// addresses: without this, every idle connection a shard has ever accepted (UDP never
+    /// signals a connection as dead) cost a real blocking timeout on every single poll.
+    fn poll_shard_ready(&self, shard: usize, ready: &std::collections::HashSet<i32>) -> bool
+        requires
+            (shard as int) < self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let mut drop = HashSet::new();
+        let read_handle = self.connected[shard].acquire_read();
+
+        let ghost connected_pred = self.connected[shard as int].pred();
+        assert(connected_pred.server_id == self.service.spec_id());
+        assert(connected_pred.channel_inv == self.service.channel_inv());
+        let connected = read_handle.borrow();
+        assert(connected_pred.inv(*connected));
+
+        let len = connected.len();
+        if len == 0 {
+            read_handle.release_read();
+            return true;
+        }
+        let mut i = 0usize;
+        while i < len
+            invariant
+                connected_pred == self.connected[shard as int].pred(),
+                connected_pred.server_id == self.service.spec_id(),
+                connected_pred.channel_inv == self.service.channel_inv(),
+                connected_pred.inv(*connected),
+                connected@.len() == len,
+            decreases len - i,
+        {
+            use crate::network::error::TryRecvError;
+            let channel = &connected[i];
+            assert(*channel == connected@[i as int]);  // TRIGGER
+            assert(connected_pred.inv(*connected));
+            assert({
+                let chan = connected@[i as int];
+                &&& connected_pred.channel_inv == chan.constant()
+                &&& connected_pred.server_id == chan.spec_id().0
+            });
+            if ready.contains(&channel.raw_fd()) {
+                match channel.try_recv() {
+                    Ok(req) => {
+                        assert(self.service.channel_inv() == channel.constant());
+                        assert(C::K::recv_inv(channel.constant(), channel.spec_id(), req));
+                        proof {
+                            self.service.recv_implies_pre(channel.spec_id(), req);
+                        }
+                        let response = self.service.handle(channel.id(), req);
+                        proof {
+                            self.service.post_implies_send(channel.spec_id(), req, response);
+                        }
+                        assert(C::K::send_inv(channel.constant(), channel.spec_id(), response));
+                        if channel.send(&response).is_err() {
+                            drop.insert(channel.id());
+                        }
+                    },
+                    Err(TryRecvError::Empty) => {},
+                    Err(e) => {
+                        vlib::veprintln!("[server|{:>3}]: dropping channel: {e:?}", self.service.id());
+                        drop.insert(channel.id());
+                    },
+                }
+            }
+            i += 1;
+        }
+        read_handle.release_read();
+
+        if drop.is_empty() {
+            return true;
+        }
+        let (mut connected, handle) = self.connected[shard].acquire_write();
+        let ghost old_c = connected@;
+        let filter_fn = |c: &C| !drop.contains(&c.id());
+        connected.retain(filter_fn);
+        proof {
+            let ghost server_inv = self.connected[shard as int].pred();
+            assert forall|idx| 0 <= idx < connected@.len() implies {
+                let chan = #[trigger] connected@[idx];
+                &&& server_inv.channel_inv == chan.constant()
+                &&& server_inv.server_id == chan.spec_id().0
+            } by {
+                let chan = #[trigger] connected@[idx];
+                old_c.lemma_filter_contains_rev(|c| filter_fn.ensures((&c,), true), chan);
+            }
+        }
+        handle.release_write(connected);
+
+        true
+    }
+
     /// Blocks (via real epoll/kqueue readiness, with `EPOLL_FALLBACK_MILLIS` as a safety-net
-    /// timeout) until `shard` likely has work, then runs the existing, unmodified `poll_shard`.
-    /// Meant to be driven by `run_epoll`'s per-shard worker thread in place of `poll_shard` alone.
+    /// timeout) until `shard` likely has work, then dispatches only to the connections epoll
+    /// reported as ready (`poll_shard_ready`), falling back to a full `poll_shard` scan only when
+    /// epoll reported nothing at all (see `poll_shard_ready`'s doc and
+    /// `claude-files/UdpReadRegression.md`). Meant to be driven by `run_epoll`'s per-shard worker
+    /// thread in place of `poll_shard` alone.
     pub fn poll_shard_epoll(&self, shard: usize) -> bool
         requires
             (shard as int) < self.spec_num_shards(),
@@ -685,10 +787,21 @@ impl<S, L, C> Server<S, L, C> where
             use_type_invariant(self);
         }
         let (mut poll, poll_handle) = self.shard_polls[shard].acquire_write();
-        let mut events = mio::Events::with_capacity(1);
+        let mut events = mio::Events::with_capacity(MAX_POLL_BATCH);
         let _ = poll.poll(&mut events, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        let ready = vlib::mio::mio_ready_fds(&events);
         poll_handle.release_write(poll);
-        self.poll_shard(shard)
+        if ready.is_empty() {
+            // Nothing reported ready before the fallback timeout elapsed -- either the shard is
+            // genuinely idle, or some connection hasn't been registered with epoll yet (a race
+            // with `sync_shard_registrations`, itself bounded/round-robin). Fall back to the
+            // full blind scan so such stragglers are still eventually reached. This is now the
+            // *only* place the O(shard size) * RECV_TIMEOUT_MILLIS blind scan runs, and it only
+            // runs when nothing else was pending anyway -- see `claude-files/UdpReadRegression.md`
+            // for why the previous unconditional-every-call version of this was the regression.
+            return self.poll_shard(shard);
+        }
+        self.poll_shard_ready(shard, &ready)
     }
 
     /// Blocks (via real epoll/kqueue readiness on the listener fd, with the same fallback

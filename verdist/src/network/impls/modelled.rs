@@ -199,7 +199,8 @@ impl<K, R, S> Channel for ServerChannel<K, R, S> where
 // than the others here.
 impl<K, R, S> Listener<ClientChannel<K, R, S>> for ModelledListener<R, S> where
     K: ChannelInvariant<K, (u64, u64), R, S>,
-    S: Clone,
+    S: Clone + Send,
+    R: Send,
  {
     #[verifier::external_body]
     closed spec fn spec_id(self) -> u64 {

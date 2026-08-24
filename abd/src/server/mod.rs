@@ -328,12 +328,13 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
 pub type RegisterServer<L, C, ML, RL> = Server<RegisterService<ML, RL>, L, C>;
 
 #[allow(unused_variables)]
+#[allow(clippy::type_complexity)]
 pub fn create_server<L, C, ML, RL>(
     server_ids: &HashSet<u64>,
     my_server_id: u64,
     listener: L,
     num_threads: usize,
-) -> RegisterServer<L, C, ML, RL> where
+) -> (RegisterServer<L, C, ML, RL>, Vec<crossbeam_channel::Receiver<L::Raw>>) where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
     ML: MutLinearizer<RegisterWrite>,

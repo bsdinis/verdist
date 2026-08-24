@@ -1,13 +1,11 @@
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::time::Duration;
 
-use vstd::atomic_ghost::atomic_with_ghost;
 use vstd::prelude::*;
 use vstd::rwlock::RwLock;
 #[cfg(verus_only)]
 use vstd::rwlock::RwLockPredicate;
-#[cfg(verus_only)]
-use vstd::std_specs::iter::IteratorSpec;
 
 use crate::network::channel::{Channel, ChannelInvariant, Listener, RawFdChannel, RawFdListener};
 
@@ -135,24 +133,23 @@ pub trait Service {
     ;
 }
 
-/// Upper bound on how many connections `Server::poll_shard` scans in a single call -- see
-/// `PollCursor`.
+/// Upper bound on how many connections a shard's scan (`Server::poll_shard`'s inner scan,
+/// `poll_shard_ready`) touches in a single call, and how many raw handoffs `drain_raw`/
+/// `drain_raw_epoll` drain from a shard's channel per call. Round-robin bookkeeping (`cursor`)
+/// bounds the scan the same way it always has; the channel drain is bounded for the same
+/// Verus-requires-a-`decreases`-measure reason `poll_accept`'s accept loop already was.
 const MAX_POLL_BATCH: usize = 64;
 
-/// Upper bound on how many connections `Server::sync_shard_registrations` (re-)registers with
-/// epoll in a single call -- same bounded-batch mitigation as `MAX_POLL_BATCH`/`PollCursor`
-/// above (§3 of Performance.md), applied to the registration-sync scan the mio/epoll rewrite
-/// introduced: without this, a very large shard would pay an O(shard-size) registration pass on
-/// every accept. A connection not covered by this call's batch still gets picked up within a
-/// bounded number of subsequent accept-thread iterations (round-robin, same as `PollCursor`), or
-/// -- worst case -- once `poll_shard_epoll`'s own fallback timeout elapses and it falls back to
-/// `poll_shard`'s direct scan regardless of epoll registration state.
-const MAX_SYNC_BATCH: usize = 64;
+/// Upper bound on how many raw connections `drain_raw`/`drain_raw_epoll` pull off a shard's
+/// handoff channel in a single call -- same bounded-batch rationale as `MAX_POLL_BATCH`. A raw
+/// connection not covered by this call's batch simply remains queued and is picked up on a
+/// subsequent call; nothing is lost, just possibly delayed by one extra poll cycle.
+const MAX_DRAIN_BATCH: usize = 64;
 
 /// How long an idle worker thread sleeps in `poll_shard` when its shard currently has zero
 /// connections (see §10 of Performance.md) -- a shard's `try_recv` timeout (§1) never fires in
 /// this case since there is nothing to call it on, so without this the worker would otherwise
-/// spin at full rate acquiring the (momentarily empty) read lock over and over.
+/// spin at full rate scanning an (momentarily empty) connection list over and over.
 const EMPTY_SHARD_BACKOFF_MILLIS: u64 = 2;
 
 /// How long the accept thread sleeps in `poll_accept` when a call accepted nothing at all (see
@@ -170,105 +167,21 @@ const ACCEPT_BACKOFF_MILLIS: u64 = 2;
 /// thread is genuinely idle for the whole interval, not repeatedly re-checking.
 const EPOLL_FALLBACK_MILLIS: u64 = 100;
 
-/// Trivial invariant for `PollCursor`'s backing atomic: the value is a pure scheduling hint, not
-/// part of any correctness invariant, so there is no ghost state (`G = ()`) and nothing to relate
-/// it to (`atomic_inv` is unconditionally `true`).
-struct PollCursorPred;
-
-impl vstd::atomic_ghost::AtomicInvariantPredicate<(), usize, ()> for PollCursorPred {
-    closed spec fn atomic_inv(k: (), v: usize, g: ()) -> bool {
-        true
-    }
-}
-
-/// Round-robins which slice of a shard's connections `poll_shard` actually touches on a given
-/// call, instead of scanning every connection every call (see §3 of Performance.md). Backed by
-/// `vstd::atomic_ghost::AtomicUsize`, a fully verified sequentially-consistent atomic, so no
-/// `external_body`/`assume` is needed even though it's shared (via `&self`) across the accept
-/// thread and every per-shard worker thread (see `Server::run`) -- in practice only the single
-/// worker thread owning a given shard ever calls `advance` on that shard's cursor, but nothing
-/// here relies on that for soundness.
-pub struct PollCursor {
-    next: vstd::atomic_ghost::AtomicUsize<(), (), PollCursorPred>,
-}
-
-impl Default for PollCursor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PollCursor {
-    #[verifier::type_invariant]
-    closed spec fn inv(self) -> bool {
-        self.next.well_formed()
-    }
-
-    pub fn new() -> (r: Self) {
-        let next = vstd::atomic_ghost::AtomicUsize::new(Ghost(()), 0, Tracked(()));
-        let result = PollCursor { next };
-        assert(result.inv());
-        result
-    }
-
-    /// Returns the start index of the next batch of size `min(batch, len)` (mod `len`), and
-    /// advances internal state so a subsequent call continues where this one left off.
-    pub fn advance(&self, len: usize, batch: usize) -> usize {
-        proof {
-            use_type_invariant(self);
-        }
-        if len == 0 {
-            return 0;
-        }
-        if batch == len {
-            // The caller's `(start + i) % len` loop for `i in 0..batch` visits every index
-            // exactly once regardless of `start` once a single batch already covers the whole
-            // shard -- skip the atomic load/store round-robin bookkeeping entirely rather than
-            // pay for state that can't affect which connections get scanned. `next` is left
-            // untouched, which is fine: nothing depends on it advancing on a call that already
-            // achieves full coverage on its own.
-            return 0;
-        }
-        let cur = atomic_with_ghost!(&self.next => load(); ghost g => {});
-        let start = cur % len;
-        // wrapping_add: `start`/`batch` are just scheduling state, not part of any correctness
-        // invariant, so on the (practically unreachable) usize wraparound the resulting `next` is
-        // still a harmless in-bounds index -- no need to prove `start + batch` doesn't overflow.
-        let next = (start.wrapping_add(batch)) % len;
-        atomic_with_ghost!(&self.next => store(next); ghost g => {});
-        start
-    }
-}
-
-/// Trivial invariant for the `mio::Poll` handles backing `Server::run_epoll` (see §9/§10 of
-/// Performance.md). A `Poll` handle is pure scheduling state, not part of any correctness
-/// invariant -- there is nothing to state about it beyond "some `mio::Poll` value lives here" --
-/// so this exists only to get verified interior mutability for `mio::Poll::poll`'s `&mut self`
-/// requirement through `Server`'s `&self` methods, the same role `RwLock` already plays for
-/// `connected`.
+/// Trivial invariant for the `mio::Poll` handle backing the accept thread's blocking wait in
+/// `Server::run_epoll` (see §9/§10 of Performance.md). A `Poll` handle is pure scheduling state,
+/// not part of any correctness invariant -- there is nothing to state about it beyond "some
+/// `mio::Poll` value lives here" -- so this exists only to get verified interior mutability for
+/// `mio::Poll::poll`'s `&mut self` requirement through `Server`'s `&self` methods. The accept
+/// thread is the only thread that ever touches `accept_poll` (there is exactly one of it), so
+/// this remains an `RwLock` purely for that interior-mutability reason, not because of any real
+/// cross-thread contention -- unlike the per-shard `mio::Poll`/`Registry` handles, which are now
+/// owned directly by each worker thread's local state (see `run_epoll`) since ownership-transfer
+/// removed the need to reach them through `&self` at all.
 pub struct TrivialPollInv;
 
 impl vstd::rwlock::RwLockPredicate<mio::Poll> for TrivialPollInv {
     open spec fn inv(self, v: mio::Poll) -> bool {
         true
-    }
-}
-
-pub struct ConnectionsInv<K> {
-    pub channel_inv: K,
-    pub server_id: u64,
-}
-
-impl<C> vstd::rwlock::RwLockPredicate<Vec<C>> for ConnectionsInv<C::K> where
-    C: Channel<Id = (u64, u64)>,
- {
-    open spec fn inv(self, v: Vec<C>) -> bool {
-        forall|idx: int|
-            0 <= idx < v@.len() ==> {
-                let chan = #[trigger] v@[idx];
-                &&& self.channel_inv == chan.constant()
-                &&& self.server_id == chan.spec_id().0
-            }
     }
 }
 
@@ -281,29 +194,29 @@ pub struct Server<S, L, C> where
     service: S,
     /// Listener channel
     listener: L,
-    /// Connected clients, sharded across independent locks so that `connected.len()` worker
-    /// threads can each poll their own shard without contending on the others.
-    connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>>,
-    /// One round-robin cursor per shard (see `PollCursor`), same length as `connected`.
-    cursors: Vec<PollCursor>,
+    /// One handoff channel sender per shard: the accept thread sends newly-accepted raw
+    /// connections here; the shard's own worker thread owns the paired `Receiver` (returned
+    /// alongside `Self` by `new`, not stored as a `Server` field -- see that field's absence and
+    /// `new`'s doc) and is the only thread that ever wraps a raw payload into a `C` or touches
+    /// its shard's connection list. This is the core of the ownership-transfer redesign: no
+    /// `RwLock`/lock predicate over connections exists anymore, because no two threads ever share
+    /// a shard's connection state at all (see claude-files/ServerOwnershipTransferPlan.md).
+    raw_senders: Vec<crossbeam_channel::Sender<L::Raw>>,
     /// Poll handle for the listener socket -- used by `run_epoll`'s accept thread to block on
     /// real fd readiness instead of spinning/backing off (see §9 of Performance.md). Unused by
-    /// the plain `run` driver.
+    /// the plain `run` driver. The only thread that ever touches this is the (single) accept
+    /// thread, so -- like the per-shard `Poll`s used to be -- this is an `RwLock` purely for
+    /// interior mutability, never real contention.
     accept_poll: RwLock<mio::Poll, TrivialPollInv>,
     /// Registry clone for `accept_poll`, kept separately since `Registry`'s methods only need
     /// `&self` -- registering the listener fd never contends with the accept thread's blocking
     /// `poll()` call the way sharing `accept_poll`'s lock would.
     accept_registry: mio::Registry,
-    /// One Poll handle per shard (same length as `connected`), used by `run_epoll`'s worker
-    /// threads.
-    shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>>,
-    /// One Registry clone per shard, same length as `connected`.
-    shard_registries: Vec<mio::Registry>,
-    /// One round-robin cursor per shard (same length as `connected`), bounding
-    /// `sync_shard_registrations`'s per-call scan the same way `cursors` bounds `poll_shard`'s
-    /// (see §3 of Performance.md) -- separate from `cursors` since the two scans track
-    /// independent progress through `connected[shard]` and must not interfere with each other.
-    sync_cursors: Vec<PollCursor>,
+    /// `C` no longer appears in any field (connections are never `Server` state -- see
+    /// `raw_senders`'s doc), but `Server<S, L, C>` is still meaningfully parameterized by it (via
+    /// the `Listener<C>`/`Channel` bounds), so it needs an explicit marker to stay a valid type
+    /// parameter.
+    _marker: PhantomData<C>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -315,87 +228,91 @@ impl<S, L, C> Server<S, L, C> where
         self.service.spec_id()
     }
 
+    /// Per-element invariant every shard's locally-owned `connected: Vec<C>` must satisfy: every
+    /// channel in it was produced by (directly or via `retain`, which only removes elements)
+    /// `Listener::wrap_raw` under this server's own `channel_inv`/`spec_id`. Threaded explicitly
+    /// via `requires`/`ensures` on `drain_raw`/`poll_shard`/etc. instead of being carried by an
+    /// `RwLock`'s lock predicate, since there is no lock anymore -- the invariant now holds by
+    /// ordinary sequential Hoare-style reasoning within the single thread that owns a shard's
+    /// `connected`, re-established call after call.
+    pub closed spec fn shard_inv(self, connected: Seq<C>) -> bool {
+        forall|idx: int|
+            0 <= idx < connected.len() ==> {
+                let chan = #[trigger] connected[idx];
+                &&& self.service.channel_inv() == chan.constant()
+                &&& self.service.spec_id() == chan.spec_id().0
+            }
+    }
+
+    /// Constructs the server and returns, alongside it, one handoff-channel `Receiver` per
+    /// shard. The receivers are deliberately *not* a `Server` field: keeping them out of `&self`
+    /// entirely is what guarantees each one is only ever owned by a single worker thread (see
+    /// `raw_senders`'s doc) -- a `Vec<Receiver<..>>` field reachable via `&self` would invite
+    /// accidentally sharing one across more than one thread, silently reintroducing the
+    /// cross-thread contention this redesign removes. Callers (`run`/`run_epoll`) move one
+    /// receiver into each spawned worker closure.
     #[allow(unused)]
-    pub fn new(service: S, listener: L, channel_inv: Ghost<C::K>, num_shards: usize) -> (r: Self)
+    pub fn new(service: S, listener: L, channel_inv: Ghost<C::K>, num_shards: usize) -> (r: (
+        Self,
+        Vec<crossbeam_channel::Receiver<L::Raw>>,
+    ))
         requires
             channel_inv@ == service.channel_inv(),
             listener.spec_id() == service.spec_id(),
             num_shards > 0,
         ensures
-            r.spec_server_id() == service.spec_id(),
+            r.0.spec_server_id() == service.spec_id(),
+            r.0.spec_num_shards() == num_shards as int,
+            r.1.len() == num_shards,
     {
-        let id = service.id();
-        let ghost connected_inv = ConnectionsInv { channel_inv: channel_inv@, server_id: id };
-        let mut connected: Vec<RwLock<Vec<C>, ConnectionsInv<C::K>>> = Vec::new();
-        let mut cursors: Vec<PollCursor> = Vec::new();
-        let mut shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>> = Vec::new();
-        let mut shard_registries: Vec<mio::Registry> = Vec::new();
-        let mut sync_cursors: Vec<PollCursor> = Vec::new();
+        let mut raw_senders: Vec<crossbeam_channel::Sender<L::Raw>> = Vec::new();
+        let mut raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>> = Vec::new();
         let mut i = 0;
         while i < num_shards
             invariant
-                connected.len() == i,
-                cursors.len() == i,
-                shard_polls.len() == i,
-                shard_registries.len() == i,
-                sync_cursors.len() == i,
-                forall|j: int|
-                    0 <= j < connected@.len() ==> #[trigger] connected@[j].pred() == connected_inv,
+                i <= num_shards,
+                raw_senders.len() == i,
+                raw_receivers.len() == i,
             decreases num_shards - i,
         {
-            let empty: Vec<C> = Vec::new();
-            assert(connected_inv.inv(empty));
-            connected.push(RwLock::new(empty, Ghost(connected_inv)));
-            cursors.push(PollCursor::new());
-            let poll = mio::Poll::new().expect("mio::Poll::new should not fail");
-            let registry = poll.registry().try_clone().expect(
-                "mio::Registry::try_clone should not fail",
-            );
-            shard_polls.push(RwLock::new(poll, Ghost(TrivialPollInv)));
-            shard_registries.push(registry);
-            sync_cursors.push(PollCursor::new());
+            let (tx, rx) = crossbeam_channel::unbounded();
+            raw_senders.push(tx);
+            raw_receivers.push(rx);
             i += 1;
         }
+        assert(raw_senders.len() == num_shards);
+        assert(raw_receivers.len() == num_shards);
         let accept_poll_raw = mio::Poll::new().expect("mio::Poll::new should not fail");
         let accept_registry = accept_poll_raw.registry().try_clone().expect(
             "mio::Registry::try_clone should not fail",
         );
         let accept_poll = RwLock::new(accept_poll_raw, Ghost(TrivialPollInv));
-        Server {
+        let server = Server {
             service,
             listener,
-            connected,
-            cursors,
+            raw_senders,
             accept_poll,
             accept_registry,
-            shard_polls,
-            shard_registries,
-            sync_cursors,
-        }
+            _marker: PhantomData,
+        };
+        assert(server.spec_num_shards() == num_shards as int);
+        (server, raw_receivers)
     }
 
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
-        &&& self.connected.len() > 0
-        &&& self.cursors.len() == self.connected.len()
-        &&& self.shard_polls.len() == self.connected.len()
-        &&& self.shard_registries.len() == self.connected.len()
-        &&& self.sync_cursors.len() == self.connected.len()
+        &&& self.raw_senders.len() > 0
         &&& self.listener.spec_id() == self.service.spec_id()
-        &&& forall|i: int|
-            0 <= i < self.connected.len() ==> {
-                &&& #[trigger] self.connected[i].pred().server_id == self.service.spec_id()
-                &&& self.connected[i].pred().channel_inv == self.service.channel_inv()
-            }
     }
 
-    /// Number of independent shards `connected` is split across -- exposed so public
-    /// requires/ensures clauses don't have to reach into the (module-private) `connected` field.
+    /// Number of independent shards connections are split across -- exposed so public
+    /// requires/ensures clauses don't have to reach into the (module-private) `raw_senders`
+    /// field.
     pub closed spec fn spec_num_shards(self) -> int {
-        self.connected.len() as int
+        self.raw_senders.len() as int
     }
 
-    /// Number of independent shards `connected` is split across -- also the number of
+    /// Number of independent shards connections are split across -- also the number of
     /// request-processing worker threads the (unverified) `run()` driver spawns.
     pub fn num_shards(&self) -> (r: usize)
         ensures
@@ -404,7 +321,7 @@ impl<S, L, C> Server<S, L, C> where
         proof {
             use_type_invariant(self);
         }
-        self.connected.len()
+        self.raw_senders.len()
     }
 
     pub fn server_id(&self) -> (r: u64)
@@ -417,27 +334,27 @@ impl<S, L, C> Server<S, L, C> where
         self.service.id()
     }
 
-    fn accept(&self, channel: C)
+    /// Sends a just-accepted raw connection to whichever shard's handoff channel owns it. Unlike
+    /// the old `accept`, this never touches anything invariant-relevant -- `L::Raw` carries no
+    /// spec-relevant content at all (see `Listener::Raw`'s doc), so there is nothing to prove
+    /// about the value being sent, only that a shard index is picked in bounds.
+    fn dispatch_raw(&self, shard_key: u64, raw: L::Raw)
         requires
-            channel.constant() == self.service.channel_inv(),
-            channel.spec_id().0 == self.service.spec_id(),
+            self.spec_num_shards() > 0,
     {
         proof {
             use_type_invariant(self);
         }
-        // Which shard a connection lands in is a pure load-balancing choice -- every shard
-        // shares the same `ConnectionsInv`, so any in-bounds index is equally valid here.
-        let shard = (channel.id().1 as usize) % self.connected.len();
-        assert(self.connected[shard as int].pred().server_id == self.service.spec_id());
-        assert(self.connected[shard as int].pred().channel_inv == self.service.channel_inv());
-        let (mut guard, handle) = self.connected[shard].acquire_write();
-        guard.push(channel);
-        assert(ConnectionsInv::inv(self.connected[shard as int].pred(), guard));
-        handle.release_write(guard);
+        let shard = (shard_key as usize) % self.raw_senders.len();
+        let _ = self.raw_senders[shard].send(raw);
     }
 
-    /// Drains up to 10 pending `try_accept`s from the listener into the shards. Meant to be
-    /// driven by a single, dedicated accept thread -- see `run()`.
+    /// Drains up to 10 pending `try_accept_raw`s from the listener, dispatching each to its
+    /// shard's handoff channel. Meant to be driven by a single, dedicated accept thread -- see
+    /// `run()`. Carries no invariant-relevant proof obligations at all anymore: `try_accept_raw`
+    /// makes no invariant-carrying claim about its `Raw` payload, and `dispatch_raw` doesn't
+    /// either, so establishing the channel invariant is now entirely `wrap_raw`'s job, done by
+    /// the receiving worker thread (see `drain_raw`).
     pub fn poll_accept(&self) -> bool {
         proof {
             use_type_invariant(self);
@@ -446,30 +363,14 @@ impl<S, L, C> Server<S, L, C> where
         // so we do this up to 10 times every time
         let mut i = 10;
         while i > 0
+            invariant
+                self.spec_num_shards() > 0,
             decreases i,
         {
             use crate::network::error::TryListenError;
-            // NOTE(ownership-transfer step 3/9): this still runs `try_accept_raw` immediately
-            // followed by `wrap_raw` on the same thread -- deliberately, so this commit
-            // validates the `Listener` trait split in isolation from the accept-thread/
-            // worker-thread ownership-transfer restructuring (step 4+ of
-            // claude-files/ServerOwnershipTransferPlan.md). `wrap_raw` is expected to only ever
-            // fail if the underlying `try_accept_raw` payload is somehow malformed, which
-            // shouldn't happen in practice -- logged and dropped rather than treated as fatal.
-            let raw_result = match self.listener.try_accept_raw() {
-                Ok((_client_id, raw)) => {
-                    self.listener.wrap_raw(raw, Ghost(|l| self.service.channel_inv()))
-                },
-                Err(e) => Err(e),
-            };
-            match raw_result {
-                Ok(channel) => {
-                    assert(channel.constant() == self.service.channel_inv());
-                    proof {
-                        use_type_invariant(self);
-                    }
-                    assert(channel.spec_id().0 == self.service.spec_id());
-                    self.accept(channel)
+            match self.listener.try_accept_raw() {
+                Ok((client_id, raw)) => {
+                    self.dispatch_raw(client_id, raw);
                 },
                 Err(TryListenError::Empty) => {
                     if i == 10 {
@@ -507,23 +408,89 @@ impl<S, L, C> Server<S, L, C> where
         true
     }
 
-    /// Polls, handles, and drops dead connections within a single shard. Meant to be driven by
-    /// one dedicated worker thread per shard -- see `run()`.
-    ///
-    /// Only holds a *read* lock while scanning/handling connections (every op here --
-    /// `try_recv`/`Service::handle`/`send` -- only needs `&self`/`&C`), so the accept thread can
-    /// still register new connections in this shard, and nothing else in the shard is blocked by
-    /// a slow handler. The write lock is only taken afterwards, and only for the `retain()` that
-    /// drops dead connections.
-    ///
-    /// Only scans up to `MAX_POLL_BATCH` connections per call (round-robin across calls via
-    /// `self.cursors[shard]`) instead of every connection in the shard every time (see §3 of
-    /// Performance.md) -- cost per call is bounded regardless of how many idle long-lived
-    /// connections have accumulated in the shard; full coverage is still reached, just spread
-    /// out over multiple calls.
-    pub fn poll_shard(&self, shard: usize, drop_scratch: &mut HashSet<C::Id>) -> bool
+    /// Drains up to `MAX_DRAIN_BATCH` raw connections handed off by the accept thread into
+    /// `connected`, wrapping each via `Listener::wrap_raw` right at drain time -- on the worker
+    /// thread that will own the resulting channel, which is exactly what lets `wrap_raw`'s
+    /// invariant-carrying postcondition get established without needing to prove anything about
+    /// the (ghost-inert) raw payload surviving the channel handoff. Bounded (not
+    /// drain-until-empty) because Verus requires a `decreases` measure and there's no way to give
+    /// one to an unbounded "while channel non-empty" loop -- a raw connection not covered by this
+    /// call's batch simply remains queued for the next call.
+    fn drain_raw(&self, raw_rx: &crossbeam_channel::Receiver<L::Raw>, connected: &mut Vec<C>)
         requires
-            (shard as int) < self.spec_num_shards(),
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let mut i = 0usize;
+        while i < MAX_DRAIN_BATCH
+            invariant
+                self.shard_inv(connected@),
+                self.listener.spec_id() == self.service.spec_id(),
+            decreases MAX_DRAIN_BATCH - i,
+        {
+            match raw_rx.try_recv() {
+                Ok(raw) => {
+                    if let Ok(chan) = self.listener.wrap_raw(
+                        raw,
+                        Ghost(|l| self.service.channel_inv()),
+                    ) {
+                        assert(chan.constant() == self.service.channel_inv());
+                        assert(chan.spec_id().0 == self.listener.spec_id());
+                        assert(chan.spec_id().0 == self.service.spec_id());
+                        connected.push(chan);
+                        assert(self.shard_inv(connected@));
+                    }
+                },
+                Err(_) => {
+                    break;
+                },
+            }
+            i += 1;
+        }
+    }
+
+    /// Round-robins which slice of `connected` `scan_full` actually touches on a given call
+    /// (bounded by `MAX_POLL_BATCH`) instead of scanning every connection every call (see §3 of
+    /// Performance.md). `cursor` is a plain, ordinary local `usize` owned by the single worker
+    /// thread that also owns `connected` -- unlike the old `PollCursor`, it needs no atomic or
+    /// verified-interior-mutability machinery at all, because it is never reachable from any
+    /// other thread even in principle (not just "conventionally" single-owner, as the old
+    /// `PollCursor`'s own doc comment had to caveat).
+    fn advance_cursor(cursor: &mut usize, len: usize, batch: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        if batch == len {
+            // Every index gets visited by the caller's `(start + i) % len` loop for `i in
+            // 0..batch` regardless of `start` once a single batch already covers all of
+            // `connected` -- skip advancing `cursor` at all in that case, same rationale as the
+            // old `PollCursor::advance`.
+            return 0;
+        }
+        let start = *cursor % len;
+        *cursor = (start.wrapping_add(batch)) % len;
+        start
+    }
+
+    /// The scan-batch/handle-request/drop-dead-connections core shared by `poll_shard` (which
+    /// drains new connections into `connected` first, see `drain_raw`) and `poll_shard_epoll`'s
+    /// fallback path (which has already drained via `drain_raw_epoll` by the time it calls this,
+    /// so doesn't drain again here). No lock of any kind: `connected`/`cursor` are owned outright
+    /// by the calling thread.
+    fn scan_full(
+        &self,
+        connected: &mut Vec<C>,
+        cursor: &mut usize,
+        drop_scratch: &mut HashSet<C::Id>,
+    )
+        requires
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
     {
         proof {
             use_type_invariant(self);
@@ -531,34 +498,22 @@ impl<S, L, C> Server<S, L, C> where
 
         }
         drop_scratch.clear();
-        let read_handle = self.connected[shard].acquire_read();
-
-        let ghost connected_pred = self.connected[shard as int].pred();
-        assert(connected_pred.server_id == self.service.spec_id());
-        assert(connected_pred.channel_inv == self.service.channel_inv());
-        let connected = read_handle.borrow();
-        assert(connected_pred.inv(*connected));
-
         let len = connected.len();
         if len == 0 {
-            read_handle.release_read();
             std::thread::sleep(Duration::from_millis(EMPTY_SHARD_BACKOFF_MILLIS));
-            return true;
+            return;
         }
         let batch = if len < MAX_POLL_BATCH {
             len
         } else {
             MAX_POLL_BATCH
         };
-        let start = self.cursors[shard].advance(len, batch);
+        let start = Self::advance_cursor(cursor, len, batch);
 
         let mut i = 0usize;
         while i < batch
             invariant
-                connected_pred == self.connected[shard as int].pred(),
-                connected_pred.server_id == self.service.spec_id(),
-                connected_pred.channel_inv == self.service.channel_inv(),
-                connected_pred.inv(*connected),
+                self.shard_inv(connected@),
                 connected@.len() == len,
                 batch <= len,
             decreases batch - i,
@@ -571,11 +526,10 @@ impl<S, L, C> Server<S, L, C> where
             };
             let channel = &connected[idx];
             assert(*channel == connected@[idx as int]);  // TRIGGER
-            assert(connected_pred.inv(*connected));
             assert({
                 let chan = connected@[idx as int];
-                &&& connected_pred.channel_inv == chan.constant()
-                &&& connected_pred.server_id == chan.spec_id().0
+                &&& self.service.channel_inv() == chan.constant()
+                &&& self.service.spec_id() == chan.spec_id().0
             });
             match channel.try_recv() {
                 Ok(req) => {
@@ -601,29 +555,47 @@ impl<S, L, C> Server<S, L, C> where
             }
             i += 1;
         }
-        read_handle.release_read();
 
         if drop_scratch.is_empty() {
-            return true;
+            return;
         }
-        let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
         let filter_fn = |c: &C| !drop_scratch.contains(&c.id());
         connected.retain(filter_fn);
         proof {
-            let ghost server_inv = self.connected[shard as int].pred();
             assert forall|idx| 0 <= idx < connected@.len() implies {
                 let chan = #[trigger] connected@[idx];
-                &&& server_inv.channel_inv == chan.constant()
-                &&& server_inv.server_id == chan.spec_id().0
+                &&& self.service.channel_inv() == chan.constant()
+                &&& self.service.spec_id() == chan.spec_id().0
             } by {
                 let chan = #[trigger] connected@[idx];
                 old_c.lemma_filter_contains_rev(|c| filter_fn.ensures((&c,), true), chan);
             }
         }
-        handle.release_write(connected);
+    }
 
-        true
+    /// Polls, handles, and drops dead connections within a single shard. Meant to be driven by
+    /// one dedicated worker thread per shard -- see `run()`. First drains any newly-handed-off
+    /// connections (`drain_raw`), then scans/handles/drops via `scan_full`. No lock of any kind:
+    /// `connected`/`cursor` are owned outright by the calling thread (see `Server::raw_senders`'s
+    /// doc for why this is sound).
+    pub fn poll_shard(
+        &self,
+        raw_rx: &crossbeam_channel::Receiver<L::Raw>,
+        connected: &mut Vec<C>,
+        cursor: &mut usize,
+        drop_scratch: &mut HashSet<C::Id>,
+    )
+        requires
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        self.drain_raw(raw_rx, connected);
+        self.scan_full(connected, cursor, drop_scratch);
     }
 }
 
@@ -636,67 +608,68 @@ impl<S, L, C> Server<S, L, C> where
     L: RawFdListener<C>,
     C: RawFdChannel<Id = (u64, u64)>,
  {
-    /// Registers up to `MAX_SYNC_BATCH` connections from `shard`'s list (round-robin across
-    /// calls via `sync_cursors[shard]`, same bounded-batch mitigation as `poll_shard`'s scan --
-    /// see `MAX_SYNC_BATCH`) with that shard's `mio::Poll` registry, tolerating an
-    /// already-registered fd as a no-op. Self-correcting: recomputes from `connected[shard]`'s
-    /// current ground truth every call rather than tracking exact accept/drop transitions -- and
-    /// there is nothing to do on the drop side at all, since closing a socket (which
-    /// `poll_shard`'s `retain` already does for dropped connections) automatically removes it
-    /// from any `Poll`'s interest list, standard kernel behavior.
-    fn sync_shard_registrations(&self, shard: usize)
+    /// Same as `drain_raw`, but also registers each newly-wrapped connection's fd with `registry`
+    /// right when it's wrapped -- exactly once, by the same (single, owning) worker thread that
+    /// creates the connection, rather than needing a separate, repeatedly-re-scanning
+    /// `sync_shard_registrations` pass from a different thread (as the old RwLock-based design
+    /// needed, since only the accept thread could see a connection immediately after `accept()`).
+    /// Ownership transfer makes that whole self-correcting/round-robin registration-sync
+    /// machinery unnecessary: there is no race to guard against anymore, since drain and register
+    /// happen atomically in program order on one thread.
+    fn drain_raw_epoll(
+        &self,
+        raw_rx: &crossbeam_channel::Receiver<L::Raw>,
+        connected: &mut Vec<C>,
+        registry: &mio::Registry,
+    )
         requires
-            (shard as int) < self.spec_num_shards(),
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
     {
         proof {
             use_type_invariant(self);
         }
-        assert(shard < self.shard_registries.len());
-        let read_handle = self.connected[shard].acquire_read();
-        let connected = read_handle.borrow();
-        let len = connected.len();
-        if len == 0 {
-            read_handle.release_read();
-            return;
-        }
-        let batch = if len < MAX_SYNC_BATCH {
-            len
-        } else {
-            MAX_SYNC_BATCH
-        };
-        let start = self.sync_cursors[shard].advance(len, batch);
-
         let mut i = 0usize;
-        while i < batch
+        while i < MAX_DRAIN_BATCH
             invariant
-                i <= batch,
-                batch <= len,
-                len == connected@.len(),
-                shard < self.shard_registries.len(),
-            decreases batch - i,
+                self.shard_inv(connected@),
+                self.listener.spec_id() == self.service.spec_id(),
+            decreases MAX_DRAIN_BATCH - i,
         {
-            assume(start + i < usize::MAX);  // XXX: overflow, mirrors poll_shard's `idx`
-            let idx = (start + i) % len;
-            assert(0 <= idx < connected@.len()) by {
-                assert(len > 0);
-            };
-            let fd = connected[idx].raw_fd();
-            match vlib::mio::mio_register_readable(&self.shard_registries[shard], fd, fd as usize) {
-                Ok(()) => {},
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
-                Err(e) => {
-                    vlib::veprintln!(
-                        "[server|{:>3}]: warning: failed to register fd {fd} with epoll: {e:?}",
-                        self.service.id(),
-                    );
+            match raw_rx.try_recv() {
+                Ok(raw) => {
+                    if let Ok(chan) = self.listener.wrap_raw(
+                        raw,
+                        Ghost(|l| self.service.channel_inv()),
+                    ) {
+                        assert(chan.constant() == self.service.channel_inv());
+                        assert(chan.spec_id().0 == self.listener.spec_id());
+                        assert(chan.spec_id().0 == self.service.spec_id());
+                        let fd = chan.raw_fd();
+                        match vlib::mio::mio_register_readable(registry, fd, fd as usize) {
+                            Ok(()) => {},
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                            Err(e) => {
+                                vlib::veprintln!(
+                                    "[server|{:>3}]: warning: failed to register fd {fd} with epoll: {e:?}",
+                                    self.service.id(),
+                                );
+                            },
+                        }
+                        connected.push(chan);
+                        assert(self.shard_inv(connected@));
+                    }
+                },
+                Err(_) => {
+                    break;
                 },
             }
             i += 1;
         }
-        read_handle.release_read();
     }
 
-    /// Like `poll_shard`, but only calls `try_recv()` on connections whose fd is in `ready` --
+    /// Like `scan_full`, but only calls `try_recv()` on connections whose fd is in `ready` --
     /// every other connection in the shard is skipped with no syscall at all, avoiding the
     /// up-to-`RECV_TIMEOUT_MILLIS` blocking cost `try_recv()` pays on a connection with nothing
     /// to read. `poll_shard_epoll` only calls this once epoll has reported specific fds as
@@ -704,50 +677,41 @@ impl<S, L, C> Server<S, L, C> where
     /// immediately, not block. See `claude-files/UdpReadRegression.md` for the regression this
     /// addresses: without this, every idle connection a shard has ever accepted (UDP never
     /// signals a connection as dead) cost a real blocking timeout on every single poll.
-    fn poll_shard_ready(
+    fn scan_ready(
         &self,
-        shard: usize,
+        connected: &mut Vec<C>,
         ready: &std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
-    ) -> bool
+    )
         requires
-            (shard as int) < self.spec_num_shards(),
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
     {
         proof {
             use_type_invariant(self);
+            broadcast use vstd::seq_lib::group_filter_ensures;
+
         }
         drop_scratch.clear();
-        let read_handle = self.connected[shard].acquire_read();
-
-        let ghost connected_pred = self.connected[shard as int].pred();
-        assert(connected_pred.server_id == self.service.spec_id());
-        assert(connected_pred.channel_inv == self.service.channel_inv());
-        let connected = read_handle.borrow();
-        assert(connected_pred.inv(*connected));
-
         let len = connected.len();
         if len == 0 {
-            read_handle.release_read();
-            return true;
+            return;
         }
         let mut i = 0usize;
         while i < len
             invariant
-                connected_pred == self.connected[shard as int].pred(),
-                connected_pred.server_id == self.service.spec_id(),
-                connected_pred.channel_inv == self.service.channel_inv(),
-                connected_pred.inv(*connected),
+                self.shard_inv(connected@),
                 connected@.len() == len,
             decreases len - i,
         {
             use crate::network::error::TryRecvError;
             let channel = &connected[i];
             assert(*channel == connected@[i as int]);  // TRIGGER
-            assert(connected_pred.inv(*connected));
             assert({
                 let chan = connected@[i as int];
-                &&& connected_pred.channel_inv == chan.constant()
-                &&& connected_pred.server_id == chan.spec_id().0
+                &&& self.service.channel_inv() == chan.constant()
+                &&& self.service.spec_id() == chan.spec_id().0
             });
             if ready.contains(&channel.raw_fd()) {
                 match channel.try_recv() {
@@ -775,74 +739,78 @@ impl<S, L, C> Server<S, L, C> where
             }
             i += 1;
         }
-        read_handle.release_read();
 
         if drop_scratch.is_empty() {
-            return true;
+            return;
         }
-        let (mut connected, handle) = self.connected[shard].acquire_write();
         let ghost old_c = connected@;
         let filter_fn = |c: &C| !drop_scratch.contains(&c.id());
         connected.retain(filter_fn);
         proof {
-            let ghost server_inv = self.connected[shard as int].pred();
             assert forall|idx| 0 <= idx < connected@.len() implies {
                 let chan = #[trigger] connected@[idx];
-                &&& server_inv.channel_inv == chan.constant()
-                &&& server_inv.server_id == chan.spec_id().0
+                &&& self.service.channel_inv() == chan.constant()
+                &&& self.service.spec_id() == chan.spec_id().0
             } by {
                 let chan = #[trigger] connected@[idx];
                 old_c.lemma_filter_contains_rev(|c| filter_fn.ensures((&c,), true), chan);
             }
         }
-        handle.release_write(connected);
-
-        true
     }
 
     /// Blocks (via real epoll/kqueue readiness, with `EPOLL_FALLBACK_MILLIS` as a safety-net
-    /// timeout) until `shard` likely has work, then dispatches only to the connections epoll
-    /// reported as ready (`poll_shard_ready`), falling back to a full `poll_shard` scan only when
-    /// epoll reported nothing at all (see `poll_shard_ready`'s doc and
-    /// `claude-files/UdpReadRegression.md`). Meant to be driven by `run_epoll`'s per-shard worker
-    /// thread in place of `poll_shard` alone.
+    /// timeout) until `shard` likely has work, drains+registers any newly-handed-off connections
+    /// (`drain_raw_epoll`), then dispatches only to the connections epoll reported as ready
+    /// (`scan_ready`), falling back to a full `scan_full` scan only when epoll reported nothing
+    /// at all (see `scan_ready`'s doc and `claude-files/UdpReadRegression.md`). Meant to be driven
+    /// by `run_epoll`'s per-shard worker thread in place of `poll_shard` alone. No lock of any
+    /// kind: `connected`/`cursor`/`registry`/`poll` are all owned outright by the calling thread.
+    #[allow(clippy::too_many_arguments)]
     pub fn poll_shard_epoll(
         &self,
-        shard: usize,
+        raw_rx: &crossbeam_channel::Receiver<L::Raw>,
+        connected: &mut Vec<C>,
+        cursor: &mut usize,
+        registry: &mio::Registry,
+        poll: &mut mio::Poll,
         events_scratch: &mut mio::Events,
         ready_scratch: &mut std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
-    ) -> bool
+    )
         requires
-            (shard as int) < self.spec_num_shards(),
+            self.shard_inv(old(connected)@),
+        ensures
+            self.shard_inv(final(connected)@),
     {
         proof {
             use_type_invariant(self);
         }
-        let (mut poll, poll_handle) = self.shard_polls[shard].acquire_write();
         let _ = poll.poll(events_scratch, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
         vlib::mio::mio_fill_ready_fds(events_scratch, ready_scratch);
-        poll_handle.release_write(poll);
+        self.drain_raw_epoll(raw_rx, connected, registry);
         if ready_scratch.is_empty() {
             // Nothing reported ready before the fallback timeout elapsed -- either the shard is
-            // genuinely idle, or some connection hasn't been registered with epoll yet (a race
-            // with `sync_shard_registrations`, itself bounded/round-robin). Fall back to the
-            // full blind scan so such stragglers are still eventually reached. This is now the
-            // *only* place the O(shard size) * RECV_TIMEOUT_MILLIS blind scan runs, and it only
-            // runs when nothing else was pending anyway -- see `claude-files/UdpReadRegression.md`
-            // for why the previous unconditional-every-call version of this was the regression.
-            return self.poll_shard(shard, drop_scratch);
+            // genuinely idle, or a just-drained connection hasn't been picked up by a subsequent
+            // `Poll::poll` yet. Fall back to the full blind scan so such stragglers are still
+            // eventually reached. This is the only place the O(shard size) * RECV_TIMEOUT_MILLIS
+            // blind scan runs, and it only runs when nothing else was pending anyway -- see
+            // `claude-files/UdpReadRegression.md` for why the previous unconditional-every-call
+            // version of this was the regression.
+            self.scan_full(connected, cursor, drop_scratch);
+            return;
         }
-        self.poll_shard_ready(shard, ready_scratch, drop_scratch)
+        self.scan_ready(connected, ready_scratch, drop_scratch)
     }
 
     /// Blocks (via real epoll/kqueue readiness on the listener fd, with the same fallback
     /// timeout) until a connection is likely pending, then runs the existing, unmodified
-    /// `poll_accept`, then syncs every shard's fd registrations so any newly-accepted
-    /// connections are registered promptly (see `sync_shard_registrations`) -- registering the
-    /// listener fd itself is idempotent (tolerates already-registered) so no separate one-time
-    /// setup is needed. Meant to be driven by `run_epoll`'s accept thread in place of
-    /// `poll_accept` alone.
+    /// `poll_accept` -- registering the listener fd itself is idempotent (tolerates
+    /// already-registered) so no separate one-time setup is needed. Meant to be driven by
+    /// `run_epoll`'s accept thread in place of `poll_accept` alone. No longer needs to sync any
+    /// per-shard epoll registrations after accepting (contrast with the old RwLock-based design's
+    /// `sync_shard_registrations` loop here): registration now happens inline in each worker
+    /// thread's own `drain_raw_epoll`, exactly once per connection, so the accept thread has
+    /// nothing shard-related left to do after accepting.
     pub fn poll_accept_epoll(&self, events_scratch: &mut mio::Events) -> bool
         requires
             self.spec_num_shards() > 0,
@@ -868,18 +836,7 @@ impl<S, L, C> Server<S, L, C> where
         let (mut poll, poll_handle) = self.accept_poll.acquire_write();
         let _ = poll.poll(events_scratch, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
         poll_handle.release_write(poll);
-        let result = self.poll_accept();
-        let num_shards = self.num_shards();
-        let mut shard = 0usize;
-        while shard < num_shards
-            invariant
-                num_shards == self.spec_num_shards(),
-            decreases num_shards - shard,
-        {
-            self.sync_shard_registrations(shard);
-            shard += 1;
-        }
-        result
+        self.poll_accept()
     }
 }
 
@@ -898,18 +855,25 @@ where
     /// blocks until they all exit. The accept thread stops on a fatal listener error; each
     /// worker thread polls its own shard forever -- a dead listener no longer takes down
     /// already-connected clients, unlike the single-loop `poll()` this replaces.
-    pub fn run(&self) {
+    ///
+    /// `raw_receivers` must be exactly the `Vec` returned alongside `self` by `Server::new` --
+    /// one receiver is moved into each spawned worker closure, which then owns it (and its
+    /// shard's `connected: Vec<C>`) for the lifetime of the thread; no other thread ever touches
+    /// either again.
+    pub fn run(&self, raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>>) {
         std::thread::scope(|s| {
             s.spawn(|| while self.poll_accept() {});
-            for shard in 0..self.num_shards() {
+            for raw_rx in raw_receivers {
                 s.spawn(move || {
+                    let mut connected: Vec<C> = Vec::new();
+                    let mut cursor: usize = 0;
                     // Owned by this shard's single dedicated worker thread and reused across
                     // every `poll_shard` call instead of allocating a fresh `HashSet` each time
                     // (the overwhelmingly common case is nothing to drop) -- see
                     // claude-files/UdpConcurrencyBottleneck.md's allocation-cleanup follow-up.
                     let mut drop_scratch = std::collections::HashSet::new();
                     loop {
-                        self.poll_shard(shard, &mut drop_scratch);
+                        self.poll_shard(&raw_rx, &mut connected, &mut cursor, &mut drop_scratch);
                     }
                 });
             }
@@ -932,7 +896,12 @@ where
     /// `poll_shard_epoll`) instead of `run`'s busy-backoff, structurally resolving §9/§10 of
     /// Performance.md instead of just mitigating them. Only usable when both `L` and `C` have a
     /// real OS fd (TCP/UDP) -- the in-process `modelled` network keeps using `run`.
-    pub fn run_epoll(&self) {
+    ///
+    /// Same `raw_receivers` contract as `run`. Each worker thread now also owns its own
+    /// `mio::Poll`/`Registry` pair as plain local state -- unlike the old RwLock-wrapped
+    /// `shard_polls`/`shard_registries` `Server` fields these replace, nothing else ever needs to
+    /// reach them, so there is no reason for them to be anything but ordinary locals anymore.
+    pub fn run_epoll(&self, raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>>) {
         std::thread::scope(|s| {
             s.spawn(|| {
                 // Owned by the accept thread and reused across calls instead of allocating a
@@ -942,8 +911,16 @@ where
                 let mut events_scratch = mio::Events::with_capacity(1);
                 while self.poll_accept_epoll(&mut events_scratch) {}
             });
-            for shard in 0..self.num_shards() {
+            for raw_rx in raw_receivers {
                 s.spawn(move || {
+                    let mut connected: Vec<C> = Vec::new();
+                    let mut cursor: usize = 0;
+                    let poll = mio::Poll::new().expect("mio::Poll::new should not fail");
+                    let registry = poll
+                        .registry()
+                        .try_clone()
+                        .expect("mio::Registry::try_clone should not fail");
+                    let mut poll = poll;
                     // Same rationale as `run`'s `drop_scratch` -- owned by this shard's single
                     // worker thread, reused across calls instead of allocating fresh every poll.
                     let mut events_scratch = mio::Events::with_capacity(MAX_POLL_BATCH);
@@ -951,7 +928,11 @@ where
                     let mut drop_scratch = std::collections::HashSet::new();
                     loop {
                         self.poll_shard_epoll(
-                            shard,
+                            &raw_rx,
+                            &mut connected,
+                            &mut cursor,
+                            &registry,
+                            &mut poll,
                             &mut events_scratch,
                             &mut ready_scratch,
                             &mut drop_scratch,

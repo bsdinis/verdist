@@ -96,8 +96,9 @@ pub trait Listener<C> where C: Channel<Id = (u64, u64)> {
     /// cross a `crossbeam_channel` handoff to another thread (see `vlib::crossbeam`'s
     /// `Sender::send`/`Receiver::try_recv` specs, which make no claim about a value's content
     /// surviving the trip -- `Raw` must therefore be a type no proof ever depends on the
-    /// content of).
-    type Raw;
+    /// content of). `Send` because it is, by construction, always handed off across the
+    /// accept-thread/worker-thread boundary via a `crossbeam_channel`.
+    type Raw: Send;
 
     /// Pure OS-level accept: no `Ghost` predicate, no invariant-carrying postcondition beyond
     /// ordinary `Result` well-typedness. Meant to be called from a dedicated accept thread; the

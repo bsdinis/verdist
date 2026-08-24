@@ -130,10 +130,10 @@ impl Service for EchoService {
 
 pub type EchoServer<L, C> = Server<EchoService, L, C>;
 
-pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> EchoServer<
-    L,
-    C,
-> where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> (
+    EchoServer<L, C>,
+    Vec<crossbeam_channel::Receiver<L::Raw>>,
+) where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
     requires
         listener.spec_id() == server_id,
         num_threads > 0,

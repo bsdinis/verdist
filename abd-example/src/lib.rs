@@ -315,16 +315,13 @@ pub mod server {
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
-        let server = Arc::new(create_server::<_, _, ML, RL>(
-            server_ids,
-            server_id,
-            listener,
-            num_threads,
-        ));
+        let (server, raw_receivers) =
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+        let server = Arc::new(server);
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
-            server.run();
+            server.run(raw_receivers);
         });
     }
 
@@ -341,10 +338,11 @@ pub mod server {
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
-        let server = create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+        let (server, raw_receivers) =
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
-        server.run();
+        server.run(raw_receivers);
     }
 
     /// Same as `run_server`, but drives the server with `Server::run_epoll` (real epoll-driven
@@ -364,9 +362,10 @@ pub mod server {
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
-        let server = create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+        let (server, raw_receivers) =
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
-        server.run_epoll();
+        server.run_epoll(raw_receivers);
     }
 }

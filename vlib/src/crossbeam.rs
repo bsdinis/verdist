@@ -49,4 +49,12 @@ pub assume_specification<T>[ crossbeam_channel::Receiver::<T>::try_recv ](
     no_unwind
 ;
 
+// Same blanket/minimal rationale as `send`/`try_recv` above.
+pub assume_specification<T>[ crossbeam_channel::unbounded ]() -> (r: (
+    crossbeam_channel::Sender<T>,
+    crossbeam_channel::Receiver<T>,
+))
+    no_unwind
+;
+
 } // verus!

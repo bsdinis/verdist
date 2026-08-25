@@ -1,14 +1,17 @@
-//! `EpochAtomicPtr<T>`: a lock-free-for-readers, quiescence-reclaimed "current version" register.
+//! `EpochAtomicPtr<T>`: a fully lock-free "current version" register, reclaimed by quiescence.
 //!
-//! Owns a fixed-size (chosen once at `new()`, never resized) pool of `Slot<T>` and a fixed-size
-//! pool of `ReaderSlot`, plus a plain `AtomicUsize` naming which slot is current. Reading never
-//! blocks on a writer: `pin` takes a plain atomic load, a proof-only `Frac` split, and a
-//! `ptr_ref2` call outside any invariant (see `reclaim::frac_ptr`/`reclaim::slot` module docs for
-//! why this needs no new axioms). Writing serializes against *other writers only* (never against
-//! readers) via a plain `vstd::rwlock::RwLock` guarding just the small, exclusively-writer-owned
-//! bookkeeping (which slots are retired and pending reclaim) -- this is a deliberate, pragmatic
-//! choice: it doesn't touch the reader path at all, and ABD's actual bottleneck (per the
-//! motivating profiling) was reader-vs-writer contention, not writer-vs-writer.
+//! Owns a fixed-size (chosen once at `new()`, never resized) pool of `Slot<T>`, a matching pool
+//! of per-slot `claimed` bools, and a fixed-size pool of `ReaderSlot`, plus a plain `AtomicUsize`
+//! naming which slot is current. No lock anywhere, on either path:
+//! - Reading (`pin`) takes a plain atomic load, a proof-only `Frac` split, and a `ptr_ref2` call
+//!   outside any invariant (see `reclaim::frac_ptr`/`reclaim::slot` module docs for why this
+//!   needs no new axioms).
+//! - Writing (`write`) races other writers via `compare_exchange` on individual `claimed` bools
+//!   to exclusively own *some* non-current slot -- no shared critical section, no blocking: a
+//!   writer that loses a race just tries a different slot. This was a deliberate rework (an
+//!   earlier version used a `vstd::rwlock::RwLock` around writer-only bookkeeping; a lock there
+//!   defeated the actual point of building this instead of just fixing the RwLock the whole
+//!   effort exists to remove).
 //!
 //! Reclaim safety argument (informal -- see the TRUST ESCAPE note below for what isn't yet a
 //! real Verus proof): a retired slot's accumulator can only be fully drained back to `frac() ==
@@ -17,18 +20,14 @@
 //! observed unpinned at least once *after* a retirement, no reader can still be holding a share
 //! from before that retirement (a reader pinned since before the retirement will eventually
 //! unpin *before* it could pin again and see anything newer; a reader observed already unpinned
-//! trivially clears every retirement that preceded the observation). One joint scan over all
-//! readers therefore clears *every* currently-pending retirement at once, so `pending` is a
-//! plain list rather than needing per-slot per-reader bookkeeping.
+//! trivially clears every retirement that preceded the observation).
 //!
 //! TRUST ESCAPE: this module does not yet *prove* the quiescence argument above in Verus (that
 //! would need per-reader epoch publication reintroduced, reversing the step-2 simplification, or
 //! an equivalent formalization) -- it relies on the same class of `assume` already approved for
-//! `Slot::return_share`, applied here to justify (a) that `split_share`'s result is always
-//! `Some` when `idx` is the current index, and (b) that a retired slot's `frac()` has reached 1
-//! once every reader has been observed quiescent. Both are documented in place; discharging them
-//! for real is exactly the "collector" follow-up work flagged in the `epoch_reclamation_status`
-//! memory.
+//! `Slot::return_share`, applied here to justify that a retired slot's `frac()` has reached 1
+//! once every reader has been observed quiescent. Documented in place; discharging it for real
+//! is exactly the "collector" follow-up work flagged in the `epoch_reclamation_status` memory.
 use crate::reclaim::frac_ptr;
 use crate::reclaim::reader::ReaderSlot;
 use crate::reclaim::slot::Slot;
@@ -36,14 +35,13 @@ use crate::reclaim::slot::Slot;
 use crate::reclaim::slot::SlotState;
 
 use vstd::atomic_ghost::atomic_with_ghost;
+use vstd::atomic_ghost::AtomicBool;
 use vstd::atomic_ghost::AtomicInvariantPredicate;
 use vstd::atomic_ghost::AtomicUsize;
 use vstd::prelude::*;
 use vstd::raw_ptr::PointsTo;
 use vstd::raw_ptr::SharedReference;
 use vstd::resource::frac_opt::Frac;
-use vstd::rwlock::RwLock;
-use vstd::rwlock::RwLockPredicate;
 
 verus! {
 
@@ -55,30 +53,27 @@ impl AtomicInvariantPredicate<(), usize, ()> for TrivialUsizePred {
     }
 }
 
-// Which slots have been swapped out of `current` but not yet confirmed reclaimable. Exclusive to
-// the writer path via `write_lock`; never touched by readers.
-pub struct PendingRetirements {
-    pub indices: Vec<usize>,
-}
+pub struct TrivialBoolPred;
 
-// Parametrized (not trivial) so that every index ever pushed into `pending.indices` is provably
-// in-bounds for `self.slots` -- avoids needing an `assume` at each read site in `write()`'s
-// reclaim loop.
-pub struct PendingPred {
-    pub num_slots: nat,
-}
-
-impl RwLockPredicate<PendingRetirements> for PendingPred {
-    open spec fn inv(self, v: PendingRetirements) -> bool {
-        forall|i: int| 0 <= i < v.indices@.len() ==> #[trigger] v.indices@[i] < self.num_slots
+impl AtomicInvariantPredicate<(), bool, ()> for TrivialBoolPred {
+    open spec fn atomic_inv(_k: (), _v: bool, _g: ()) -> bool {
+        true
     }
 }
 
 pub struct EpochAtomicPtr<T> {
+    // Which slot is the currently-published version. Written only via `swap`, whose returned
+    // previous value tells a writer exactly which slot it just displaced.
     current: AtomicUsize<(), (), TrivialUsizePred>,
+    // claimed[i] == true iff slot i is "owned" -- either it *is* `current`, or some writer holds
+    // it exclusively while retiring/reclaiming/repurposing it. false means "available for any
+    // writer to try_claim". No lock: writers race via `compare_exchange` on individual bools, so
+    // at most one writer ever owns a given slot at a time; `current`'s slot is always claimed
+    // (never independently chosen by two writers), by induction from `try_claim` gating every
+    // path that can make a slot become `current`.
+    claimed: Vec<AtomicBool<(), (), TrivialBoolPred>>,
     slots: Vec<Slot<T>>,
     readers: Vec<ReaderSlot>,
-    write_lock: RwLock<PendingRetirements, PendingPred>,
 }
 
 // A pin token + borrowed share: obtained from `EpochAtomicPtr::pin`, consumed by `unpin`.
@@ -121,7 +116,8 @@ impl<T> EpochAtomicPtr<T> {
     closed spec fn inv(self) -> bool {
         &&& self.current.well_formed()
         &&& self.slots@.len() > 0
-        &&& self.write_lock.pred().num_slots == self.slots@.len()
+        &&& self.claimed@.len() == self.slots@.len()
+        &&& forall|i: int| 0 <= i < self.claimed@.len() ==> #[trigger] self.claimed@[i].well_formed()
     }
 
     pub closed spec fn num_slots(self) -> nat {
@@ -143,14 +139,19 @@ impl<T> EpochAtomicPtr<T> {
     {
         let mut slots: Vec<Slot<T>> = Vec::new();
         slots.push(Slot::new_occupied(v));
+        let mut claimed: Vec<AtomicBool<(), (), TrivialBoolPred>> = Vec::new();
+        claimed.push(AtomicBool::new(Ghost(()), true, Tracked(())));
         let mut i: usize = 1;
         while i < num_slots
             invariant
                 slots.len() == i,
+                claimed.len() == i,
                 i <= num_slots,
+                forall|j: int| 0 <= j < claimed@.len() ==> #[trigger] claimed@[j].well_formed(),
             decreases num_slots - i,
         {
             slots.push(Slot::new_vacant());
+            claimed.push(AtomicBool::new(Ghost(()), false, Tracked(())));
             i += 1;
         }
         let mut readers: Vec<ReaderSlot> = Vec::new();
@@ -165,13 +166,38 @@ impl<T> EpochAtomicPtr<T> {
             j += 1;
         }
         let current = AtomicUsize::new(Ghost(()), 0, Tracked(()));
-        let write_lock = RwLock::new(
-            PendingRetirements { indices: Vec::new() },
-            Ghost(PendingPred { num_slots: slots.len() as nat }),
-        );
-        let result = EpochAtomicPtr { current, slots, readers, write_lock };
+        let result = EpochAtomicPtr { current, claimed, slots, readers };
         assert(result.inv());
         result
+    }
+
+    // Try to become the exclusive owner of slot `n` (either a fresh-vacant slot never used, or a
+    // retired-but-not-yet-reclaimed one). Succeeds iff no one else currently owns it; the loser
+    // of a race simply tries a different slot. `current`'s slot is always claimed (see `inv`'s
+    // doc comment above), so this can never race with `n` becoming `current` out from under it.
+    fn try_claim(&self, n: usize) -> (result: bool)
+        requires
+            n < self.claimed.len(),
+    {
+        proof {
+            use_type_invariant(self);
+            assert(self.claimed@[n as int].well_formed());
+        }
+        let r = atomic_with_ghost!(&self.claimed[n] => compare_exchange(false, true); ghost g => {});
+        r.is_ok()
+    }
+
+    // Marks slot `n` available for the next writer to claim. Called only on the slot just
+    // displaced from `current` by a `swap`, so it is never called while `n` is still `current`.
+    fn release(&self, n: usize)
+        requires
+            n < self.claimed.len(),
+    {
+        proof {
+            use_type_invariant(self);
+            assert(self.claimed@[n as int].well_formed());
+        }
+        atomic_with_ghost!(&self.claimed[n] => store(false); ghost g => {});
     }
 
     fn all_readers_quiescent(&self) -> (result: bool) {
@@ -243,14 +269,17 @@ impl<T> EpochAtomicPtr<T> {
         }
     }
 
-    // Publishes a new value, retiring the previously-current slot. Serializes against other
-    // writers (never against readers) via `write_lock`.
+    // Publishes a new value, retiring the previously-current slot. Lock-free: writers never block
+    // on each other via any shared critical section -- each one races (via `try_claim`'s
+    // `compare_exchange`) to exclusively own *some* non-current slot, and from that point on
+    // touches only the slot(s) and reader-quiescence state it needs, never anyone else's claim.
     //
-    // The spin-retry loop below is intentionally allowed to not terminate (a liveness, not
-    // safety, concern -- see its comment): it only fails to make progress if a reader is pinned
-    // forever or `num_slots` was chosen too small.
+    // The two spin loops below (claiming a slot, then waiting for quiescence if it needs
+    // reclaiming) are intentionally allowed to not terminate (a liveness, not safety, concern):
+    // the first only spins if every slot is currently claimed by other writers or is `current`
+    // (bounded by how many writers are concurrently active vs. `num_slots`); the second only
+    // spins if a reader is pinned forever.
     #[verifier::exec_allows_no_decreases_clause]
-    #[allow(unused_assignments)]
     pub fn write(&self, v: T)
         requires
             core::mem::size_of::<T>() != 0,
@@ -258,112 +287,73 @@ impl<T> EpochAtomicPtr<T> {
         proof {
             use_type_invariant(self);
         }
-        let (mut pending, handle) = self.write_lock.acquire_write();
 
-        // Spin until a free slot turns up. Reclaiming pending retirements only requires every
-        // reader to be observed quiescent *once* (see module docs) -- readers pin briefly per
-        // request, so in practice this loop runs at most a handful of iterations; it only spins
-        // indefinitely in the pathological case of a reader pinned forever, which is a liveness
-        // (not safety) concern, and only bites if `num_slots` was chosen too small to begin with.
-        let mut idx: usize = 0;
-        let mut retired_idx: usize = 0;
-        loop
+        // Claim exclusive ownership of some non-current slot.
+        let mut claimed_idx: Option<usize> = None;
+        while claimed_idx.is_none()
             invariant
-                idx < self.slots.len(),
-                retired_idx < self.slots.len(),
-                self.write_lock.pred().inv(pending),
-                self.write_lock.pred().num_slots == self.slots.len(),
+                self.claimed.len() == self.slots.len(),
+                claimed_idx is Some ==> claimed_idx->0 < self.slots.len(),
         {
-            if self.all_readers_quiescent() {
-                let mut k: usize = 0;
-                while k < pending.indices.len()
-                    invariant
-                        k <= pending.indices.len(),
-                        self.write_lock.pred().inv(pending),
-                        self.write_lock.pred().num_slots == self.slots.len(),
-                    decreases pending.indices.len() - k,
-                {
-                    // No trust escape: `self.write_lock.pred().inv(pending)` (from
-                    // `PendingPred`, tied to `self.slots.len()` via the type invariant) already
-                    // proves every entry of `pending.indices` is in-bounds.
-                    let idx = pending.indices[k];
-                    let (ptr, Tracked(occupant)) = self.slots[idx].take();
-                    // No trust escape for occupancy: `Slot::take`'s postcondition
-                    // `ptr.addr() != 0 ==> occupant is Occupied` (bidirectional `SlotPred`, see
-                    // `slot.rs`) makes this an ordinary executable branch instead of an assumed
-                    // ghost-shape fact. A `Vacant` result here would mean this index was
-                    // reclaimed twice somehow -- shouldn't happen given each `pending` entry is
-                    // consumed exactly once by this loop, but if it ever did, there's simply
-                    // nothing to free, so skipping is trivially safe (not even a leak).
-                    if ptr.addr() != 0 {
-                        let tracked occupant = occupant;
-                        // TRUST ESCAPE (explicitly approved by the user; the ONE remaining
-                        // trust escape in this whole module -- everything else that used to be
-                        // assumed here is now a real proof, see the comments above and in
-                        // `slot.rs`'s `SlotPred`/`take`/`split_share`): every reader has been
-                        // observed quiescent since this slot was retired, so (informally) no
-                        // share can still be outstanding, i.e. `occupant`'s accumulator has
-                        // returned to `frac() == 1`. Formalizing this for real needs a ghost
-                        // mechanism connecting N independent `ReaderSlot` cells' "currently
-                        // unpinned" observations to this ONE `Frac` accumulator's fraction --
-                        // e.g. a `tokenized_state_machine_vstd!`-based protocol (the same tool
-                        // `vstd::rwlock` itself is built on) tracking live shares as a
-                        // multiset. That is a substantial, separate undertaking (comparable to
-                        // formalizing vstd's own `RwLock`), not something safely shortcut here.
-                        // See the `epoch_reclamation_status` memory for the fuller writeup.
-                        proof {
-                            assume(occupant->Occupied_frac.frac() == 1 as real);
-                        }
-                        let _ = crate::reclaim::slot::reclaim(ptr, Tracked(occupant));
-                    }
-                    k += 1;
-                }
-                pending.indices = Vec::new();
-            }
             let current_idx = self.current_index();
-            let mut chosen: Option<usize> = None;
             let mut n: usize = 0;
             while n < self.slots.len()
                 invariant
                     n <= self.slots.len(),
-                    chosen is Some ==> chosen->0 < self.slots.len(),
+                    self.claimed.len() == self.slots.len(),
+                    claimed_idx is Some ==> claimed_idx->0 < self.slots.len(),
                 decreases self.slots.len() - n,
             {
-                let mut already_pending = false;
-                let mut p: usize = 0;
-                while p < pending.indices.len()
-                    invariant
-                        p <= pending.indices.len(),
-                    decreases pending.indices.len() - p,
-                {
-                    if pending.indices[p] == n {
-                        already_pending = true;
-                        break;
-                    }
-                    p += 1;
-                }
-                if n != current_idx && !already_pending {
-                    chosen = Some(n);
+                if n != current_idx && self.try_claim(n) {
+                    claimed_idx = Some(n);
                     break;
                 }
                 n += 1;
             }
-            if let Some(i) = chosen {
-                idx = i;
-                retired_idx = current_idx;
-                break;
+        }
+        let idx = claimed_idx.unwrap();
+
+        // If the claimed slot still holds a previous occupant (it was retired by some earlier
+        // writer but not yet reclaimed), wait for every reader to be observed quiescent at least
+        // once, then reclaim it. A freshly-claimed, never-used slot is already vacant, so this is
+        // skipped entirely for it.
+        if self.slots[idx].is_occupied() {
+            while !self.all_readers_quiescent() {}
+            let (ptr, Tracked(occupant)) = self.slots[idx].take();
+            // No trust escape for occupancy: `Slot::take`'s postcondition
+            // `ptr.addr() != 0 ==> occupant is Occupied` (bidirectional `SlotPred`, see
+            // `slot.rs`) makes this an ordinary executable branch instead of an assumed
+            // ghost-shape fact. A `Vacant` result here would mean this slot was reclaimed twice
+            // somehow -- shouldn't happen given exclusive claiming, but if it ever did, there's
+            // simply nothing to free, so skipping is trivially safe (not even a leak).
+            if ptr.addr() != 0 {
+                let tracked occupant = occupant;
+                // TRUST ESCAPE (explicitly approved by the user; the ONE remaining trust escape
+                // in this whole module -- everything else that used to be assumed here is now a
+                // real proof, see the comments above and in `slot.rs`'s
+                // `SlotPred`/`take`/`split_share`): every reader has been observed quiescent
+                // since this slot was retired, so (informally) no share can still be outstanding,
+                // i.e. `occupant`'s accumulator has returned to `frac() == 1`. Formalizing this
+                // for real needs a ghost mechanism connecting N independent `ReaderSlot` cells'
+                // "currently unpinned" observations to this ONE `Frac` accumulator's fraction --
+                // e.g. a `tokenized_state_machine_vstd!`-based protocol (the same tool
+                // `vstd::rwlock` itself is built on) tracking live shares as a multiset. That is a
+                // substantial, separate undertaking (comparable to formalizing vstd's own
+                // `RwLock`), not something safely shortcut here. See the
+                // `epoch_reclamation_status` memory for the fuller writeup.
+                proof {
+                    assume(occupant->Occupied_frac.frac() == 1 as real);
+                }
+                let _ = crate::reclaim::slot::reclaim(ptr, Tracked(occupant));
             }
         }
 
         self.slots[idx].put(v, Tracked(SlotState::Vacant));
-        atomic_with_ghost!(&self.current => store(idx); ghost g => {});
-        pending.indices.push(retired_idx);
-        assert(self.write_lock.pred().inv(pending)) by {
-            assert forall|i: int| 0 <= i < pending.indices@.len() implies #[trigger] pending.indices@[i]
-                < self.write_lock.pred().num_slots by {}
-        };
-
-        handle.release_write(pending);
+        // `swap` (not `store`) so we know *exactly* which slot we just displaced, regardless of
+        // what other writers concurrently do to `current` -- `store` would risk releasing the
+        // claim on the wrong slot if we'd merely re-read `current` afterwards.
+        let old_current = atomic_with_ghost!(&self.current => swap(idx); ghost g => {});
+        self.release(old_current % self.slots.len());
     }
 }
 

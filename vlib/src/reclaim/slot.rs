@@ -148,6 +148,18 @@ impl<T> Slot<T> {
         });
     }
 
+    // Cheap, non-mutating peek: is something currently installed? Advisory only (the actual
+    // atomic op that acts on the slot -- `take`, `split_share` -- re-derives occupancy itself via
+    // the same `ptr.addr() != 0` check against the *bidirectional* `SlotPred`, so a stale read
+    // here can never cause unsound behavior, only a wasted round-trip).
+    pub fn is_occupied(&self) -> (result: bool) {
+        proof {
+            use_type_invariant(self);
+        }
+        let ptr = atomic_with_ghost!(&self.gate => load(); ghost g => {});
+        ptr.addr() != 0
+    }
+
     // Peels off half of the currently-installed occupant's accumulator, if any, together with
     // the physical pointer it currently gates (captured in the *same* atomic operation, so
     // they're guaranteed consistent -- the share's `resource().ptr()` matches the returned

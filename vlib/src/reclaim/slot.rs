@@ -48,11 +48,23 @@ pub struct SlotPred<T> {
     dummy: core::marker::PhantomData<T>,
 }
 
+// Bidirectional: `Vacant` iff the physical pointer is null. This is what lets callers use a
+// plain, executable `ptr.addr() != 0` check as a stand-in for "is this ghost state Occupied",
+// instead of needing to pattern-match ghost data and assume the "shouldn't happen" arm away
+// (see `Slot::take`/`split_share` and `EpochAtomicPtr::pin`/`write`, which rely on this).
 impl<T> AtomicInvariantPredicate<(), *mut T, SlotState<T>> for SlotPred<T> {
     open spec fn atomic_inv(_k: (), v: *mut T, g: SlotState<T>) -> bool {
-        g is Occupied ==> {
-            &&& g->Occupied_frac.resource().ptr() == v
-            &&& g->Occupied_frac.resource().is_init()
+        match g {
+            SlotState::Vacant => v.addr() == 0,
+            SlotState::Occupied { frac, dealloc } => {
+                &&& frac.resource().ptr() == v
+                &&& frac.resource().is_init()
+                &&& v.addr() != 0
+                &&& dealloc.addr() == v.addr()
+                &&& dealloc.size() == core::mem::size_of::<T>()
+                &&& dealloc.align() == core::mem::align_of::<T>()
+                &&& dealloc.provenance() == frac.resource().ptr()@.provenance
+            },
         }
     }
 }
@@ -95,9 +107,15 @@ impl<T> Slot<T> {
     // its place.
     pub fn take(&self) -> (result: (*mut T, Tracked<SlotState<T>>))
         ensures
+            result.0.addr() != 0 ==> result.1@ is Occupied,
             result.1@ is Occupied ==> {
                 &&& result.1@->Occupied_frac.resource().ptr() == result.0
                 &&& result.1@->Occupied_frac.resource().is_init()
+                &&& result.1@->Occupied_dealloc.addr() == result.0.addr()
+                &&& result.1@->Occupied_dealloc.size() == core::mem::size_of::<T>()
+                &&& result.1@->Occupied_dealloc.align() == core::mem::align_of::<T>()
+                &&& result.1@->Occupied_dealloc.provenance()
+                    == result.1@->Occupied_frac.resource().ptr()@.provenance
             },
     {
         proof {
@@ -138,6 +156,7 @@ impl<T> Slot<T> {
     // that its current index always names an occupied slot).
     pub fn split_share(&self) -> (result: (*mut T, Tracked<Option<Frac<PointsTo<T>>>>))
         ensures
+            result.0.addr() != 0 ==> result.1@ is Some,
             result.1@ is Some ==> {
                 &&& result.1@->Some_0.resource().ptr() == result.0
                 &&& result.1@->Some_0.resource().is_init()
@@ -160,20 +179,20 @@ impl<T> Slot<T> {
         (ptr, Tracked(share_out))
     }
 
-    // Merges a previously-split share back in. Requires the slot to currently be `Occupied` by
-    // the *same* resource the share came from (same `Frac` location) -- true by construction as
-    // long as the caller only ever returns a share to the slot it was split from, before that
-    // slot has been reinstalled with something else in between.
+    // Merges a previously-split share back in, *if* the slot is still occupied by the same
+    // resource the share came from (same `Frac` location) -- true by construction as long as
+    // the caller only ever returns a share to the slot it was split from, before that slot has
+    // been reinstalled with something else in between (the collector's `ReaderSlot`-quiescence
+    // reasoning is what guarantees that in practice -- see `EpochAtomicPtr`'s module docs).
     //
-    // TRUST ESCAPE (explicitly approved by the user, see `feedback_no_unapproved_trust_escapes`
-    // / `epoch_reclamation_status` memory): `Frac::combine` requires `frac.id() == share.id()`,
-    // i.e. that this slot hasn't been reinstalled with a different occupant since the matching
-    // `split_share` produced `share` -- and reaching the `Vacant` arm at all would mean exactly
-    // that happened. Neither fact is provable from `Slot`'s own local state; both are genuinely
-    // cross-module facts that only the collector's `ReaderSlot`-quiescence reasoning (C6) can
-    // establish, by never reinstalling a slot while a reader could still be between its
-    // `split_share`/`return_share` pair. Assumed here pending that witness -- revisit once C6
-    // exists and either discharges these `assume`s with a real proof or documents why it can't.
+    // No trust escape needed: rather than *assuming* the slot is still occupied by a
+    // matching-id resource, this makes both "shouldn't happen" cases (reinstalled with a
+    // different occupant, or already vacated) total, safe fallbacks instead of assumed-away
+    // branches. In either case `share` is simply dropped without being combined back -- at
+    // worst this leaks that one fraction forever (the accumulator's `frac()` can never reach 1
+    // again for that generation, so it can never be reclaimed) -- a liveness degradation, never
+    // a soundness issue, and one that (given correct quiescence-gated retirement) never actually
+    // happens.
     pub fn return_share(&self, Tracked(share): Tracked<Frac<PointsTo<T>>>) {
         proof {
             use_type_invariant(self);
@@ -181,14 +200,12 @@ impl<T> Slot<T> {
         atomic_with_ghost!(&self.gate => load(); ghost g => {
             g = match g {
                 SlotState::Occupied { frac: mut frac, dealloc } => {
-                    assume(frac.id() == share.id());
-                    frac.combine(share);
+                    if frac.id() == share.id() {
+                        frac.combine(share);
+                    }
                     SlotState::Occupied { frac, dealloc }
                 },
-                SlotState::Vacant => {
-                    assume(false);
-                    proof_from_false()
-                },
+                SlotState::Vacant => SlotState::Vacant,
             };
         });
     }

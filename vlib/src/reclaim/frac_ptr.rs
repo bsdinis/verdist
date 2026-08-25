@@ -34,9 +34,14 @@ pub fn epoch_alloc<T>(v: T) -> (result: (*mut T, Tracked<PointsTo<T>>, Tracked<D
     requires
         core::mem::size_of::<T>() != 0,
     ensures
+        result.0.addr() != 0,
         result.1@.ptr() == result.0,
         result.1@.is_init(),
         result.1@.value() == v,
+        result.2@.addr() == result.0.addr(),
+        result.2@.size() == core::mem::size_of::<T>(),
+        result.2@.align() == core::mem::align_of::<T>(),
+        result.2@.provenance() == result.1@.ptr()@.provenance,
     opens_invariants none
 {
     layout_for_type_is_valid::<T>();
@@ -46,6 +51,9 @@ pub fn epoch_alloc<T>(v: T) -> (result: (*mut T, Tracked<PointsTo<T>>, Tracked<D
     );
     let ptr: *mut T = cast_ptr_to_thin_ptr::<u8, T>(p);
     let tracked mut points_to = points_to_raw.into_typed::<T>(ptr.addr());
+    proof {
+        points_to.is_nonnull();
+    }
     ptr_mut_write(ptr, Tracked(&mut points_to), v);
     (ptr, Tracked(points_to), Tracked(dealloc))
 }

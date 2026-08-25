@@ -61,11 +61,16 @@ pub struct PendingRetirements {
     pub indices: Vec<usize>,
 }
 
-pub struct TrivialPendingPred;
+// Parametrized (not trivial) so that every index ever pushed into `pending.indices` is provably
+// in-bounds for `self.slots` -- avoids needing an `assume` at each read site in `write()`'s
+// reclaim loop.
+pub struct PendingPred {
+    pub num_slots: nat,
+}
 
-impl RwLockPredicate<PendingRetirements> for TrivialPendingPred {
-    open spec fn inv(self, _v: PendingRetirements) -> bool {
-        true
+impl RwLockPredicate<PendingRetirements> for PendingPred {
+    open spec fn inv(self, v: PendingRetirements) -> bool {
+        forall|i: int| 0 <= i < v.indices@.len() ==> #[trigger] v.indices@[i] < self.num_slots
     }
 }
 
@@ -73,7 +78,7 @@ pub struct EpochAtomicPtr<T> {
     current: AtomicUsize<(), (), TrivialUsizePred>,
     slots: Vec<Slot<T>>,
     readers: Vec<ReaderSlot>,
-    write_lock: RwLock<PendingRetirements, TrivialPendingPred>,
+    write_lock: RwLock<PendingRetirements, PendingPred>,
 }
 
 // A pin token + borrowed share: obtained from `EpochAtomicPtr::pin`, consumed by `unpin`.
@@ -116,6 +121,7 @@ impl<T> EpochAtomicPtr<T> {
     closed spec fn inv(self) -> bool {
         &&& self.current.well_formed()
         &&& self.slots@.len() > 0
+        &&& self.write_lock.pred().num_slots == self.slots@.len()
     }
 
     pub closed spec fn num_slots(self) -> nat {
@@ -161,7 +167,7 @@ impl<T> EpochAtomicPtr<T> {
         let current = AtomicUsize::new(Ghost(()), 0, Tracked(()));
         let write_lock = RwLock::new(
             PendingRetirements { indices: Vec::new() },
-            Ghost(TrivialPendingPred),
+            Ghost(PendingPred { num_slots: slots.len() as nat }),
         );
         let result = EpochAtomicPtr { current, slots, readers, write_lock };
         assert(result.inv());
@@ -200,6 +206,15 @@ impl<T> EpochAtomicPtr<T> {
         v % self.slots.len()
     }
 
+    // Liveness-only retry, no trust escape: `Slot::split_share`'s postcondition
+    // `ptr.addr() != 0 ==> result is Some` (see `slot.rs`'s bidirectional `SlotPred`) means a
+    // `None` result is only possible when the named slot happens to be vacant at that exact
+    // instant. In practice this never happens -- `write()` never retires the slot named by
+    // `current_index()` (its `n != current_idx` check only ever recycles already-retired,
+    // non-current slots) -- so this loop is expected to succeed on its very first iteration; it
+    // exists to make that a liveness assumption instead of a safety-relevant one, matching
+    // `write()`'s own `#[verifier::exec_allows_no_decreases_clause]` reclaim loop below.
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn pin(&self, reader_idx: usize) -> (guard: EpochGuard<'_, T>)
         requires
             reader_idx < self.num_readers(),
@@ -208,26 +223,24 @@ impl<T> EpochAtomicPtr<T> {
             use_type_invariant(self);
         }
         self.readers[reader_idx].pin();
-        let idx = self.current_index();
-        let (ptr, Tracked(share_opt)) = self.slots[idx].split_share();
-        // TRUST ESCAPE (same class as `Slot::return_share`'s, see module docs): the invariant
-        // "the current index always names an occupied slot" is a fact the (not-yet-formalized)
-        // collector reasoning must maintain, not something provable from local state here.
-        let tracked share = match share_opt {
-            Some(s) => s,
-            None => {
-                assume(false);
-                proof_from_false()
-            },
-        };
-        let guard = EpochGuard {
-            reader: &self.readers[reader_idx],
-            slot: &self.slots[idx],
-            ptr,
-            share: Tracked(share),
-        };
-        assert(guard.inv());
-        guard
+        loop
+            invariant
+                reader_idx < self.readers.len(),
+        {
+            let idx = self.current_index();
+            let (ptr, Tracked(share_opt)) = self.slots[idx].split_share();
+            if ptr.addr() != 0 {
+                let tracked share = share_opt.tracked_unwrap();
+                let guard = EpochGuard {
+                    reader: &self.readers[reader_idx],
+                    slot: &self.slots[idx],
+                    ptr,
+                    share: Tracked(share),
+                };
+                assert(guard.inv());
+                return guard;
+            }
+        }
     }
 
     // Publishes a new value, retiring the previously-current slot. Serializes against other
@@ -257,40 +270,52 @@ impl<T> EpochAtomicPtr<T> {
         loop
             invariant
                 idx < self.slots.len(),
+                retired_idx < self.slots.len(),
+                self.write_lock.pred().inv(pending),
+                self.write_lock.pred().num_slots == self.slots.len(),
         {
             if self.all_readers_quiescent() {
                 let mut k: usize = 0;
                 while k < pending.indices.len()
                     invariant
                         k <= pending.indices.len(),
+                        self.write_lock.pred().inv(pending),
+                        self.write_lock.pred().num_slots == self.slots.len(),
                     decreases pending.indices.len() - k,
                 {
+                    // No trust escape: `self.write_lock.pred().inv(pending)` (from
+                    // `PendingPred`, tied to `self.slots.len()` via the type invariant) already
+                    // proves every entry of `pending.indices` is in-bounds.
                     let idx = pending.indices[k];
-                    // TRUST ESCAPE: every index ever pushed into `pending.indices` came from
-                    // `current_index()`, whose ensures already proves `< self.slots.len()` --
-                    // but that fact isn't threaded through `PendingRetirements`'s plain `Vec`, so
-                    // it's assumed here rather than reproven via a loop invariant on `pending`.
-                    assume(idx < self.slots.len());
                     let (ptr, Tracked(occupant)) = self.slots[idx].take();
-                    // TRUST ESCAPE (see module docs): every reader has been observed quiescent
-                    // since this slot was retired, so (informally) no share can still be
-                    // outstanding -- i.e. `occupant`'s accumulator has returned to
-                    // `frac() == 1`. Not yet a real proof; see `epoch_reclamation_status` memory
-                    // for what's needed to discharge it.
-                    let tracked occupant = occupant;
-                    proof {
-                        // TRUST ESCAPE: `ptr()`/`is_init()` follow from `Slot::take`'s ensures
-                        // (given `occupant is Occupied`); the rest genuinely can't be derived
-                        // locally -- see the module-level TRUST ESCAPE note above.
-                        assume(occupant is Occupied);
-                        assume(occupant->Occupied_frac.frac() == 1 as real);
-                        assume(occupant->Occupied_dealloc.addr() == ptr.addr());
-                        assume(occupant->Occupied_dealloc.size() == core::mem::size_of::<T>());
-                        assume(occupant->Occupied_dealloc.align() == core::mem::align_of::<T>());
-                        assume(occupant->Occupied_dealloc.provenance()
-                            == occupant->Occupied_frac.resource().ptr()@.provenance);
+                    // No trust escape for occupancy: `Slot::take`'s postcondition
+                    // `ptr.addr() != 0 ==> occupant is Occupied` (bidirectional `SlotPred`, see
+                    // `slot.rs`) makes this an ordinary executable branch instead of an assumed
+                    // ghost-shape fact. A `Vacant` result here would mean this index was
+                    // reclaimed twice somehow -- shouldn't happen given each `pending` entry is
+                    // consumed exactly once by this loop, but if it ever did, there's simply
+                    // nothing to free, so skipping is trivially safe (not even a leak).
+                    if ptr.addr() != 0 {
+                        let tracked occupant = occupant;
+                        // TRUST ESCAPE (explicitly approved by the user; the ONE remaining
+                        // trust escape in this whole module -- everything else that used to be
+                        // assumed here is now a real proof, see the comments above and in
+                        // `slot.rs`'s `SlotPred`/`take`/`split_share`): every reader has been
+                        // observed quiescent since this slot was retired, so (informally) no
+                        // share can still be outstanding, i.e. `occupant`'s accumulator has
+                        // returned to `frac() == 1`. Formalizing this for real needs a ghost
+                        // mechanism connecting N independent `ReaderSlot` cells' "currently
+                        // unpinned" observations to this ONE `Frac` accumulator's fraction --
+                        // e.g. a `tokenized_state_machine_vstd!`-based protocol (the same tool
+                        // `vstd::rwlock` itself is built on) tracking live shares as a
+                        // multiset. That is a substantial, separate undertaking (comparable to
+                        // formalizing vstd's own `RwLock`), not something safely shortcut here.
+                        // See the `epoch_reclamation_status` memory for the fuller writeup.
+                        proof {
+                            assume(occupant->Occupied_frac.frac() == 1 as real);
+                        }
+                        let _ = crate::reclaim::slot::reclaim(ptr, Tracked(occupant));
                     }
-                    let _ = crate::reclaim::slot::reclaim(ptr, Tracked(occupant));
                     k += 1;
                 }
                 pending.indices = Vec::new();
@@ -333,6 +358,10 @@ impl<T> EpochAtomicPtr<T> {
         self.slots[idx].put(v, Tracked(SlotState::Vacant));
         atomic_with_ghost!(&self.current => store(idx); ghost g => {});
         pending.indices.push(retired_idx);
+        assert(self.write_lock.pred().inv(pending)) by {
+            assert forall|i: int| 0 <= i < pending.indices@.len() implies #[trigger] pending.indices@[i]
+                < self.write_lock.pred().num_slots by {}
+        };
 
         handle.release_write(pending);
     }

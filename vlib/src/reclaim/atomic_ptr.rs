@@ -108,6 +108,17 @@ impl<'a, T> EpochGuard<'a, T> {
         frac_ptr::borrow_shared(self.ptr, Tracked(self.share.borrow()))
     }
 
+    // Sibling of `get()` returning a plain `&T` instead of the opaque `SharedReference` wrapper.
+    // `SharedReference`'s own accessors are private to `vstd::raw_ptr`, so `get()` alone gives an
+    // external (non-`vstd`) caller no way to actually read the value -- this is what makes an
+    // `EpochGuard` usable from ordinary code, verified or not (e.g. a plain benchmark).
+    pub fn get_ref(&self) -> (result: &T) {
+        proof {
+            use_type_invariant(self);
+        }
+        frac_ptr::borrow_shared_ref(self.ptr, Tracked(self.share.borrow()))
+    }
+
     // `non_shorthand_field_patterns`: the `verus!` macro re-emits this destructuring in
     // `field: field` form, which the plain-Rust lint then flags.
     #[allow(non_shorthand_field_patterns)]

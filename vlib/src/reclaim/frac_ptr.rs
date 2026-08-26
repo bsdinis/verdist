@@ -19,6 +19,7 @@ use vstd::raw_ptr::allocate;
 use vstd::raw_ptr::cast_ptr_to_thin_ptr;
 use vstd::raw_ptr::deallocate;
 use vstd::raw_ptr::ptr_mut_write;
+use vstd::raw_ptr::ptr_ref;
 use vstd::raw_ptr::ptr_ref2;
 use vstd::raw_ptr::Dealloc;
 use vstd::raw_ptr::PointsTo;
@@ -107,6 +108,26 @@ pub fn borrow_shared<'a, T>(
 {
     let tracked perm_ref = share.borrow();
     ptr_ref2(ptr, Tracked(perm_ref))
+}
+
+// Companion to `borrow_shared`, for callers that just want a plain `&T` and don't need
+// `SharedReference`'s extra ghost bookkeeping (its `points_to()` extraction, used elsewhere for
+// further proof steps) -- same contract, same `opens_invariants none` requirement, same
+// already-trusted `vstd::raw_ptr` machinery, just `ptr_ref` instead of `ptr_ref2`. This is what
+// lets an external, non-Verus-aware caller (e.g. a plain benchmark) actually read a generation's
+// value out of an `EpochGuard`, since `SharedReference`'s own accessors are private to
+// `vstd::raw_ptr` and thus unreachable from outside that module.
+pub fn borrow_shared_ref<T>(ptr: *const T, Tracked(share): Tracked<&Frac<PointsTo<T>>>) -> (result:
+    &T)
+    requires
+        share.resource().ptr() == ptr,
+        share.resource().is_init(),
+    ensures
+        *result == share.resource().value(),
+    opens_invariants none
+{
+    let tracked perm_ref = share.borrow();
+    ptr_ref(ptr, Tracked(perm_ref))
 }
 
 } // verus!

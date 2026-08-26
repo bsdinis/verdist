@@ -1294,3 +1294,19 @@ pub fn reclaim<T>(ptr: *mut T, Tracked(occupant): Tracked<SlotState<T>>) -> (res
 }
 
 } // verus!
+// `Slot<T>`'s only fields with any actual runtime bytes are the physical atomics (`gate`,
+// `stash`, `claimed`, `installed_flag` -- all `core::sync::atomic` wrappers, already `Send`/`Sync`
+// unconditionally). `inv: Tracked<AtomicInvariant<..>>` is `PhantomData`-backed (see
+// `verus_builtin::Tracked`'s definition) and holds *zero* bytes in any build that actually runs
+// (i.e. one not compiled through the Verus frontend) -- but Rust's auto-trait inference for
+// `PhantomData<A>` conservatively mirrors `A`'s own bounds regardless, and `A` here
+// (`AtomicInvariant<SlotKey, SlotBig<T>, SlotBigPred<T>>`) contains a `*mut T`-typed ghost
+// permission token deep inside `SlotBig<T>`, which is enough to make raw auto-derivation fail
+// even though no such pointer is ever actually stored. These impls correct that false negative;
+// they do not change what is actually shared. The bounds mirror `Arc<T>`'s own
+// (`T: Send + Sync` for both): a `T` published through a `Slot` can be read via `&T` from any
+// reader thread (needs `Sync`) and may be moved to a different thread when it is deallocated by
+// whichever writer's `reclaim()` call happens to observe quiescence, which need not be the thread
+// that allocated it (needs `Send`).
+unsafe impl<T: Send + Sync> Send for Slot<T> {}
+unsafe impl<T: Send + Sync> Sync for Slot<T> {}

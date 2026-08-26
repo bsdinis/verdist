@@ -4,33 +4,35 @@
 //!
 //! Owns a fixed-size (chosen once at `new()`, never resized) pool of `Slot<T>` (each of which owns
 //! its own exclusive-claim flag, see `reclaim::slot`), plus an `AtomicUsize` naming which slot is
-//! current -- whose own ghost payload carries a witness fragment of *that* slot's `current_gen`
-//! (see `Slot`'s module docs), threaded from whichever `write` last installed it, and handed to
-//! whichever `write` next displaces it (via `Slot::release`).
+//! current -- whose own ghost payload carries *that* slot's retirer ledger fragment (see `Slot`'s
+//! module docs), threaded from whichever `write` last installed it, and handed to whichever
+//! `write` next displaces it (via `Slot::release`).
 //! - Reading (`pin`) takes a plain atomic load and a pre-allocated `Frac` fragment checkout (see
 //!   `reclaim::slot`), plus a `ptr_ref2` call outside any invariant (see `reclaim::frac_ptr`'s
 //!   module docs for why this needs no new axioms).
 //! - Writing (`write`) races other writers via `Slot::try_claim`'s `compare_exchange` to
 //!   exclusively own *some* non-current slot -- no shared critical section, no blocking.
 //!
-//! Reclaim safety, formalized (no `assume`): this follows the hazard-pointer proof technique of
-//! Jung et al., *Modular Verification of Safe Memory Reclamation in Concurrent Separation Logic*
-//! (OOPSLA 2023) -- split the resource into one fixed fragment per reader *up front* (at
-//! `put`/`new_occupied` time, see `Slot`), rather than dynamically per pin. Once every reader's
-//! stash cell for a retiring slot is observed to hold its fragment (not checked out), `write`
-//! extracts the slot's managed fragment entirely (`Slot::writer_extract_gate`) and drains every
-//! reader's cell (`Slot::drain_and_extract`), combining each fragment directly into that now-local
-//! managed fragment via `Frac::combine` (already-trusted `vstd` machinery) -- reconstructing
-//! `frac() == 1` for real, not assumed. The witness fragment handed back by `Slot::try_claim` is
-//! what lets this proof go through without ever comparing `Loc`s at runtime (they have no
-//! executable representation) and without assuming anything survives unchanged across the many
-//! separate atomic opens this needs: it is an ordinary, locally-held value threaded through
-//! `writer_extract_gate` and every `drain_and_extract` call, each of which relates it to the slot's
-//! shared `current_gen` resource fresh, via `Frac::agree`, at that exact open. A second, similarly
-//! threaded witness (minted by `writer_put`, carried through `current`'s own ghost payload) is
-//! what lets `Slot::release` -- called on a slot displaced by some *other* `write` invocation,
-//! long after its own claim/reclaim sequence finished -- discharge that slot's own gating clause
-//! without needing any assumption either.
+//! Reclaim safety, formalized (no `assume`): this follows the hazard-pointer proof of Jung et al.,
+//! *Modular Verification of Safe Memory Reclamation in Concurrent Separation Logic* (OOPSLA 2023)
+//! -- split the value's `Frac<PointsTo<T>>` into one fixed share per reader *up front* (at
+//! `writer_put`/`new_occupied` time, see `Slot`), rather than dynamically per pin. Once every
+//! reader's stash cell for a retiring slot is observed to hold its share, `write` extracts the
+//! slot's managed share (`Slot::writer_extract_gate`) and drains every reader's cell
+//! (`Slot::drain_and_extract`), combining each share into that now-local managed share via
+//! `Frac::combine` (already-trusted `vstd` machinery) -- reconstructing `frac() == 1` for real, not
+//! assumed.
+//!
+//! What makes that proof go through across the *many separate atomic opens* the sequence needs --
+//! without ever comparing `Loc`s at runtime (they have no executable representation) and without
+//! assuming anything survives unchanged between opens -- is the slot's ledger (see `Slot`'s module
+//! docs): a `GhostMapAuth` keyed by `-1` (the retirer, the paper's `★`) plus one key per reader.
+//! `Slot::try_claim` hands back the retirer's ledger fragment; `write` holds it as an ordinary
+//! local across the whole sequence, and each `Slot` call it passes it to re-derives the current
+//! generation from it *freshly*, by `agree` against the authority at that exact open. A second
+//! fragment -- the one `writer_put` mints and `current`'s own ghost payload carries -- is what lets
+//! `Slot::release`, called on a slot displaced by some *other* `write` invocation long after its
+//! own reclaim finished, discharge that slot's claim clause with no assumption either.
 use crate::reclaim::frac_ptr;
 use crate::reclaim::slot::Slot;
 #[allow(unused_imports)]
@@ -44,27 +46,27 @@ use vstd::atomic_ghost::AtomicUsize;
 use vstd::prelude::*;
 use vstd::raw_ptr::PointsTo;
 use vstd::raw_ptr::SharedReference;
-use vstd::resource::frac::FracGhost;
 use vstd::resource::frac_opt::Frac;
+use vstd::resource::map::GhostPointsTo;
 use vstd::resource::Loc;
 
 verus! {
 
 pub struct CurrentGenPred;
 
-impl AtomicInvariantPredicate<Seq<Loc>, usize, FracGhost<Loc>> for CurrentGenPred {
-    open spec fn atomic_inv(k: Seq<Loc>, v: usize, g: FracGhost<Loc>) -> bool {
+impl AtomicInvariantPredicate<Seq<Loc>, usize, GhostPointsTo<int, Loc>> for CurrentGenPred {
+    open spec fn atomic_inv(k: Seq<Loc>, v: usize, g: GhostPointsTo<int, Loc>) -> bool {
         &&& (v as int) < k.len()
         &&& g.id() == k[v as int]
-        &&& g.frac() == 1 as real / 2 as real
+        &&& g.key() == crate::reclaim::slot::retirer_key()
     }
 }
 
 pub struct EpochAtomicPtr<T> {
     // Which slot is the currently-published version. Written only via `swap`, whose returned
     // previous value tells a writer exactly which slot it just displaced. Its ghost payload
-    // carries a witness of *that same* slot's `current_gen`, handed over at each swap.
-    current: AtomicUsize<Seq<Loc>, FracGhost<Loc>, CurrentGenPred>,
+    // carries *that same* slot's retirer ledger fragment, handed over at each swap.
+    current: AtomicUsize<Seq<Loc>, GhostPointsTo<int, Loc>, CurrentGenPred>,
     slots: Vec<Slot<T>>,
 }
 
@@ -77,11 +79,11 @@ pub struct EpochGuard<'a, T> {
     slot: &'a Slot<T>,
     ptr: *mut T,
     share: Tracked<Frac<PointsTo<T>>>,
-    // Witness fragment of this slot's `cell_gen[reader_idx]`, from `Slot::checkout` -- carried
-    // unchanged across the whole pin period and handed back to `Slot::checkin`, which is what
-    // lets `checkin` prove `share`'s id still matches the *current* generation without assuming
-    // anything survived unchanged in between (see `Slot::checkin`'s doc comment).
-    gen_witness: Tracked<FracGhost<Loc>>,
+    // This reader's ledger fragment, from `Slot::checkout` -- carried unchanged across the whole
+    // pin period and handed back to `Slot::checkin`, which is what lets `checkin` prove `share`
+    // still belongs to the *current* generation (by agreement against the authority at its own
+    // open) without assuming anything survived unchanged in between.
+    gen_witness: Tracked<GhostPointsTo<int, Loc>>,
 }
 
 impl<'a, T> EpochGuard<'a, T> {
@@ -94,9 +96,9 @@ impl<'a, T> EpochGuard<'a, T> {
         &&& self.share@.frac() == 1 as real / (self.slot.num_readers() as real + 1 as real)
         &&& self.ptr.addr() != 0
         &&& (self.reader_idx as nat) < self.slot.num_readers()
-        &&& self.gen_witness@.id() == self.slot.cell_gen_id(self.reader_idx as int)
-        &&& self.gen_witness@.frac() == 1 as real / 2 as real
-        &&& self.share@.id() == self.gen_witness@@
+        &&& self.gen_witness@.id() == self.slot.gen_loc()
+        &&& self.gen_witness@.key() == self.reader_idx as int
+        &&& self.share@.id() == self.gen_witness@.value()
     }
 
     pub fn get(&self) -> (result: SharedReference<'_, T>) {
@@ -131,7 +133,7 @@ impl<T> EpochAtomicPtr<T> {
                 == self.slots@[0].num_readers()
         &&& forall|i: int|
             0 <= i < self.slots@.len() ==> #[trigger] self.current.constant()[i]
-                == self.slots@[i].current_gen_id()
+                == self.slots@[i].gen_loc()
     }
 
     pub closed spec fn num_slots(self) -> nat {
@@ -160,10 +162,10 @@ impl<T> EpochAtomicPtr<T> {
                 slots.len() == i,
                 1 <= i <= num_slots,
                 // `current`'s own `CurrentGenPred` needs `witness0.id() == k[0]`, i.e.
-                // `slots@[0].current_gen_id()`. Appending later slots must be shown not to
+                // `slots@[0].gen_loc()`. Appending later slots must be shown not to
                 // disturb slot 0 -- otherwise `witness0`'s linkage is lost by the time
                 // `AtomicUsize::new` checks it.
-                slots@[0].current_gen_id() == slot0.current_gen_id(),
+                slots@[0].gen_loc() == slot0.gen_loc(),
                 forall|j: int|
                     0 <= j < slots@.len() ==> #[trigger] slots@[j].num_readers() == num_readers,
             decreases num_slots - i,
@@ -171,7 +173,7 @@ impl<T> EpochAtomicPtr<T> {
             slots.push(Slot::new_vacant(num_readers));
             i += 1;
         }
-        let ghost k = Seq::new(num_slots as nat, |j: int| slots@[j].current_gen_id());
+        let ghost k = Seq::new(num_slots as nat, |j: int| slots@[j].gen_loc());
         let current = AtomicUsize::new(Ghost(k), 0, Tracked(witness0));
         let result = EpochAtomicPtr { current, slots };
         assert(result.inv());
@@ -278,13 +280,13 @@ impl<T> EpochAtomicPtr<T> {
             use_type_invariant(self);
         }
 
-        // Claim exclusive ownership of some non-current slot, getting back a witness fragment of
-        // that slot's `current_gen` (see `Slot::try_claim`'s doc comment).
+        // Claim exclusive ownership of some non-current slot, getting back that slot's retirer
+        // ledger fragment (see `Slot::try_claim`'s doc comment).
         let mut claimed_idx: Option<usize> = None;
-        let tracked mut witness_opt: Option<FracGhost<Loc>> = None;
-        // The witness's *id* linkage to `claimed_idx` has to be recorded by both loops: without
+        let tracked mut witness_opt: Option<GhostPointsTo<int, Loc>> = None;
+        // The fragment's *id* linkage to `claimed_idx` has to be recorded by both loops: without
         // it the fact is lost at `unwrap` below, and every later `Slot` call that needs
-        // `witness.id() == self.slots@[idx].current_gen_id()` (`writer_extract_gate`,
+        // `witness.id() == self.slots@[idx].gen_loc()` (`writer_extract_gate`,
         // `drain_and_extract`, `writer_put`) becomes unprovable. `self.inv()` likewise has to be
         // restated per loop -- a `use_type_invariant(self)` before the loop does not carry in.
         while claimed_idx.is_none()
@@ -293,8 +295,8 @@ impl<T> EpochAtomicPtr<T> {
                 claimed_idx is Some ==> claimed_idx->0 < self.slots.len(),
                 claimed_idx is Some ==> witness_opt is Some,
                 claimed_idx is Some ==> witness_opt->0.id()
-                    == self.slots@[claimed_idx->0 as int].current_gen_id(),
-                claimed_idx is Some ==> witness_opt->0.frac() == 1 as real / 2 as real,
+                    == self.slots@[claimed_idx->0 as int].gen_loc(),
+                claimed_idx is Some ==> witness_opt->0.key() == crate::reclaim::slot::retirer_key(),
         {
             let current_idx = self.current_index();
             let mut n: usize = 0;
@@ -305,8 +307,9 @@ impl<T> EpochAtomicPtr<T> {
                     claimed_idx is Some ==> claimed_idx->0 < self.slots.len(),
                     claimed_idx is Some ==> witness_opt is Some,
                     claimed_idx is Some ==> witness_opt->0.id()
-                        == self.slots@[claimed_idx->0 as int].current_gen_id(),
-                    claimed_idx is Some ==> witness_opt->0.frac() == 1 as real / 2 as real,
+                        == self.slots@[claimed_idx->0 as int].gen_loc(),
+                    claimed_idx is Some ==> witness_opt->0.key()
+                        == crate::reclaim::slot::retirer_key(),
                 decreases self.slots.len() - n,
             {
                 if n != current_idx {
@@ -325,33 +328,23 @@ impl<T> EpochAtomicPtr<T> {
         let idx = claimed_idx.unwrap();
         let tracked witness = witness_opt.tracked_unwrap();
 
-        let tracked cell_witnesses: Seq<FracGhost<Loc>>;
-
-        // Try the fresh (never-installed) path first: `extract_fresh_cell_gen_witnesses` reads
+        // Try the fresh (never-installed) path first: `extract_fresh_reader_frags` reads
         // `installed_flag` fresh, in its own single open, and only claims success (`fresh ==
-        // true`) when *that exact read* justified extracting every `cell_gen` witness -- so
-        // branching on its own returned `fresh` (not a separate, earlier read) is what keeps this
-        // sound, with no cross-open persistence assumption linking the two calls.
-        let (fresh, Tracked(fresh_witnesses)) = self.slots[idx].extract_fresh_cell_gen_witnesses();
+        // true`) when *that exact read* justified taking every reader key out -- so branching on
+        // its own returned `fresh` (not a separate, earlier read) is what keeps this sound, with
+        // no cross-open persistence assumption linking the two calls. On the non-fresh path it
+        // hands back an *empty* submap of the same ledger, which is exactly the right seed for the
+        // drain loop's accumulator below -- so there is no `Option` to unwrap either way.
+        let (fresh, Tracked(mut reader_frags)) = self.slots[idx].extract_fresh_reader_frags();
         if fresh {
+            proof {
+                assert forall|kk: int| #[trigger]
+                    reader_frags@.contains_key(kk) <==> (0 <= kk
+                        < self.slots@[idx as int].num_readers()) by {}
+            }
             // Never installed before: the drain sequence below could never terminate here (no
             // cell has ever been `Present`), so skip it entirely.
-            proof {
-                cell_witnesses = fresh_witnesses;
-                // Restate `writer_put`'s precondition here, in this branch's own terms, rather
-                // than relying on the join point below to merge two differently-triggered facts.
-                assert(cell_witnesses.len() == self.slots@[idx as int].num_readers());
-                assert forall|j: int| 0 <= j < cell_witnesses.len() implies {
-                    &&& #[trigger] cell_witnesses[j].id() == self.slots@[idx as int].cell_gen_id(j)
-                    &&& cell_witnesses[j].frac() == 1 as real / 2 as real
-                } by {
-                    assert(fresh_witnesses[j].id() == self.slots@[idx as int].cell_gen_id(j));
-                }
-            }
         } else {
-            proof {
-                let tracked _dropped = fresh_witnesses;
-            }
             // If the claimed slot still holds a previous occupant (it was retired by some earlier
             // writer but not yet reclaimed), wait for every reader's stash cell to hold its fragment
             // (not checked out), then extract and reclaim it.
@@ -380,26 +373,26 @@ impl<T> EpochAtomicPtr<T> {
             // Drain every reader's stash cell, combining its fragment directly into `occupant` via
             // `Frac::combine` -- ordinary sequential proof code, since `occupant` is now a plain
             // local variable rather than something living inside a shared invariant.
-            // `drain_and_extract`'s postcondition ties each extracted piece's id and fraction to
-            // `witness`'s wrapped value, which is exactly `occupant`'s own id (from
-            // `writer_extract_gate`), so `combine`'s `id()`-equality precondition is a proven fact,
-            // not a guess. Retried per-cell (liveness-only, matching `all_returned`'s own spirit)
-            // until it succeeds, rather than skipping a still-checked-out cell: `writer_put` needs
-            // every cell's `cell_gen` witness handed back, so every cell must actually be drained.
+            // `drain_and_extract`'s postcondition ties each extracted piece's id to `witness`'s
+            // own generation, which is exactly `occupant`'s id (from `writer_extract_gate`), so
+            // `combine`'s `id()`-equality precondition is a proven fact, not a guess. Retried
+            // per-cell (liveness-only, matching `all_returned`'s own spirit) until it succeeds,
+            // rather than skipping a still-checked-out cell: `writer_put` needs every reader key
+            // handed back, so every cell must actually be drained.
             let n = self.slots[idx].stash_len();
             let mut i: usize = 0;
-            let tracked mut cell_witnesses_acc: Seq<FracGhost<Loc>> = Seq::tracked_empty();
             while i < n
                 invariant
                     self.inv(),
                     i <= n,
                     idx < self.slots.len(),
-                    witness.id() == self.slots@[idx as int].current_gen_id(),
+                    witness.id() == self.slots@[idx as int].gen_loc(),
+                    witness.key() == crate::reclaim::slot::retirer_key(),
                     n == self.slots@[idx as int].num_readers(),
                     ptr.addr() != 0 ==> occupant is Occupied,
                     ptr.addr() != 0 ==> occupant->Occupied_frac.resource().ptr() == ptr,
                     ptr.addr() != 0 ==> occupant->Occupied_frac.resource().is_init(),
-                    ptr.addr() != 0 ==> occupant->Occupied_frac.id() == witness@,
+                    ptr.addr() != 0 ==> occupant->Occupied_frac.id() == witness.value(),
                     ptr.addr() != 0 ==> occupant->Occupied_dealloc.addr() == ptr.addr(),
                     ptr.addr() != 0 ==> occupant->Occupied_dealloc.size() == core::mem::size_of::<
                         T,
@@ -411,37 +404,37 @@ impl<T> EpochAtomicPtr<T> {
                         == occupant->Occupied_frac.resource().ptr()@.provenance,
                     ptr.addr() != 0 ==> occupant->Occupied_frac.frac() == (i as real + 1 as real)
                         / (n as real + 1 as real),
-                    cell_witnesses_acc.len() == i,
-                    forall|k: int|
-                        0 <= k < i ==> {
-                            &&& #[trigger] cell_witnesses_acc[k].id()
-                                == self.slots@[idx as int].cell_gen_id(k)
-                            &&& cell_witnesses_acc[k].frac() == 1 as real / 2 as real
-                        },
+                    // The accumulator is a submap now, so what used to be a per-index `Seq` fact
+                    // (needing a `tracked_push` trigger dance every iteration) is one domain
+                    // equation.
+                    reader_frags.id() == self.slots@[idx as int].gen_loc(),
+                    forall|kk: int| #[trigger]
+                        reader_frags@.contains_key(kk) <==> (0 <= kk < i as int),
                 decreases n - i,
             {
                 let mut drained_ptr: *mut T = core::ptr::null_mut();
-                let tracked mut piece_and_cellgen_opt: Option<StashedPiece<T>> = None;
+                let tracked mut piece_and_frag_opt: Option<StashedPiece<T>> = None;
                 while drained_ptr.addr() == 0
                     invariant
                         self.inv(),
                         idx < self.slots.len(),
                         i < n,
-                        witness.id() == self.slots@[idx as int].current_gen_id(),
+                        witness.id() == self.slots@[idx as int].gen_loc(),
+                        witness.key() == crate::reclaim::slot::retirer_key(),
                         n == self.slots@[idx as int].num_readers(),
-                        drained_ptr.addr() != 0 ==> piece_and_cellgen_opt is Some,
-                        // `drain_and_extract`'s postcondition has to be *carried* out of this retry
-                        // loop, not just observed inside it -- the code after the loop consumes the
-                        // piece and its `cell_gen` witness.
-                        piece_and_cellgen_opt is Some ==> {
-                            &&& piece_and_cellgen_opt->Some_0.0.resource().ptr() == drained_ptr
-                            &&& piece_and_cellgen_opt->Some_0.0.resource().is_init()
-                            &&& piece_and_cellgen_opt->Some_0.0.id() == witness@
-                            &&& piece_and_cellgen_opt->Some_0.0.frac() == 1 as real / (n as real
+                        drained_ptr.addr() != 0 ==> piece_and_frag_opt is Some,
+                        // `drain_and_extract`'s postcondition has to be *carried* out of this
+                        // retry loop, not just observed inside it -- the code after the loop
+                        // consumes the piece and its ledger fragment.
+                        piece_and_frag_opt is Some ==> {
+                            &&& piece_and_frag_opt->Some_0.0.resource().ptr() == drained_ptr
+                            &&& piece_and_frag_opt->Some_0.0.resource().is_init()
+                            &&& piece_and_frag_opt->Some_0.0.id() == witness.value()
+                            &&& piece_and_frag_opt->Some_0.0.frac() == 1 as real / (n as real
                                 + 1 as real)
-                            &&& piece_and_cellgen_opt->Some_0.1.id()
-                                == self.slots@[idx as int].cell_gen_id(i as int)
-                            &&& piece_and_cellgen_opt->Some_0.1.frac() == 1 as real / 2 as real
+                            &&& piece_and_frag_opt->Some_0.1.id()
+                                == self.slots@[idx as int].gen_loc()
+                            &&& piece_and_frag_opt->Some_0.1.key() == i as int
                         },
                 {
                     let (dp, Tracked(tracked_opt)) = self.slots[idx].drain_and_extract(
@@ -451,11 +444,11 @@ impl<T> EpochAtomicPtr<T> {
                     if dp.addr() != 0 {
                         drained_ptr = dp;
                         proof {
-                            piece_and_cellgen_opt = tracked_opt;
+                            piece_and_frag_opt = tracked_opt;
                         }
                     }
                 }
-                let tracked (piece, cell_gen_witness) = piece_and_cellgen_opt.tracked_unwrap();
+                let tracked (piece, gen_frag) = piece_and_frag_opt.tracked_unwrap();
                 if ptr.addr() != 0 {
                     let ghost piece_frac_val = piece.frac();
                     let ghost pre_frac_val = occupant->Occupied_frac.frac();
@@ -489,29 +482,9 @@ impl<T> EpochAtomicPtr<T> {
                     }
                 }
                 proof {
-                    broadcast use vstd::seq::group_seq_lemmas;
-
-                    let ghost old_cell_witnesses: Seq<FracGhost<Loc>> = cell_witnesses_acc;
-                    // Snapshot before the push: `tracked_push` consumes `cell_gen_witness`, so the
-                    // `k == i` case below cannot name it afterwards.
-                    let ghost pushed: FracGhost<Loc> = cell_gen_witness;
-                    cell_witnesses_acc.tracked_push(cell_gen_witness);
-                    assert(cell_witnesses_acc == old_cell_witnesses.push(pushed));
-                    assert forall|k: int| 0 <= k < i + 1 implies {
-                        &&& #[trigger] cell_witnesses_acc[k].id()
-                            == self.slots@[idx as int].cell_gen_id(k)
-                        &&& cell_witnesses_acc[k].frac() == 1 as real / 2 as real
-                    } by {
-                        assert(cell_witnesses_acc[k] == old_cell_witnesses.push(pushed)[k]);
-                        if k < i {
-                            // Mentions the loop invariant's trigger term, not just the element.
-                            assert(old_cell_witnesses[k].id()
-                                == self.slots@[idx as int].cell_gen_id(k));
-                            assert(old_cell_witnesses.push(pushed)[k] == old_cell_witnesses[k]);
-                        } else {
-                            assert(old_cell_witnesses.push(pushed)[k] == pushed);
-                        }
-                    }
+                    reader_frags.combine_points_to(gen_frag);
+                    assert forall|kk: int| #[trigger]
+                        reader_frags@.contains_key(kk) <==> (0 <= kk < (i + 1) as int) by {}
                 }
                 i += 1;
             }
@@ -529,30 +502,19 @@ impl<T> EpochAtomicPtr<T> {
                     let tracked _dropped = occupant;
                 }
             }
-            proof {
-                cell_witnesses = cell_witnesses_acc;
-                // Same restatement as the fresh branch above, from the drain loop's own accumulator.
-                assert(cell_witnesses.len() == self.slots@[idx as int].num_readers());
-                assert forall|j: int| 0 <= j < cell_witnesses.len() implies {
-                    &&& #[trigger] cell_witnesses[j].id() == self.slots@[idx as int].cell_gen_id(j)
-                    &&& cell_witnesses[j].frac() == 1 as real / 2 as real
-                } by {
-                    assert(cell_witnesses_acc[j].id() == self.slots@[idx as int].cell_gen_id(j));
-                }
-            }
         }
 
         let Tracked(current_witness) = self.slots[idx].writer_put(
             v,
             Tracked(witness),
-            Tracked(cell_witnesses),
+            Tracked(reader_frags),
         );
         // `swap` (not `store`) so we know *exactly* which slot we just displaced, regardless of
         // what other writers concurrently do to `current` -- `store` would risk releasing the
         // claim on the wrong slot if we'd merely re-read `current` afterwards. The ghost payload
         // exchanged here is `current`'s own witness for whichever slot it *was* pointing to --
         // handed straight to that slot's `release` below -- for `idx`'s freshly-minted witness.
-        let tracked mut old_witness_opt: Option<FracGhost<Loc>> = None;
+        let tracked mut old_witness_opt: Option<GhostPointsTo<int, Loc>> = None;
         let old_current =
             atomic_with_ghost!(&self.current => swap(idx);
             update prev -> next;
@@ -560,13 +522,14 @@ impl<T> EpochAtomicPtr<T> {
             ghost g => {
                 // `CurrentGenPred::atomic_inv` holds here for the *pre*-swap state, which is
                 // exactly what pins the displaced slot's index in range and ties `g`'s id to that
-                // slot's own `current_gen`. `release` needs both, and `swap`'s own contract
+                // slot's own ledger. `release` needs both, and `swap`'s own contract
                 // (`ret == prev`) is what carries them out to the exec result.
                 assert((ret as int) < self.current.constant().len());
                 let tracked mut placeholder = current_witness;
                 vstd::modes::tracked_swap(&mut g, &mut placeholder);
                 old_witness_opt = Some(placeholder);
                 assert(old_witness_opt->Some_0.id() == self.current.constant()[ret as int]);
+                assert(old_witness_opt->Some_0.key() == crate::reclaim::slot::retirer_key());
             });
         let tracked old_witness = old_witness_opt.tracked_unwrap();
         // No `% self.slots.len()` needed here (unlike `current_index`): `CurrentGenPred` pins the

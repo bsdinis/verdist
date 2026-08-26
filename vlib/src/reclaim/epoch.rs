@@ -12,15 +12,15 @@
 //! of needing wraparound-aware comparisons wherever epochs are compared) that should be made
 //! explicitly rather than folded in here silently.
 use vstd::resource::algebra::ResourceAlgebra;
-use vstd::resource::pcm::Resource;
-use vstd::resource::pcm::PCM;
-use vstd::resource::Loc;
 #[cfg(verus_only)]
 use vstd::resource::copy_duplicable_part;
+use vstd::resource::pcm::Resource;
+use vstd::resource::pcm::PCM;
 #[cfg(verus_only)]
 use vstd::resource::update_and_redistribute;
 #[cfg(verus_only)]
 use vstd::resource::update_mut;
+use vstd::resource::Loc;
 
 use vstd::prelude::*;
 

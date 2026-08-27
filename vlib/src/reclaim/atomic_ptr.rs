@@ -127,6 +127,10 @@ impl AtomicInvariantPredicate<(), usize, ()> for TrivialPred {
     }
 }
 
+// `reject_recursive_types(T)`: propagated up from `Slot<T>` (see its own doc comment in
+// `reclaim::slot`) -- `T` occurs in `SlotKey<T>`'s `content: spec_fn(T) -> bool` field, embedded
+// here transitively via `slots: Vec<Slot<T>>`.
+#[verifier::reject_recursive_types(T)]
 pub struct EpochAtomicPtr<T> {
     // Which slot is the currently-published version. Written only via `swap`, whose returned
     // previous value tells a writer exactly which slot it just displaced. Its ghost payload
@@ -143,6 +147,9 @@ pub struct EpochAtomicPtr<T> {
 // Borrowing it (via `get`) to read the published value, then being unable to move it out from
 // under that borrow (ordinary Rust aliasing), is what prevents a `SharedReference` into a
 // generation's data from outliving the point this reader checks its fragment back in.
+// `reject_recursive_types(T)`: same propagation as `EpochAtomicPtr<T>` above, via `slot: &'a
+// Slot<T>`.
+#[verifier::reject_recursive_types(T)]
 pub struct EpochGuard<'a, T> {
     reader_idx: usize,
     slot: &'a Slot<T>,
@@ -156,6 +163,12 @@ pub struct EpochGuard<'a, T> {
 }
 
 impl<'a, T> EpochGuard<'a, T> {
+    // No new field: read it off the slot this guard was checked out of -- same idiom as
+    // `EpochAtomicPtr::content()`.
+    pub closed spec fn content(self) -> spec_fn(T) -> bool {
+        self.slot.content()
+    }
+
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
         &&& self.share@.resource().ptr() == self.ptr
@@ -167,10 +180,17 @@ impl<'a, T> EpochGuard<'a, T> {
         &&& (self.reader_idx as nat) < self.slot.num_readers()
         &&& self.gen_witness@.id() == self.slot.gen_loc()
         &&& self.gen_witness@.key() == self.reader_idx as int
-        &&& self.share@.id() == self.gen_witness@.value()
+        &&& self.share@.id()
+            == self.gen_witness@.value()
+        // The published value satisfies the content invariant -- carried through from
+        // `Slot::checkout`'s own postcondition (see `reclaim::slot`'s module docs).
+        &&& (self.content())(self.share@.resource().value())
     }
 
-    pub fn get(&self) -> (result: SharedReference<'_, T>) {
+    pub fn get(&self) -> (result: SharedReference<'_, T>)
+        ensures
+            (self.content())(result.value()),
+    {
         proof {
             use_type_invariant(self);
         }
@@ -181,7 +201,10 @@ impl<'a, T> EpochGuard<'a, T> {
     // `SharedReference`'s own accessors are private to `vstd::raw_ptr`, so `get()` alone gives an
     // external (non-`vstd`) caller no way to actually read the value -- this is what makes an
     // `EpochGuard` usable from ordinary code, verified or not (e.g. a plain benchmark).
-    pub fn get_ref(&self) -> (result: &T) {
+    pub fn get_ref(&self) -> (result: &T)
+        ensures
+            (self.content())(*result),
+    {
         proof {
             use_type_invariant(self);
         }
@@ -213,6 +236,9 @@ impl<T> EpochAtomicPtr<T> {
             0 <= i < self.slots@.len() ==> #[trigger] self.slots@[i].num_readers()
                 == self.slots@[0].num_readers()
         &&& forall|i: int|
+            0 <= i < self.slots@.len() ==> #[trigger] self.slots@[i].content()
+                == self.slots@[0].content()
+        &&& forall|i: int|
             0 <= i < self.slots@.len() ==> #[trigger] self.current.constant()[i]
                 == self.slots@[i].gen_loc()
         &&& self.slots@.len() <= INDEX_SPACE
@@ -226,18 +252,36 @@ impl<T> EpochAtomicPtr<T> {
         self.slots@[0].num_readers()
     }
 
+    // No new field: read it off slot 0, with `inv()`'s own agreement clause below keeping every
+    // slot in agreement -- exactly parallel to `num_readers()` above.
+    pub closed spec fn content(self) -> spec_fn(T) -> bool {
+        self.slots@[0].content()
+    }
+
     // `num_slots` bounds how many in-flight (retired-but-not-yet-reclaimed) generations this can
     // tolerate before a write would need to wait for reclaim to catch up -- pick it generously
     // relative to expected write concurrency and reader pin duration. `num_readers` must match
-    // the number of distinct reader identities that will ever call `pin`.
-    pub fn new(v: T, num_slots: usize, num_readers: usize) -> (result: Self)
+    // the number of distinct reader identities that will ever call `pin`. `content`: every value
+    // ever installed here (via `v` now, or `write`/`try_write` later) must satisfy this predicate
+    // -- see `reclaim::slot`'s module docs for why it exists.
+    pub fn new(
+        v: T,
+        num_slots: usize,
+        num_readers: usize,
+        Ghost(content): Ghost<spec_fn(T) -> bool>,
+    ) -> (result: Self)
         requires
             num_slots >= 1,
             num_slots <= INDEX_SPACE,
             core::mem::size_of::<T>() != 0,
+            content(v),
+        ensures
+            result.num_readers() == num_readers,
+            result.num_slots() == num_slots,
+            result.content() == content,
     {
         let mut slots: Vec<Slot<T>> = Vec::new();
-        let (slot0, Tracked(witness0)) = Slot::new_occupied(v, num_readers);
+        let (slot0, Tracked(witness0)) = Slot::new_occupied(v, num_readers, Ghost(content));
         slots.push(slot0);
         let mut i: usize = 1;
         while i < num_slots
@@ -249,11 +293,13 @@ impl<T> EpochAtomicPtr<T> {
                 // disturb slot 0 -- otherwise `witness0`'s linkage is lost by the time
                 // `AtomicUsize::new` checks it.
                 slots@[0].gen_loc() == slot0.gen_loc(),
+                slots@[0].content() == content,
                 forall|j: int|
                     0 <= j < slots@.len() ==> #[trigger] slots@[j].num_readers() == num_readers,
+                forall|j: int| 0 <= j < slots@.len() ==> #[trigger] slots@[j].content() == content,
             decreases num_slots - i,
         {
-            slots.push(Slot::new_vacant(num_readers));
+            slots.push(Slot::new_vacant(num_readers, Ghost(content)));
             i += 1;
         }
         let ghost k = Seq::new(num_slots as nat, |j: int| slots@[j].gen_loc());
@@ -263,6 +309,22 @@ impl<T> EpochAtomicPtr<T> {
         let result = EpochAtomicPtr { current, write_seq, slots };
         assert(result.inv());
         result
+    }
+
+    // Compatibility wrapper for callers that cannot build a `Ghost` value (e.g. a plain, non-Verus
+    // benchmark): an unconstrained content invariant, equivalent to `new` before the content
+    // invariant existed.
+    pub fn new_unconstrained(v: T, num_slots: usize, num_readers: usize) -> (result: Self)
+        requires
+            num_slots >= 1,
+            num_slots <= INDEX_SPACE,
+            core::mem::size_of::<T>() != 0,
+        ensures
+            result.num_readers() == num_readers,
+            result.num_slots() == num_slots,
+            result.content() == (|_v: T| true),
+    {
+        Self::new(v, num_slots, num_readers, Ghost(|_v: T| true))
     }
 
     // Are all readers' stash cells for slot `idx` currently holding their fragment (i.e. none
@@ -317,6 +379,8 @@ impl<T> EpochAtomicPtr<T> {
     pub fn pin(&self, reader_idx: usize) -> (guard: EpochGuard<'_, T>)
         requires
             reader_idx < self.num_readers(),
+        ensures
+            guard.content() == self.content(),
     {
         proof {
             use_type_invariant(self);
@@ -329,6 +393,7 @@ impl<T> EpochAtomicPtr<T> {
             proof {
                 use_type_invariant(self);
                 assert(self.slots@[idx as int].num_readers() == self.slots@[0].num_readers());
+                assert(self.slots@[idx as int].content() == self.slots@[0].content());
             }
             let (ptr, Tracked(share_opt)) = self.slots[idx].checkout(reader_idx);
             if ptr.addr() != 0 {
@@ -573,6 +638,7 @@ impl<T> EpochAtomicPtr<T> {
         requires
             self.inv(),
             core::mem::size_of::<T>() != 0,
+            self.content()(v),
         ensures
             result.0 < self.slots.len(),
             result.1@.id() == self.slots@[result.0 as int].gen_loc(),
@@ -630,6 +696,11 @@ impl<T> EpochAtomicPtr<T> {
         let idx = claimed_idx.unwrap();
         let tracked witness = witness_opt.tracked_unwrap();
         let Tracked(reader_frags) = self.evacuate(idx, Tracked(&witness));
+        // `self.inv()`'s content-agreement clause carries `self.content()(v)` (this function's
+        // own `requires`) over to the specific slot `writer_put` is about to install into.
+        proof {
+            assert(self.slots@[idx as int].content() == self.slots@[0].content());
+        }
         let Tracked(current_witness) = self.slots[idx].writer_put(
             v,
             Tracked(witness),
@@ -643,6 +714,7 @@ impl<T> EpochAtomicPtr<T> {
     pub fn write(&self, v: T)
         requires
             core::mem::size_of::<T>() != 0,
+            self.content()(v),
     {
         proof {
             use_type_invariant(self);
@@ -752,6 +824,10 @@ impl<T> EpochAtomicPtr<T> {
             core::mem::size_of::<T>() != 0,
             reader_idx < self.num_readers(),
             forall|x: &T| f.requires((x,)),
+            // Whatever `f` proposes to publish must satisfy the content invariant -- checked once
+            // here, rather than at every candidate `f` produces, since `claim_and_install`
+            // (transitively `Slot::writer_put`) needs exactly this fact about `v` below.
+            forall|x: &T, y: T| f.ensures((x,), Some(y)) ==> self.content()(y),
     {
         proof {
             use_type_invariant(self);
@@ -762,6 +838,7 @@ impl<T> EpochAtomicPtr<T> {
                 reader_idx < self.num_readers(),
                 core::mem::size_of::<T>() != 0,
                 forall|x: &T| f.requires((x,)),
+                forall|x: &T, y: T| f.ensures((x,), Some(y)) ==> self.content()(y),
         {
             let (guard, observed_packed) = self.pin_for_write(reader_idx);
             let new_value_opt = f(guard.get_ref());
@@ -772,6 +849,9 @@ impl<T> EpochAtomicPtr<T> {
                     return false;
                 },
             };
+            proof {
+                assert(self.content()(v));
+            }
 
             let (idx, Tracked(current_witness)) = self.claim_and_install(v);
             let seq = atomic_with_ghost!(&self.write_seq => fetch_add_wrapping(1); ghost g => {});

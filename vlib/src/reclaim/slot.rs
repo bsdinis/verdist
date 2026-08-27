@@ -98,12 +98,16 @@ pub open spec fn retirer_key() -> int {
 
 // The invariant's constant: which physical atomics (by id) this instance governs, plus the fixed
 // identity of the ledger resource. Fixed forever once the `Slot` is constructed.
-pub struct SlotKey {
+#[verifier::reject_recursive_types(T)]  // T occurs in argument position of spec_fn
+pub struct SlotKey<T> {
     pub gate_id: int,
     pub stash_ids: Seq<int>,
     pub claimed_id: int,
     pub gen_id: Loc,
     pub vacant_flag_id: int,
+    /// Content invariant: every value ever installed here satisfies it. Established once at
+    /// install, assumable at every `checkout`.
+    pub content: spec_fn(T) -> bool,
 }
 
 // The invariant's tracked payload: everything needed to describe the current state of the gate
@@ -135,8 +139,8 @@ pub struct SlotBigPred<T> {
     dummy: core::marker::PhantomData<T>,
 }
 
-impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
-    open spec fn inv(k: SlotKey, big: SlotBig<T>) -> bool {
+impl<T> InvariantPredicate<SlotKey<T>, SlotBig<T>> for SlotBigPred<T> {
+    open spec fn inv(k: SlotKey<T>, big: SlotBig<T>) -> bool {
         &&& big.gate_perm.id() == k.gate_id
         &&& big.stash_perms.len() == k.stash_ids.len()
         &&& big.stash_states.len() == k.stash_ids.len()
@@ -186,7 +190,13 @@ impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
                 &&& dealloc.align() == core::mem::align_of::<T>()
                 &&& dealloc.provenance() == frac.resource().ptr()@.provenance
                 &&& frac.id() == big.gen_auth@[retirer_key()]
-                &&& frac.frac() == 1 as real / (k.stash_ids.len() as real + 1 as real)
+                &&& frac.frac() == 1 as real / (k.stash_ids.len() as real
+                    + 1 as real)
+                // Content invariant: the currently-published value satisfies it. Needed on this
+                // arm (not just `Present`) because `checkout` and `checkin` read/write through
+                // `stash_states`, but a fresh `writer_put`/`new_occupied` install first
+                // establishes the fact here, against the gate's own managed remainder.
+                &&& (k.content)(frac.resource().value())
             },
         })
         &&& forall|i: int|
@@ -197,7 +207,13 @@ impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
                     &&& piece.resource().ptr() == big.stash_perms[i].value()
                     &&& piece.resource().is_init()
                     &&& piece.id() == big.gen_auth@[retirer_key()]
-                    &&& piece.frac() == 1 as real / (k.stash_ids.len() as real + 1 as real)
+                    &&& piece.frac() == 1 as real / (k.stash_ids.len() as real
+                        + 1 as real)
+                    // Content invariant, restated here (not derived from the `Occupied` arm)
+                    // because a reader can legally `checkout` from a slot whose gate share has
+                    // already been extracted by a drain -- `Present` must carry the fact on its
+                    // own rather than deriving it by `Frac` agreement against `gate_state`.
+                    &&& (k.content)(piece.resource().value())
                 },
             })
     }
@@ -205,13 +221,18 @@ impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
 
 // `dead_code`: `inv` is a ghost field, so it is erased in a plain (non-Verus) build and looks
 // unread there -- same reason as `abd::server::register`'s own structs carry this allow.
+//
+// `reject_recursive_types(T)`: propagated up from `SlotKey<T>` (see its own doc comment) --
+// `T` occurs in `SlotKey<T>`'s `content: spec_fn(T) -> bool` field, which is embedded here via
+// `inv`'s `AtomicInvariant<SlotKey<T>, ..>`, so `T`'s non-positive position is transitive.
 #[allow(dead_code)]
+#[verifier::reject_recursive_types(T)]
 pub struct Slot<T> {
     gate: PAtomicPtr<T>,
     stash: Vec<PAtomicPtr<T>>,
     claimed: PAtomicBool,
     vacant_flag: PAtomicBool,
-    inv: Tracked<AtomicInvariant<SlotKey, SlotBig<T>, SlotBigPred<T>>>,
+    inv: Tracked<AtomicInvariant<SlotKey<T>, SlotBig<T>, SlotBigPred<T>>>,
 }
 
 impl<T> Slot<T> {
@@ -237,9 +258,17 @@ impl<T> Slot<T> {
         self.inv@.constant().gen_id
     }
 
-    pub fn new_vacant(num_readers: usize) -> (result: Self)
+    /// The content invariant every value ever installed into this slot satisfies -- fixed at
+    /// construction (`new_vacant`/`new_occupied`), never changed afterwards.
+    pub closed spec fn content(self) -> spec_fn(T) -> bool {
+        self.inv@.constant().content
+    }
+
+    pub fn new_vacant(num_readers: usize, Ghost(content): Ghost<spec_fn(T) -> bool>) -> (result:
+        Self)
         ensures
             result.num_readers() == num_readers,
+            result.content() == content,
     {
         let (gate, Tracked(gate_perm)) = PAtomicPtr::<T>::new(core::ptr::null_mut());
         // A vacant slot has no published value, so no real generation either -- any `Loc` will do
@@ -319,6 +348,7 @@ impl<T> Slot<T> {
             claimed_id: claimed.id(),
             gen_id: gen_auth.id(),
             vacant_flag_id: vacant_flag.id(),
+            content,
         };
         proof {
             broadcast use vstd::seq::group_seq_lemmas, vstd::set_lib::group_set_lib_default;
@@ -373,14 +403,17 @@ impl<T> Slot<T> {
     // same thing `writer_put` itself hands back -- so the caller (`EpochAtomicPtr::new`) can
     // install it into `current`'s own ghost payload, exactly mirroring how a later `write` threads
     // a fresh one through `current`'s swap.
-    pub fn new_occupied(v: T, num_readers: usize) -> (result: (
-        Self,
-        Tracked<GhostPointsTo<int, Loc>>,
-    ))
+    pub fn new_occupied(
+        v: T,
+        num_readers: usize,
+        Ghost(content): Ghost<spec_fn(T) -> bool>,
+    ) -> (result: (Self, Tracked<GhostPointsTo<int, Loc>>))
         requires
             core::mem::size_of::<T>() != 0,
+            content(v),
         ensures
             result.0.num_readers() == num_readers,
+            result.0.content() == content,
             result.1@.id() == result.0.gen_loc(),
             result.1@.key() == retirer_key(),
     {
@@ -415,6 +448,7 @@ impl<T> Slot<T> {
                 stash_states.len() == i,
                 frac.resource().ptr() == ptr,
                 frac.resource().is_init(),
+                frac.resource().value() == v,
                 frac.id() == gen_id,
                 ptr.addr() != 0,
                 frac.frac() == 1 as real - (i as real) * piece_frac,
@@ -426,6 +460,7 @@ impl<T> Slot<T> {
                         &&& stash_states[j] is Present
                         &&& stash_states[j]->Present_0.resource().ptr() == ptr
                         &&& stash_states[j]->Present_0.resource().is_init()
+                        &&& stash_states[j]->Present_0.resource().value() == v
                         &&& stash_states[j]->Present_0.id() == gen_id
                         &&& stash_states[j]->Present_0.frac() == piece_frac
                     },
@@ -471,6 +506,7 @@ impl<T> Slot<T> {
                     &&& stash_states[j] is Present
                     &&& stash_states[j]->Present_0.resource().ptr() == ptr
                     &&& stash_states[j]->Present_0.resource().is_init()
+                    &&& stash_states[j]->Present_0.resource().value() == v
                     &&& stash_states[j]->Present_0.id() == gen_id
                     &&& stash_states[j]->Present_0.frac() == piece_frac
                 } by {
@@ -526,6 +562,7 @@ impl<T> Slot<T> {
             claimed_id: claimed.id(),
             gen_id: gen_auth.id(),
             vacant_flag_id: vacant_flag.id(),
+            content,
         };
         proof {
             broadcast use vstd::seq::group_seq_lemmas;
@@ -556,11 +593,18 @@ impl<T> Slot<T> {
                 &&& stash_perms[i].value().addr() != 0
                 &&& stash_states[i]->Present_0.resource().ptr() == stash_perms[i].value()
                 &&& stash_states[i]->Present_0.resource().is_init()
+                &&& stash_states[i]->Present_0.resource().value() == v
                 &&& stash_states[i]->Present_0.id() == gen_auth@[retirer_key()]
                 &&& stash_states[i]->Present_0.frac() == piece_frac
             } by {
                 assert(stash_perms[i].id() == stash@[i].id());
             }
+            // Content invariant: `frac`'s (and hence every split-off piece's) resource is
+            // exactly the one `epoch_alloc`/`Frac::new` installed `v` into above, so `content(v)`
+            // (this function's own `requires`) discharges both `SlotBigPred::inv`'s `Occupied`
+            // and `Present` arms in one step.
+            assert(frac.resource().value() == v);
+            assert(content(v));
         }
         let tracked big = SlotBig {
             gate_perm,
@@ -639,6 +683,7 @@ impl<T> Slot<T> {
                 &&& result.1@->Some_0.1.id() == self.gen_loc()
                 &&& result.1@->Some_0.1.key() == reader_idx as int
                 &&& result.1@->Some_0.0.id() == result.1@->Some_0.1.value()
+                &&& self.content()(result.1@->Some_0.0.resource().value())
             },
     {
         proof {
@@ -708,6 +753,9 @@ impl<T> Slot<T> {
             gen_frag.id() == self.gen_loc(),
             gen_frag.key() == reader_idx as int,
             piece.id() == gen_frag.value(),
+            // Exactly what `SlotBigPred::inv`'s `Present` arm demands, same reasoning as the
+            // fraction above -- callers already have it from `checkout`'s own postcondition.
+            self.content()(piece.resource().value()),
     {
         proof {
             use_type_invariant(self);
@@ -1051,6 +1099,7 @@ impl<T> Slot<T> {
             reader_frags.id() == self.gen_loc(),
             forall|k: int| #[trigger]
                 reader_frags@.contains_key(k) <==> (0 <= k < self.num_readers()),
+            self.content()(v),
         ensures
             result@.id() == self.gen_loc(),
             result@.key() == retirer_key(),
@@ -1089,19 +1138,21 @@ impl<T> Slot<T> {
                 pieces.len() == i,
                 frac.resource().ptr() == ptr,
                 frac.resource().is_init(),
+                frac.resource().value() == v,
                 frac.id() == gen_id,
                 ptr.addr() != 0,
                 frac.frac() == 1 as real - (i as real) * piece_frac,
                 piece_frac * (n as real + 1 as real) == 1 as real,
                 // Without these, the pieces reach the publish loop as opaque values and
                 // `SlotBigPred::inv`'s `Present` arm (which pins each piece's id, fraction,
-                // pointer and initialisation) cannot be re-established there.
+                // pointer, initialisation and content) cannot be re-established there.
                 forall|k: int|
                     0 <= k < pieces.len() ==> {
                         &&& #[trigger] pieces[k].id() == gen_id
                         &&& pieces[k].frac() == piece_frac
                         &&& pieces[k].resource().ptr() == ptr
                         &&& pieces[k].resource().is_init()
+                        &&& pieces[k].resource().value() == v
                     },
             decreases n - i,
         {
@@ -1132,6 +1183,7 @@ impl<T> Slot<T> {
                     &&& pieces[k].frac() == piece_frac
                     &&& pieces[k].resource().ptr() == ptr
                     &&& pieces[k].resource().is_init()
+                    &&& pieces[k].resource().value() == v
                 } by {
                     assert(pieces[k] == old_pieces.push(piece)[k]);
                     if k < old_len {
@@ -1211,6 +1263,11 @@ impl<T> Slot<T> {
                 retirer_key() <= key < kk.stash_ids.len()) by {}
                 assert forall|key: int| retirer_key() <= key < kk.stash_ids.len() implies
                     #[trigger] big.gen_auth@[key] == big.gen_auth@[retirer_key()] by {}
+                // Content invariant for the `Occupied` arm: `frac`'s resource is exactly what
+                // `epoch_alloc`/`Frac::new` installed `v` into above, and `self.content()(v)` is
+                // this function's own `requires`.
+                assert(big.gate_state->Occupied_frac.resource().value() == v);
+                assert(self.content()(v));
                 assert(SlotBigPred::<T>::inv(kk, big));
             }
         });
@@ -1229,6 +1286,11 @@ impl<T> Slot<T> {
                 pieces.len() == n - j,
                 ptr.addr() != 0,
                 piece_frac == 1 as real / (n as real + 1 as real),
+                // `requires`-level facts about unchanging parameters don't carry into a loop body
+                // on their own -- a `while` loop's body is checked against its own `invariant`
+                // clause alone, so this (needed to re-establish `SlotBigPred::inv`'s `Present`
+                // arm below) has to be restated here.
+                self.content()(v),
                 all_frags.id() == self.gen_loc(),
                 forall|k: int| #[trigger] all_frags@.contains_key(k) <==> (j <= k < n as int),
                 forall|k: int| j <= k < n as int ==> #[trigger] all_frags@[k] == gen_id,
@@ -1238,6 +1300,7 @@ impl<T> Slot<T> {
                         &&& pieces[k].frac() == piece_frac
                         &&& pieces[k].resource().ptr() == ptr
                         &&& pieces[k].resource().is_init()
+                        &&& pieces[k].resource().value() == v
                     },
             decreases n - j,
         {
@@ -1250,12 +1313,13 @@ impl<T> Slot<T> {
                 piece = pieces.tracked_remove(0);
                 assert(piece == old_pieces[0]);
                 // Instantiate the loop invariant at `k == 0` by its own trigger term, so the
-                // removed piece's fraction, pointer and initialisation -- everything the
+                // removed piece's fraction, pointer, initialisation and content -- everything the
                 // `Present` arm demands of it -- are known to the publish block below.
                 assert(old_pieces[0].id() == gen_id);
                 assert(piece.frac() == piece_frac);
                 assert(piece.resource().ptr() == ptr);
                 assert(piece.resource().is_init());
+                assert(piece.resource().value() == v);
                 // `Seq::remove`'s index lemma is *not* in `group_seq_lemmas` (unlike `push`'s),
                 // so shifting a per-index fact across a `tracked_remove` needs it called by hand.
                 old_pieces.remove_ensures(0);
@@ -1264,6 +1328,7 @@ impl<T> Slot<T> {
                     &&& pieces[k].frac() == piece_frac
                     &&& pieces[k].resource().ptr() == ptr
                     &&& pieces[k].resource().is_init()
+                    &&& pieces[k].resource().value() == v
                 } by {
                     // Mentions the loop invariant's own trigger term (`old_pieces[k + 1].id()`),
                     // not just `old_pieces[k + 1]` -- otherwise the invariant is never
@@ -1320,6 +1385,10 @@ impl<T> Slot<T> {
                         &&& #[trigger] big.stash_states[i] == states_before[i]
                         &&& big.stash_perms[i] == perms_before[i]
                     } by {}
+                    // Content invariant for this cell's `Present` arm -- `piece`'s resource is the
+                    // one split off `frac` above, which the splitting loop already tied to `v`.
+                    assert(big.stash_states[j as int]->Present_0.resource().value() == v);
+                    assert(self.content()(v));
                     assert(SlotBigPred::<T>::inv(kk, big));
                 }
             });
@@ -1372,7 +1441,7 @@ pub fn reclaim<T>(ptr: *mut T, Tracked(occupant): Tracked<SlotState<T>>) -> (res
 // `verus_builtin::Tracked`'s definition) and holds *zero* bytes in any build that actually runs
 // (i.e. one not compiled through the Verus frontend) -- but Rust's auto-trait inference for
 // `PhantomData<A>` conservatively mirrors `A`'s own bounds regardless, and `A` here
-// (`AtomicInvariant<SlotKey, SlotBig<T>, SlotBigPred<T>>`) contains a `*mut T`-typed ghost
+// (`AtomicInvariant<SlotKey<T>, SlotBig<T>, SlotBigPred<T>>`) contains a `*mut T`-typed ghost
 // permission token deep inside `SlotBig<T>`, which is enough to make raw auto-derivation fail
 // even though no such pointer is ever actually stored. These impls correct that false negative;
 // they do not change what is actually shared. The bounds mirror `Arc<T>`'s own

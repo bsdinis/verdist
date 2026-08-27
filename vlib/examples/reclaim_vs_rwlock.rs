@@ -72,7 +72,11 @@ fn run_epoch(num_readers: usize, num_writers: usize, duration: Duration) -> Benc
         value: 0,
         timestamp: 0,
     };
-    let ptr = Arc::new(EpochAtomicPtr::new(initial, num_slots, num_readers));
+    let ptr = Arc::new(EpochAtomicPtr::new_unconstrained(
+        initial,
+        num_slots,
+        num_readers,
+    ));
     let stop = Arc::new(AtomicBool::new(false));
 
     let readers: Vec<_> = (0..num_readers)
@@ -212,7 +216,11 @@ fn run_epoch_rmw(num_readers: usize, num_writers: usize, duration: Duration) -> 
         timestamp: 0,
     };
     let total_readers = num_readers + num_writers.max(1);
-    let ptr = Arc::new(EpochAtomicPtr::new(initial, num_slots, total_readers));
+    let ptr = Arc::new(EpochAtomicPtr::new_unconstrained(
+        initial,
+        num_slots,
+        total_readers,
+    ));
     let stop = Arc::new(AtomicBool::new(false));
 
     let readers: Vec<_> = (0..num_readers)

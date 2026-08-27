@@ -60,7 +60,11 @@ pub trait MutService {
             Self::ChanInv::send_inv(self.channel_inv(), channel_id, response),
     ;
 
-    fn handle(&mut self, channel_id: (u64, u64), request: Self::Request) -> (r: Self::Response)
+    /// `shard_idx` names the worker thread this call is running on (see `Server::run`). It is a
+    /// plain exec value with no spec meaning -- nothing in `pre`/`post` mentions it. Services that
+    /// need a per-thread identity (e.g. a hazard-pointer reader slot) use it; others ignore it.
+    fn handle(&mut self, shard_idx: usize, channel_id: (u64, u64), request: Self::Request) -> (r:
+        Self::Response)
         requires
             old(self).spec_id() == channel_id.0,
             old(self).pre(channel_id, request),
@@ -120,7 +124,11 @@ pub trait Service {
             Self::ChanInv::send_inv(self.channel_inv(), channel_id, response),
     ;
 
-    fn handle(&self, channel_id: (u64, u64), request: Self::Request) -> (r: Self::Response)
+    /// `shard_idx` names the worker thread this call is running on (see `Server::run`). It is a
+    /// plain exec value with no spec meaning -- nothing in `pre`/`post` mentions it. Services that
+    /// need a per-thread identity (e.g. a hazard-pointer reader slot) use it; others ignore it.
+    fn handle(&self, shard_idx: usize, channel_id: (u64, u64), request: Self::Request) -> (r:
+        Self::Response)
         requires
             self.spec_id() == channel_id.0,
             self.pre(channel_id, request),
@@ -615,6 +623,7 @@ impl<S, L, C> Server<S, L, C> where
         cursor: &mut usize,
         drop_scratch: &mut HashSet<C::Id>,
         shard_load: &ShardLoad,
+        shard_idx: usize,
     )
         requires
             self.shard_inv(old(connected)@),
@@ -667,7 +676,7 @@ impl<S, L, C> Server<S, L, C> where
                     proof {
                         self.service.recv_implies_pre(channel.spec_id(), req);
                     }
-                    let response = self.service.handle(channel.id(), req);
+                    let response = self.service.handle(shard_idx, channel.id(), req);
                     proof {
                         self.service.post_implies_send(channel.spec_id(), req, response);
                     }
@@ -718,6 +727,7 @@ impl<S, L, C> Server<S, L, C> where
         cursor: &mut usize,
         drop_scratch: &mut HashSet<C::Id>,
         shard_load: &ShardLoad,
+        shard_idx: usize,
     )
         requires
             self.shard_inv(old(connected)@),
@@ -728,7 +738,7 @@ impl<S, L, C> Server<S, L, C> where
             use_type_invariant(self);
         }
         self.drain_raw(raw_rx, connected);
-        self.scan_full(connected, cursor, drop_scratch, shard_load);
+        self.scan_full(connected, cursor, drop_scratch, shard_load, shard_idx);
     }
 }
 
@@ -816,6 +826,7 @@ impl<S, L, C> Server<S, L, C> where
         ready: &std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
         shard_load: &ShardLoad,
+        shard_idx: usize,
     )
         requires
             self.shard_inv(old(connected)@),
@@ -855,7 +866,7 @@ impl<S, L, C> Server<S, L, C> where
                         proof {
                             self.service.recv_implies_pre(channel.spec_id(), req);
                         }
-                        let response = self.service.handle(channel.id(), req);
+                        let response = self.service.handle(shard_idx, channel.id(), req);
                         proof {
                             self.service.post_implies_send(channel.spec_id(), req, response);
                         }
@@ -914,6 +925,7 @@ impl<S, L, C> Server<S, L, C> where
         ready_scratch: &mut std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
         shard_load: &ShardLoad,
+        shard_idx: usize,
     )
         requires
             self.shard_inv(old(connected)@),
@@ -934,10 +946,10 @@ impl<S, L, C> Server<S, L, C> where
             // blind scan runs, and it only runs when nothing else was pending anyway -- see
             // `claude-files/UdpReadRegression.md` for why the previous unconditional-every-call
             // version of this was the regression.
-            self.scan_full(connected, cursor, drop_scratch, shard_load);
+            self.scan_full(connected, cursor, drop_scratch, shard_load, shard_idx);
             return;
         }
-        self.scan_ready(connected, ready_scratch, drop_scratch, shard_load)
+        self.scan_ready(connected, ready_scratch, drop_scratch, shard_load, shard_idx)
     }
 
     /// Blocks (via real epoll/kqueue readiness on the listener fd, with the same fallback
@@ -1012,12 +1024,18 @@ where
                     let mut drop_scratch = std::collections::HashSet::new();
                     let shard_load = &self.shard_loads[shard];
                     loop {
+                        // `shard` is passed straight through to `Service::handle` as its
+                        // `shard_idx`. Like the `self.shard_loads[shard]` index above, its being
+                        // in range rests on this loop's own `enumerate()` over `raw_receivers`
+                        // rather than on a proof -- this fn is outside the `verus!` block for the
+                        // structural reason documented above, so nothing here is machine-checked.
                         self.poll_shard(
                             &raw_rx,
                             &mut connected,
                             &mut cursor,
                             &mut drop_scratch,
                             shard_load,
+                            shard,
                         );
                     }
                 });
@@ -1083,6 +1101,8 @@ where
                             &mut ready_scratch,
                             &mut drop_scratch,
                             shard_load,
+                            // Same trusted hand-off as `run`'s -- see the comment there.
+                            shard,
                         );
                     }
                 });

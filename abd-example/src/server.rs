@@ -13,6 +13,7 @@ fn main() {
     };
 
     let server_ids = args.servers.keys().copied().collect();
+    let backend = args.backend.to_abd_backend();
 
     match args.network {
         cli::NetworkType::Modelled => {
@@ -27,6 +28,7 @@ fn main() {
                     args.server_id,
                     listener,
                     args.num_threads,
+                    backend,
                 );
             } else {
                 abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
@@ -34,6 +36,7 @@ fn main() {
                     args.server_id,
                     listener,
                     args.num_threads,
+                    backend,
                 );
             }
         }
@@ -46,6 +49,7 @@ fn main() {
                     args.server_id,
                     listener,
                     args.num_threads,
+                    backend,
                 );
             } else {
                 abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
@@ -53,6 +57,7 @@ fn main() {
                     args.server_id,
                     listener,
                     args.num_threads,
+                    backend,
                 );
             }
         }

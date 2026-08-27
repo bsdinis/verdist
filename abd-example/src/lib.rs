@@ -304,6 +304,7 @@ pub mod server {
         server_id: u64,
         listener: L,
         num_threads: usize,
+        backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Send + Sync + 'static,
         C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
@@ -316,7 +317,7 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         let server = Arc::new(server);
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
@@ -330,6 +331,7 @@ pub mod server {
         server_id: u64,
         listener: L,
         num_threads: usize,
+        backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
         C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
@@ -339,7 +341,7 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run(raw_receivers);
@@ -354,6 +356,7 @@ pub mod server {
         server_id: u64,
         listener: L,
         num_threads: usize,
+        backend: abd::server::RegisterBackend,
     ) where
         L: RawFdListener<C> + Sync,
         C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
@@ -363,7 +366,7 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run_epoll(raw_receivers);

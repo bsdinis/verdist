@@ -1,3 +1,5 @@
+use clap::Parser;
+
 use abd_example::cli;
 use abd_example::server;
 use specs::register::OwnedReadPerm;
@@ -16,6 +18,18 @@ fn main() {
 
     match args.network {
         cli::NetworkType::Modelled => {
+            // The client process is also responsible for spawning the (test-only) in-process
+            // server(s) a modelled-network run needs; re-read the same `--config` file purely to
+            // learn which register backend those spawned servers should use. `RegisterBackend`
+            // never becomes a field of `ClientArgs` itself -- the client's own protocol code has
+            // no use for it.
+            let register_backend = {
+                let raw = cli::ClientParsedArgs::parse();
+                abd_example::config::Config::parse(raw.config)
+                    .map(|c| c.backend)
+                    .unwrap_or_default()
+                    .to_abd_backend()
+            };
             let connectors = args
                 .servers
                 .values()
@@ -27,6 +41,7 @@ fn main() {
                         server_conf.id,
                         listener,
                         cli::default_num_threads(),
+                        register_backend,
                     );
                     connector
                 })

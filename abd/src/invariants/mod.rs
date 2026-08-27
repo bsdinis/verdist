@@ -18,6 +18,9 @@ use vstd::resource::Loc;
 use specs::register::RegisterRead;
 use specs::register::RegisterWrite;
 
+#[cfg(verus_only)]
+use crate::resource::monotonic_timestamp::MonotonicTimestampResource;
+
 #[allow(unused_imports)]
 use crate::timestamp::Timestamp;
 
@@ -109,6 +112,98 @@ impl<ML, RL> State<ML, RL> where
                 self.linearization_queue.watermark() <= self.servers.quorum_timestamp(q)
             }
     }
+}
+
+/// Claim `server_id`'s slot in the server universe: split off a fresh `HalfRightToAdvance` for
+/// it, mint its `ServerToken`, and hand back a duplicate of the zero commitment -- exactly the
+/// ghost sequence both register backends need at construction time (`MonotonicRegisterInner::new`
+/// in `server/register.rs` and `EpochMonotonicRegister::new` in `server/lockfree.rs`). Factored
+/// out so that sequence -- and the one `assume` inside it -- exists exactly once in the codebase
+/// instead of once per backend (see `claude-files/backend_switch_questions.md` Q1).
+///
+/// Re-establishes `state.inv()` itself: callers only need to open the state invariant, call this,
+/// and use the returned triple -- no bookkeeping of their own is required to close the invariant
+/// back up.
+pub proof fn claim_server<ML, RL>(tracked state: &mut State<ML, RL>, server_id: u64) -> (tracked r:
+    (MonotonicTimestampResource, ServerToken, WriteCommitment)) where
+    ML: MutLinearizer<RegisterWrite>,
+    RL: ReadLinearizer<RegisterRead>,
+
+    requires
+        old(state).inv(),
+        old(state).servers.locs().contains_key(server_id),
+    ensures
+        final(state).inv(),
+        final(state).register.id() == old(state).register.id(),
+        final(state).linearization_queue.ids() == old(state).linearization_queue.ids(),
+        final(state).servers.locs() == old(state).servers.locs(),
+        final(state).commitments.ids() == old(state).commitments.ids(),
+        final(state).request_map.ids() == old(state).request_map.ids(),
+        final(state).server_tokens.id() == old(state).server_tokens.id(),
+        // r.0 = the freshly split `HalfRightToAdvance` for `server_id`
+        r.0@ is HalfRightToAdvance,
+        r.0@.timestamp() == Timestamp::spec_default(),
+        r.0.loc() == old(state).servers.locs()[server_id],
+        // r.1 = server_id's freshly minted token
+        r.1.id() == final(state).server_tokens.id(),
+        r.1.key() == server_id,
+        r.1.value() == r.0.loc(),
+        // r.2 = a duplicate of the zero commitment
+        r.2.id() == final(state).commitments.commitment_id(),
+        r.2.key() == Timestamp::spec_default(),
+        r.2.value() == None::<u64>,
+{
+    let tracked zero_commitment = state.commitments.zero_commitment();
+
+    let ghost old_servers = state.servers;
+    let ghost old_unclaimed = state.unclaimed_servers();
+    let ghost old_tokens = state.server_tokens@;
+
+    assert(old_tokens <= old_servers.locs());
+    // XXX: server login -- the single hole in this file. There is no ghost "server login"
+    // protocol anywhere in this codebase establishing that `server_id` is currently unclaimed
+    // (only that it is *in* `server_locs`, via this function's own `requires`); a real login
+    // handshake would produce that fact honestly and this `assume` would be replaced by it, here
+    // and only here -- both register backends claim a server exclusively by calling
+    // `claim_server`, so this is the one and only copy of this trust hole in `abd`.
+    assume(state.unclaimed_servers().contains(server_id));
+    state.servers.lemma_inv();
+    assert(old_servers.dom().contains(server_id));
+    assert(old_servers.contains_key(server_id));
+    let tracked resource = state.servers.split_auth(server_id);
+    let tracked server_token = state.server_tokens.insert(server_id, resource.loc());
+    state.servers.lemma_inv();
+    assert forall|id| #[trigger]
+        state.unclaimed_servers().contains(
+            id,
+        ) implies state.servers[id]@@ is FullRightToAdvance by {
+        assert(state.servers.dom().contains(id));
+        assert(old_servers.dom().contains(id));
+        assert(old_servers.contains_key(id));  // TRIGGER
+        // TRIGGER case search (?)
+        if old_unclaimed.contains(id) {
+        } else {
+        }
+    }
+
+    assert(state.servers.dom().contains(server_id));
+    assert(state.servers.contains_key(server_id));
+    assert(resource.loc() == state.servers.locs()[server_id]);
+    assert(state.server_tokens@ <= state.servers.locs());
+    state.servers.lemma_inv();
+    assert(state.servers.locs().dom() == state.servers.dom());
+    assert forall|id| #[trigger]
+        state.server_tokens@.contains_key(id) implies state.servers[id]@@ is HalfRightToAdvance by {
+        assert(state.servers.dom().contains(id));
+        assert(old_servers.dom().contains(id));
+        assert(old_servers.contains_key(id));  // TRIGGER
+    }
+
+    old_servers.lemma_leq_quorums(state.servers, state.linearization_queue.watermark());
+
+    // XXX: debug assert
+    assert(state.inv());
+    (resource, server_token, zero_commitment)
 }
 
 impl<ML, RL> InvariantPredicate<StatePredicate, State<ML, RL>> for StatePredicate where

@@ -24,6 +24,39 @@ pub enum NetworkType {
     Udp,
 }
 
+/// Which register backend the server should build (design doc
+/// `claude-files/monotonic_register_backend_switch.md`, section 5.5/6). Wired exactly like
+/// `NetworkType` above (same derives, same `rename_all`), but server-only -- it never reaches
+/// `ClientArgs`, since the client's own protocol code has no use for it.
+#[derive(
+    serde::Deserialize, serde::Serialize, clap::ValueEnum, Clone, Copy, Default, Debug, PartialEq,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum RegisterBackend {
+    /// The original `MonotonicRegister`: an `RwLock`-guarded register (exclusive writers, shared
+    /// readers). See `abd/src/server/register.rs`.
+    #[default]
+    Locked,
+
+    /// The lock-free `EpochMonotonicRegister`: epoch-reclaimed snapshots, readers never block
+    /// behind a writer. See `abd/src/server/lockfree.rs`.
+    Lockfree,
+}
+
+impl RegisterBackend {
+    /// Convert to `abd`'s own (Verus-native) `RegisterBackend`, the type `create_server` actually
+    /// takes. A plain associated fn rather than a `From` impl: `Self` and
+    /// `abd::server::RegisterBackend` each live in a different crate from `From`'s definition, so
+    /// neither direction of `impl From<..> for ..` between them would satisfy the orphan rules
+    /// here.
+    pub fn to_abd_backend(self) -> abd::server::RegisterBackend {
+        match self {
+            RegisterBackend::Locked => abd::server::RegisterBackend::Locked,
+            RegisterBackend::Lockfree => abd::server::RegisterBackend::Lockfree,
+        }
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize, clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
@@ -120,6 +153,9 @@ pub struct ServerArgs {
     /// What network type to run
     pub network: NetworkType,
 
+    /// Which register backend to use
+    pub backend: RegisterBackend,
+
     /// Servers in the system
     pub servers: HashMap<u64, ServerConfig>,
 }
@@ -166,10 +202,19 @@ impl ClientArgs {
                 op: args.op,
                 start: args.start.map(|x| x.into()),
                 duration: args.duration.into(),
-                // `0` is not a valid thread count -- treat it the same as "unset" rather than
-                // handing Server::new a value that violates its `num_shards > 0` precondition.
-                num_threads: args.num_threads.filter(|n| *n != 0).or(
-                    config.num_threads.filter(|n| *n != 0),
+                // `0` is not a valid thread count, and `create_server`'s `num_threads + 2 <=
+                // vlib::reclaim::atomic_ptr::INDEX_SPACE` precondition (needed for the
+                // `Lockfree` backend's `EpochAtomicPtr` slot sizing, and required
+                // unconditionally since a `requires` can't branch on the runtime `backend`
+                // choice) rules out anything within 2 of `usize::MAX` too -- treat either as
+                // "unset" rather than handing `create_server` a value that violates its
+                // precondition.
+                num_threads: args.num_threads.filter(
+                    |n| { *n != 0 && *n <= vlib::reclaim::atomic_ptr::INDEX_SPACE - 2 },
+                ).or(
+                    config.num_threads.filter(
+                        |n| { *n != 0 && *n <= vlib::reclaim::atomic_ptr::INDEX_SPACE - 2 },
+                    ),
                 ).unwrap_or_else(default_num_threads),
             },
         )
@@ -193,6 +238,7 @@ impl ServerArgs {
             ServerArgs {
                 server_id: args.server_id,
                 network: config.network,
+                backend: config.backend,
                 servers: config.servers,
             },
         )

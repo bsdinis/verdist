@@ -97,6 +97,9 @@ impl Service for EchoService {
 
     fn handle(
         &self,
+        // Single-server protocol with no per-thread state: nothing here needs a shard identity.
+        #[allow(unused_variables)]
+        shard_idx: usize,
         #[allow(unused_variables)]
         channel_id: (u64, u64),
         request: Request,

@@ -75,46 +75,14 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
         let tracked server_token;
         vstd::open_atomic_invariant!(&state_inv.borrow() => state => {
             proof {
-                zero_commitment = state.commitments.zero_commitment();
-
-                let ghost old_servers = state.servers;
-                let ghost old_unclaimed = state.unclaimed_servers();
-                let ghost old_tokens = state.server_tokens@;
-
-                assert(old_tokens <= old_servers.locs());
-                assume(state.unclaimed_servers().contains(server_id)); // XXX: server login
-                state.servers.lemma_inv();
-                assert(old_servers.dom().contains(server_id));
-                assert(old_servers.contains_key(server_id));
-                resource = state.servers.split_auth(server_id);
-                server_token = state.server_tokens.insert(server_id, resource.loc());
-                state.servers.lemma_inv();
-                assert forall |id| #[trigger] state.unclaimed_servers().contains(id) implies state.servers[id]@@ is FullRightToAdvance by {
-                    assert(state.servers.dom().contains(id));
-                    assert(old_servers.dom().contains(id));
-                    assert(old_servers.contains_key(id)); // TRIGGER
-                    // TRIGGER case search (?)
-                    if old_unclaimed.contains(id) {
-                    } else {
-                    }
-                }
-
-                assert(state.servers.dom().contains(server_id));
-                assert(state.servers.contains_key(server_id));
-                assert(resource.loc() == state.servers.locs()[server_id]);
-                assert(state.server_tokens@ <= state.servers.locs());
-                state.servers.lemma_inv();
-                assert(state.servers.locs().dom() == state.servers.dom());
-                assert forall |id| #[trigger] state.server_tokens@.contains_key(id) implies state.servers[id]@@ is HalfRightToAdvance by {
-                    assert(state.servers.dom().contains(id));
-                    assert(old_servers.dom().contains(id));
-                    assert(old_servers.contains_key(id)); // TRIGGER
-                }
-
-                old_servers.lemma_leq_quorums(state.servers, state.linearization_queue.watermark());
+                // Claim this server's slot in the universe and mint its server token -- see
+                // `invariants::claim_server` for the ghost sequence (shared with the lock-free
+                // backend's `EpochMonotonicRegister::new`) and its single `assume`.
+                let tracked (r, tok, zc) = invariants::claim_server(&mut state, server_id);
+                resource = r;
+                server_token = tok;
+                zero_commitment = zc;
             }
-            // XXX: debug assert
-            assert(state.inv());
         });
         MonotonicRegisterInner {
             id: server_id,

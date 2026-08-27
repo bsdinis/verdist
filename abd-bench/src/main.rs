@@ -1,3 +1,5 @@
+use clap::Parser;
+
 use specs::register::{OwnedReadPerm, OwnedWritePerm};
 
 pub mod cli;
@@ -19,6 +21,18 @@ fn main() {
 
     match args.network {
         cli::NetworkType::Modelled => {
+            // The client process is also responsible for spawning the (test-only) in-process
+            // server(s) a modelled-network run needs; re-read the same `--config` file purely to
+            // learn which register backend those spawned servers should use. `RegisterBackend`
+            // never becomes a field of `ClientArgs` itself -- the client's own protocol code has
+            // no use for it.
+            let register_backend = {
+                let raw = cli::ClientParsedArgs::parse();
+                config::Config::parse(raw.config)
+                    .map(|c| c.backend)
+                    .unwrap_or_default()
+                    .to_abd_backend()
+            };
             let connectors = args
                 .servers
                 .values()
@@ -30,6 +44,7 @@ fn main() {
                         server_conf.id,
                         listener,
                         args.num_threads,
+                        register_backend,
                     );
                     connector
                 })
@@ -88,6 +103,7 @@ pub mod server {
         server_id: u64,
         listener: L,
         num_threads: usize,
+        backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Send + Sync + 'static,
         C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
@@ -100,7 +116,7 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         let server = Arc::new(server);
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
@@ -114,6 +130,7 @@ pub mod server {
         server_id: u64,
         listener: L,
         num_threads: usize,
+        backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
         C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
@@ -123,7 +140,7 @@ pub mod server {
         <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads);
+            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run(raw_receivers);

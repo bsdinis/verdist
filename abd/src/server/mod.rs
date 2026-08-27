@@ -4,14 +4,16 @@ use crate::invariants;
 #[cfg(verus_only)]
 use crate::invariants::quorum::ServerUniverseLb;
 use crate::proto::GetRequest;
+use crate::proto::GetResponse;
 use crate::proto::GetTimestampRequest;
+use crate::proto::GetTimestampResponse;
 use crate::proto::Request;
 use crate::proto::RequestInner;
 use crate::proto::Response;
 use crate::proto::ResponseInner;
 use crate::proto::WriteRequest;
-#[cfg(verus_only)]
 use crate::proto::WriteResponse;
+use crate::server::lockfree::EpochMonotonicRegister;
 use crate::server::register::MonotonicRegister;
 
 use specs::register::RegisterRead;
@@ -32,9 +34,127 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::resource::Loc;
 
+pub mod lockfree;
 pub mod register;
 
 verus! {
+
+/// Which `RegisterStore` variant `create_server` should build (design doc section 5.5). Plain
+/// runtime data with no spec meaning of its own -- CLI/config wiring (`abd-example`/`abd-bench`)
+/// is a later phase; this is just what `create_server` needs to pick a backend today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisterBackend {
+    Locked,
+    Lockfree,
+}
+
+/// Runtime switch between the two register backends (design doc section 5.5): same identity
+/// (`resource_loc`/`commitment_id`/`server_token_id`/`id`) and (`shard_idx`-taking)
+/// `read`/`read_timestamp`/`write` contracts as `MonotonicRegister` itself (`register.rs`), so
+/// `RegisterService` below can hold either without any change to its own contracts. `shard_idx`
+/// only ever selects an `EpochMonotonicRegister` reader slot (see `lockfree.rs`'s module docs) --
+/// the `Locked` arm has no reader slots to pick between and simply ignores it.
+pub enum RegisterStore<ML, RL> where
+    ML: MutLinearizer<RegisterWrite>,
+    RL: ReadLinearizer<RegisterRead>,
+ {
+    Locked(MonotonicRegister<ML, RL>),
+    Lockfree(EpochMonotonicRegister<ML, RL>),
+}
+
+impl<ML, RL> RegisterStore<ML, RL> where
+    ML: MutLinearizer<RegisterWrite>,
+    RL: ReadLinearizer<RegisterRead>,
+ {
+    pub closed spec fn resource_loc(self) -> Loc {
+        match self {
+            RegisterStore::Locked(r) => r.resource_loc(),
+            RegisterStore::Lockfree(r) => r.resource_loc(),
+        }
+    }
+
+    pub closed spec fn commitment_id(self) -> Loc {
+        match self {
+            RegisterStore::Locked(r) => r.commitment_id(),
+            RegisterStore::Lockfree(r) => r.commitment_id(),
+        }
+    }
+
+    pub closed spec fn server_token_id(self) -> Loc {
+        match self {
+            RegisterStore::Locked(r) => r.server_token_id(),
+            RegisterStore::Lockfree(r) => r.server_token_id(),
+        }
+    }
+
+    pub closed spec fn id(self) -> u64 {
+        match self {
+            RegisterStore::Locked(r) => r.id(),
+            RegisterStore::Lockfree(r) => r.id(),
+        }
+    }
+
+    /// Exactly `MonotonicRegister::read`'s contract (`register.rs`), plus a leading `shard_idx`
+    /// forwarded to `EpochMonotonicRegister::read` and ignored by `Locked`.
+    pub fn read(&self, shard_idx: usize, req: GetRequest) -> (r: GetResponse)
+        requires
+            req.servers().locs().contains_key(self.id()),
+            req.servers().locs()[self.id()] == self.resource_loc(),
+        ensures
+            r.loc() == self.resource_loc(),
+            r.server_id() == self.id(),
+            r.spec_commitment().id() == self.commitment_id(),
+            r.server_token_id() == self.server_token_id(),
+            req.servers().contains_key(r.server_id()),
+            req.servers()[r.server_id()]@@.timestamp() <= r.spec_timestamp(),
+    {
+        match self {
+            RegisterStore::Locked(r) => r.read(req),
+            RegisterStore::Lockfree(r) => r.read(shard_idx, req),
+        }
+    }
+
+    /// Exactly `MonotonicRegister::read_timestamp`'s contract (`register.rs`), plus a leading
+    /// `shard_idx` forwarded to `EpochMonotonicRegister::read_timestamp` and ignored by `Locked`.
+    pub fn read_timestamp(&self, shard_idx: usize, req: GetTimestampRequest) -> (r:
+        GetTimestampResponse)
+        requires
+            req.servers().locs().contains_key(self.id()),
+            req.servers().locs()[self.id()] == self.resource_loc(),
+        ensures
+            r.loc() == self.resource_loc(),
+            r.server_id() == self.id(),
+            r.server_token_id() == self.server_token_id(),
+            req.servers().contains_key(r.server_id()),
+            req.servers()[r.server_id()]@@.timestamp() <= r.spec_timestamp(),
+    {
+        match self {
+            RegisterStore::Locked(r) => r.read_timestamp(req),
+            RegisterStore::Lockfree(r) => r.read_timestamp(shard_idx, req),
+        }
+    }
+
+    /// Exactly `MonotonicRegister::write`'s contract (`register.rs`), plus a leading `shard_idx`
+    /// forwarded to `EpochMonotonicRegister::write` and ignored by `Locked`.
+    pub fn write(&self, shard_idx: usize, req: WriteRequest) -> (r: WriteResponse)
+        requires
+            req.servers().locs().contains_key(self.id()),
+            req.servers().locs()[self.id()] == self.resource_loc(),
+            req.commitment_id() == self.commitment_id(),
+        ensures
+            r.loc() == self.resource_loc(),
+            r.server_id() == self.id(),
+            r.server_token_id() == self.server_token_id(),
+            req.servers().contains_key(r.server_id()),
+            req.servers()[r.server_id()]@@.timestamp() <= r.spec_timestamp(),
+            req.spec_timestamp() <= r.spec_timestamp(),
+    {
+        match self {
+            RegisterStore::Locked(r) => r.write(req),
+            RegisterStore::Lockfree(r) => r.write(shard_idx, req),
+        }
+    }
+}
 
 #[verifier::reject_recursive_types(ML)]
 #[verifier::reject_recursive_types(RL)]
@@ -44,8 +164,8 @@ pub struct RegisterService<ML, RL> where
  {
     /// ID of the server
     id: u64,
-    /// Register state
-    register: MonotonicRegister<ML, RL>,
+    /// Register state -- either backend (design doc section 5.5)
+    register: RegisterStore<ML, RL>,
     /// Channel invariant this server's connections are held under
     #[allow(dead_code)]
     channel_inv: Ghost<ChannelInv>,
@@ -55,7 +175,7 @@ impl<ML, RL> RegisterService<ML, RL> where
     ML: MutLinearizer<RegisterWrite>,
     RL: ReadLinearizer<RegisterRead>,
  {
-    pub fn new(id: u64, register: MonotonicRegister<ML, RL>, channel_inv: Ghost<ChannelInv>) -> (r:
+    pub fn new(id: u64, register: RegisterStore<ML, RL>, channel_inv: Ghost<ChannelInv>) -> (r:
         Self)
         requires
             register.id() == id,
@@ -91,7 +211,7 @@ impl<ML, RL> RegisterService<ML, RL> where
         self.channel_inv@.server_locs
     }
 
-    fn handle_get(&self, req: GetRequest) -> (r: ResponseInner)
+    fn handle_get(&self, shard_idx: usize, req: GetRequest) -> (r: ResponseInner)
         requires
             req.servers().locs() == self.server_locs(),
         ensures
@@ -110,10 +230,10 @@ impl<ML, RL> RegisterService<ML, RL> where
         proof {
             use_type_invariant(self);
         }
-        ResponseInner::Get(self.register.read(req))
+        ResponseInner::Get(self.register.read(shard_idx, req))
     }
 
-    fn handle_get_timestamp(&self, req: GetTimestampRequest) -> (r: ResponseInner)
+    fn handle_get_timestamp(&self, shard_idx: usize, req: GetTimestampRequest) -> (r: ResponseInner)
         requires
             req.servers().locs() == self.server_locs(),
         ensures
@@ -131,10 +251,10 @@ impl<ML, RL> RegisterService<ML, RL> where
         proof {
             use_type_invariant(self);
         }
-        ResponseInner::GetTimestamp(self.register.read_timestamp(req))
+        ResponseInner::GetTimestamp(self.register.read_timestamp(shard_idx, req))
     }
 
-    fn handle_write(&self, req: WriteRequest) -> (r: ResponseInner)
+    fn handle_write(&self, shard_idx: usize, req: WriteRequest) -> (r: ResponseInner)
         requires
             req.servers().locs() == self.server_locs(),
             req.commitment_id() == self.commitment_id(),
@@ -154,7 +274,7 @@ impl<ML, RL> RegisterService<ML, RL> where
         proof {
             use_type_invariant(self);
         }
-        ResponseInner::Write(self.register.write(req))
+        ResponseInner::Write(self.register.write(shard_idx, req))
     }
 }
 
@@ -273,6 +393,10 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
 
     fn handle(
         &self,
+        // Forwarded to `RegisterStore`'s `read`/`read_timestamp`/`write` below: the lock-free
+        // backend needs it as its `EpochAtomicPtr::pin` reader identity (design doc section 5.5).
+        // The RwLock backend ignores it.
+        shard_idx: usize,
         #[allow(unused_variables)]
         channel_id: (u64, u64),
         request: Request,
@@ -280,9 +404,9 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         // vlib::veprintln!("[server|{:>3}]: received req: {:?}", self.id, request);
         let (request_id, request_inner, request_proof) = request.destruct();
         let resp_inner = match request_inner {
-            RequestInner::Get(req) => self.handle_get(req),
-            RequestInner::GetTimestamp(req) => self.handle_get_timestamp(req),
-            RequestInner::Write(req) => self.handle_write(req),
+            RequestInner::Get(req) => self.handle_get(shard_idx, req),
+            RequestInner::GetTimestamp(req) => self.handle_get_timestamp(shard_idx, req),
+            RequestInner::Write(req) => self.handle_write(shard_idx, req),
         };
 
         proof {
@@ -334,6 +458,7 @@ pub fn create_server<L, C, ML, RL>(
     my_server_id: u64,
     listener: L,
     num_threads: usize,
+    backend: RegisterBackend,
 ) -> (RegisterServer<L, C, ML, RL>, Vec<crossbeam_channel::Receiver<L::Raw>>) where
     L: Listener<C>,
     C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
@@ -343,6 +468,10 @@ pub fn create_server<L, C, ML, RL>(
     requires
         server_ids@.contains(my_server_id),
         num_threads > 0,
+        // Only load-bearing for the `Lockfree` branch below (`num_slots = num_threads + 2` must
+        // fit `EpochAtomicPtr`'s `INDEX_SPACE`, design doc section 6's sizing rule) -- required
+        // unconditionally since `backend` is a runtime value `requires` cannot branch on.
+        num_threads + 2 <= vlib::reclaim::atomic_ptr::INDEX_SPACE,
         listener.spec_id() == my_server_id,
 {
     let tracked state_inv;
@@ -352,7 +481,18 @@ pub fn create_server<L, C, ML, RL>(
     }
     let state_inv = Tracked(state_inv);
     let ghost channel_inv = ChannelInv::from_state_pred(state_inv@.constant());
-    let register = MonotonicRegister::new(my_server_id, state_inv);
+    // Sizing per design doc section 6: `num_readers = num_threads` (one reader slot per polling
+    // thread -- see `EpochMonotonicRegister::read`'s `shard_idx % self.num_readers`),
+    // `num_slots = num_threads + 2` (writers are already serialized by the gate, so one spare
+    // slot beyond the readers is generous headroom for a reader pinned across a publish).
+    let register = match backend {
+        RegisterBackend::Locked => RegisterStore::Locked(
+            MonotonicRegister::new(my_server_id, state_inv),
+        ),
+        RegisterBackend::Lockfree => RegisterStore::Lockfree(
+            EpochMonotonicRegister::new(my_server_id, state_inv, num_threads, num_threads + 2),
+        ),
+    };
     let service = RegisterService::new(my_server_id, register, Ghost(channel_inv));
     Server::new(service, listener, Ghost(channel_inv), num_threads)
 }

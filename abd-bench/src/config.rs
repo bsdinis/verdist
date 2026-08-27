@@ -27,6 +27,12 @@ pub struct ParsedConfig {
     /// What network type to run
     pub network: crate::cli::NetworkType,
 
+    /// Which register backend the server should use. Server-only -- `ClientArgs` never reads
+    /// this field. Defaulted (rather than required like `network`) so existing configs that
+    /// predate this option keep parsing.
+    #[serde(default)]
+    pub backend: crate::cli::RegisterBackend,
+
     /// Configuration of the servers
     pub server: Vec<ServerConfig>,
 }
@@ -53,6 +59,10 @@ pub struct Config {
 
     /// What network type to run
     pub network: crate::cli::NetworkType,
+
+    /// Which register backend the server should use. Server-only -- `ClientArgs` never reads
+    /// this field.
+    pub backend: crate::cli::RegisterBackend,
 
     /// Configuration of the servers
     pub servers: HashMap<u64, ServerConfig>,
@@ -105,6 +115,7 @@ impl Config {
             client_addr: config.client_addr,
             num_threads: config.num_threads,
             network: config.network,
+            backend: config.backend,
             servers,
         })
     }
@@ -115,5 +126,9 @@ verus! {
 #[allow(unused)]
 #[verifier::external_type_specification]
 pub struct ExConfig(Config);
+
+#[allow(unused)]
+#[verifier::external_type_specification]
+pub struct ExRegisterBackend(crate::cli::RegisterBackend);
 
 } // verus!

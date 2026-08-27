@@ -78,6 +78,10 @@ fn run_epoch(num_readers: usize, num_writers: usize, duration: Duration) -> Benc
         num_readers,
     ));
     let stop = Arc::new(AtomicBool::new(false));
+    // Runs `reclaim_pass` in the background so a writer's own `claim_and_install` finds slots
+    // already idle instead of having to drain+spin for one inline -- see
+    // `EpochAtomicPtr::spawn_reclaimer`'s doc comment.
+    let reclaimer = Arc::clone(&ptr).spawn_reclaimer(Arc::clone(&stop), Duration::from_micros(50));
 
     let readers: Vec<_> = (0..num_readers)
         .map(|reader_idx| {
@@ -129,6 +133,7 @@ fn run_epoch(num_readers: usize, num_writers: usize, duration: Duration) -> Benc
         sink_acc ^= sink;
     }
     let writes = writers.into_iter().map(|h| h.join().unwrap()).sum();
+    reclaimer.join().unwrap();
     std::hint::black_box(sink_acc);
 
     BenchResult {
@@ -222,6 +227,7 @@ fn run_epoch_rmw(num_readers: usize, num_writers: usize, duration: Duration) -> 
         total_readers,
     ));
     let stop = Arc::new(AtomicBool::new(false));
+    let reclaimer = Arc::clone(&ptr).spawn_reclaimer(Arc::clone(&stop), Duration::from_micros(50));
 
     let readers: Vec<_> = (0..num_readers)
         .map(|reader_idx| {
@@ -281,6 +287,7 @@ fn run_epoch_rmw(num_readers: usize, num_writers: usize, duration: Duration) -> 
         sink_acc ^= sink;
     }
     let writes = writers.into_iter().map(|h| h.join().unwrap()).sum();
+    reclaimer.join().unwrap();
     std::hint::black_box(sink_acc);
 
     BenchResult {

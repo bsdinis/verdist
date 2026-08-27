@@ -709,6 +709,61 @@ impl<T> EpochAtomicPtr<T> {
         (idx, Tracked(current_witness))
     }
 
+    // Proactively reclaims slot `idx` if nobody else currently holds its claim: this is exactly
+    // the claim + evacuate + release-to-idle sequence `try_write` already runs on its own
+    // losing-CAS abandon path (see there), but run standalone so a dedicated background thread
+    // can call it -- see `reclaim_pass` below -- ahead of any writer actually needing the slot.
+    // Doing this off a writer's own critical path is the whole point: `evacuate`'s per-cell drain
+    // and its unbounded `while !all_returned` quiescence spin are what this moves out of `write`/
+    // `try_write`'s call path, for slots a background pass gets to first.
+    //
+    // Returns `false` with no effect if `idx` is currently claimed by some other writer (which
+    // includes the published slot itself -- see `reclaim_pass`'s doc comment for why); `true` if
+    // this call claimed, evacuated (a no-op if the slot was already idle) and released it.
+    fn try_reclaim_one(&self, idx: usize) -> (result: bool)
+        requires
+            self.inv(),
+            idx < self.slots.len(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let (ok, Tracked(w)) = self.slots[idx].try_claim();
+        if !ok {
+            return false;
+        }
+        let tracked witness = w.tracked_unwrap();
+        let Tracked(reader_frags) = self.evacuate(idx, Tracked(&witness));
+        self.slots[idx].release_to_idle(Tracked(witness), Tracked(reader_frags));
+        true
+    }
+
+    // Runs one reclamation pass over every slot except whichever is currently published (skipped
+    // as a pure optimization: `Slot::try_claim`'s own compare_exchange would simply fail on it
+    // anyway, since a slot's `claimed` flag is set the moment `claim_and_install` claims it and
+    // is only ever released -- via `release`/`release_to_idle` -- once that slot stops being
+    // current). Call this in a loop from a dedicated background thread (see `spawn_reclaimer`
+    // below) to keep slots idle ahead of any writer needing one, moving `evacuate`'s per-cell
+    // drain and quiescence spin off writers' critical path.
+    pub fn reclaim_pass(&self) {
+        proof {
+            use_type_invariant(self);
+        }
+        let current_idx = self.current_index();
+        let mut i: usize = 0;
+        while i < self.slots.len()
+            invariant
+                self.inv(),
+                i <= self.slots.len(),
+            decreases self.slots.len() - i,
+        {
+            if i != current_idx {
+                let _ = self.try_reclaim_one(i);
+            }
+            i += 1;
+        }
+    }
+
     // Publishes a new value, retiring the previously-current slot unconditionally. See
     // `try_write` for the conditional (RMW) counterpart that shares `claim_and_install` with this.
     pub fn write(&self, v: T)
@@ -916,3 +971,25 @@ impl<T> EpochAtomicPtr<T> {
 }
 
 } // verus!
+// Plain Rust (not `verus!`-checked): a convenience driver for `reclaim_pass`, which is. Spawns a
+// background thread that repeatedly calls it until `stop` is set, sleeping `interval` in between
+// -- this is what actually moves `evacuate`'s per-slot drain and quiescence spin off any writer's
+// critical path: as long as this thread keeps running, most slots a writer's `claim_and_install`
+// picks up next are already idle by the time it gets there. Not part of the verified surface --
+// nothing here makes any safety claim beyond what `reclaim_pass` itself (verified) already
+// guarantees per call; a thread that never runs, or stops early, only affects how often a writer
+// has to do its own inline evacuate/spin, never correctness.
+impl<T: Send + Sync + 'static> EpochAtomicPtr<T> {
+    pub fn spawn_reclaimer(
+        self: std::sync::Arc<Self>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        interval: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                self.reclaim_pass();
+                std::thread::sleep(interval);
+            }
+        })
+    }
+}

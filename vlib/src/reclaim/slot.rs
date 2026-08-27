@@ -39,10 +39,15 @@
 //!
 //! Exclusivity, formalized: the two flags each gate one ledger key. `claimed` is true exactly
 //! when the retirer's key `-1` is checked out (so `try_claim`'s CAS *is* what hands out the
-//! retirer's fragment, and `release` hands it back); `installed_flag` is false only before the
-//! first `writer_put`, which is the one state where the invariant holds every reader's fragment
-//! despite every cell being empty -- letting `write` tell "never installed" from "drained" with an
-//! ordinary atomic read instead of inferring it from ghost state across separate opens.
+//! retirer's fragment, and `release` hands it back); `vacant_flag` is true exactly when the
+//! invariant holds every reader's fragment despite every cell being empty -- true at
+//! construction (nothing has ever been published), and true again once a fully-drained,
+//! already-published slot's fragments are all handed back at once via `release_to_idle`, rather
+//! than being re-published. It is *not* a one-way latch: `writer_put` sets it back to `false` in
+//! the same atomic step it installs a value, and `release_to_idle` sets it back to `true` in the
+//! same atomic step it recombines everything -- letting `write` (and, later, an idle-slot
+//! reclaimer, and a failed-CAS abandon path) tell "nothing to drain" from "needs draining" with
+//! an ordinary atomic read instead of inferring it from ghost state across separate opens.
 use crate::reclaim::frac_ptr;
 
 use vstd::atomic::PAtomicBool;
@@ -98,7 +103,7 @@ pub struct SlotKey {
     pub stash_ids: Seq<int>,
     pub claimed_id: int,
     pub gen_id: Loc,
-    pub installed_flag_id: int,
+    pub vacant_flag_id: int,
 }
 
 // The invariant's tracked payload: everything needed to describe the current state of the gate
@@ -109,12 +114,13 @@ pub tracked struct SlotBig<T> {
     pub stash_perms: Seq<PermissionPtr<T>>,
     pub stash_states: Seq<StashSlot<T>>,
     pub claimed_perm: PermissionBool,
-    // Set once (and forever) `true` by the very first `writer_put` this slot sees -- strictly, by
-    // the `compare_exchange` in `extract_fresh_reader_frags` that hands that call its
-    // reader fragments. Being physical is the point: `write` (exec code) branches on "never
-    // installed" with an ordinary atomic op rather than inferring it from ghost state across
-    // separate opens.
-    pub installed_perm: PermissionBool,
+    // `true` exactly when the invariant holds every reader's ledger key despite every cell being
+    // Empty -- toggled `false` by `writer_put`'s `compare_exchange` (via
+    // `extract_idle_reader_frags`, which hands that call its reader fragments in the same step),
+    // toggled back `true` by `release_to_idle` (which hands them all back in the same step it
+    // sets this). Being physical is the point: `write` (exec code) branches on "nothing to drain"
+    // with an ordinary atomic op rather than inferring it from ghost state across separate opens.
+    pub vacant_perm: PermissionBool,
     // The ledger authority. Domain is fixed forever at `{retirer_key()} ∪ 0..num_readers`; each
     // key's value is the generation id of whichever value is (or was last) published here.
     pub gen_auth: GhostMapAuth<int, Loc>,
@@ -137,7 +143,7 @@ impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
         &&& forall|i: int|
             0 <= i < k.stash_ids.len() ==> #[trigger] big.stash_perms[i].id() == k.stash_ids[i]
         &&& big.claimed_perm.id() == k.claimed_id
-        &&& big.installed_perm.id() == k.installed_flag_id
+        &&& big.vacant_perm.id() == k.vacant_flag_id
         &&& big.gen_auth.id() == k.gen_id
         &&& big.stashed_frags.id()
             == k.gen_id
@@ -161,11 +167,13 @@ impl<T> InvariantPredicate<SlotKey, SlotBig<T>> for SlotBigPred<T> {
         &&& forall|i: int|
             0 <= i < k.stash_ids.len() ==> (#[trigger] big.stashed_frags@.contains_key(i) <==> (
             big.stash_states[i] is Present
-                || !big.installed_perm.value()))
-            // Before the first install every cell is empty -- which is what makes the `!installed`
-            // disjunct above a description of one specific startup state rather than an escape hatch,
-            // and gives `Present ==> installed` everywhere.
-        &&& (!big.installed_perm.value() ==> forall|i: int|
+                || big.vacant_perm.value()))
+            // Whenever `vacant`, every cell is empty -- which is what makes the `vacant` disjunct
+            // above a description of "invariant holds every reader key despite nothing being
+            // Present" (true both before the first install, and again after a full drain handed
+            // everything back via `release_to_idle`) rather than an escape hatch, and gives
+            // `Present ==> !vacant` everywhere.
+        &&& (big.vacant_perm.value() ==> forall|i: int|
             0 <= i < big.stash_states.len() ==> #[trigger] big.stash_states[i] is Empty)
         &&& (match big.gate_state {
             SlotState::Vacant => big.gate_perm.value().addr() == 0,
@@ -202,7 +210,7 @@ pub struct Slot<T> {
     gate: PAtomicPtr<T>,
     stash: Vec<PAtomicPtr<T>>,
     claimed: PAtomicBool,
-    installed_flag: PAtomicBool,
+    vacant_flag: PAtomicBool,
     inv: Tracked<AtomicInvariant<SlotKey, SlotBig<T>, SlotBigPred<T>>>,
 }
 
@@ -215,7 +223,7 @@ impl<T> Slot<T> {
             0 <= i < self.stash@.len() ==> #[trigger] self.inv@.constant().stash_ids[i]
                 == self.stash@[i].id()
         &&& self.inv@.constant().claimed_id == self.claimed.id()
-        &&& self.inv@.constant().installed_flag_id == self.installed_flag.id()
+        &&& self.inv@.constant().vacant_flag_id == self.vacant_flag.id()
     }
 
     pub closed spec fn num_readers(self) -> nat {
@@ -294,12 +302,12 @@ impl<T> Slot<T> {
             i += 1;
         }
         let (claimed, Tracked(claimed_perm)) = PAtomicBool::new(false);
-        let (installed_flag, Tracked(installed_perm)) = PAtomicBool::new(false);
+        let (vacant_flag, Tracked(vacant_perm)) = PAtomicBool::new(true);
         let ghost stash_ids = Seq::new(num_readers as nat, |j: int| stash@[j].id());
         // One `GhostMapAuth` for the whole ledger, minted with its full and final domain. The
         // returned submap holds *every* key, which is exactly right for a never-claimed,
-        // never-installed slot: unclaimed means the invariant holds the retirer's key, and
-        // not-yet-installed means it holds every reader's key too.
+        // vacant slot: unclaimed means the invariant holds the retirer's key, and vacant means
+        // it holds every reader's key too.
         let ghost initial_gens: Map<int, Loc> = Map::new(
             vstd::set_lib::set_int_range(retirer_key(), num_readers as int),
             |key: int| gen0,
@@ -310,7 +318,7 @@ impl<T> Slot<T> {
             stash_ids,
             claimed_id: claimed.id(),
             gen_id: gen_auth.id(),
-            installed_flag_id: installed_flag.id(),
+            vacant_flag_id: vacant_flag.id(),
         };
         proof {
             broadcast use vstd::seq::group_seq_lemmas, vstd::set_lib::group_set_lib_default;
@@ -349,12 +357,12 @@ impl<T> Slot<T> {
             stash_perms,
             stash_states,
             claimed_perm,
-            installed_perm,
+            vacant_perm,
             gen_auth,
             stashed_frags,
         };
         let tracked inv = AtomicInvariant::new(key, big, 0);
-        Slot { gate, stash, claimed, installed_flag, inv: Tracked(inv) }
+        Slot { gate, stash, claimed, vacant_flag, inv: Tracked(inv) }
     }
 
     // Convenience for the very first install, avoiding an awkward `new_vacant` + `writer_put`
@@ -499,7 +507,7 @@ impl<T> Slot<T> {
             ;
         }
         let (claimed, Tracked(claimed_perm)) = PAtomicBool::new(true);
-        let (installed_flag, Tracked(installed_perm)) = PAtomicBool::new(true);
+        let (vacant_flag, Tracked(vacant_perm)) = PAtomicBool::new(false);
         let ghost stash_ids = Seq::new(num_readers as nat, |j: int| stash@[j].id());
         // Mint the ledger with its full and final domain, every key already naming this
         // generation, then hand the retirer's key straight out: the slot is born claimed (it is
@@ -517,7 +525,7 @@ impl<T> Slot<T> {
             stash_ids,
             claimed_id: claimed.id(),
             gen_id: gen_auth.id(),
-            installed_flag_id: installed_flag.id(),
+            vacant_flag_id: vacant_flag.id(),
         };
         proof {
             broadcast use vstd::seq::group_seq_lemmas;
@@ -560,15 +568,15 @@ impl<T> Slot<T> {
             stash_perms,
             stash_states,
             claimed_perm,
-            installed_perm,
+            vacant_perm,
             gen_auth,
             stashed_frags,
         };
         let tracked inv = AtomicInvariant::new(key, big, 0);
-        (Slot { gate, stash, claimed, installed_flag, inv: Tracked(inv) }, Tracked(retirer_frag))
+        (Slot { gate, stash, claimed, vacant_flag, inv: Tracked(inv) }, Tracked(retirer_frag))
     }
 
-    // Cheap, non-mutating peek: is something currently installed?
+    // Cheap, non-mutating peek: does the gate currently hold a published value?
     pub fn is_occupied(&self) -> (result: bool) {
         proof {
             use_type_invariant(self);
@@ -783,6 +791,69 @@ impl<T> Slot<T> {
         });
     }
 
+    // Generalizes `release` to *also* return every reader's ledger fragment at once, marking the
+    // slot genuinely idle (`vacant_flag = true`) rather than just unclaimed. Two call sites, both
+    // already holding exactly this shape of input: (1) `EpochAtomicPtr::write`'s existing reclaim
+    // path, after a real drain waited out reader quiescence on a slot that really was `current`;
+    // (2) `EpochAtomicPtr::try_write`'s CAS-failure path, abandoning a slot that was claimed and
+    // `writer_put`-installed but never made `current` -- since only the `current` slot is ever
+    // reachable via `pin`, no real reader could have touched it, so that path never needs to wait
+    // for anything, just drain (instantly) and call this.
+    //
+    // Callers must have already reduced the gate to `Vacant` (via `writer_extract_gate`) and
+    // reclaimed whatever it held -- this function's own proof does not depend on `gate_state`
+    // (that clause is independent of the ledger, exactly as for `writer_put`'s unconditional
+    // `gate.store`), but calling it before doing so would leave that occupant's resources
+    // unreachable rather than actually freed.
+    //
+    // Two physical atomics, two opens (the macro allows only one atomic op per open): the first
+    // combines every reader key back and flips `vacant_flag`, using the *same* "holding every key
+    // proves every cell Empty" derivation `writer_put`'s gate-store block uses (read before
+    // mutating, since the fact needed is about the state *before* this call, not after); the
+    // second mirrors `release` exactly, for the retirer key.
+    pub fn release_to_idle(
+        &self,
+        Tracked(retirer_frag): Tracked<GhostPointsTo<int, Loc>>,
+        Tracked(reader_frags): Tracked<GhostSubmap<int, Loc>>,
+    )
+        requires
+            retirer_frag.id() == self.gen_loc(),
+            retirer_frag.key() == retirer_key(),
+            reader_frags.id() == self.gen_loc(),
+            forall|k: int| #[trigger]
+                reader_frags@.contains_key(k) <==> (0 <= k < self.num_readers()),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        let tracked mut reader_frags = reader_frags;
+        open_atomic_invariant!(self.inv.borrow() => big => {
+            proof {
+                assert(self.num_readers() as int == self.inv@.constant().stash_ids.len());
+                reader_frags.disjoint(&big.stashed_frags);
+                assert forall|i: int| 0 <= i < self.num_readers() implies
+                    #[trigger] big.stash_states[i] is Empty by {
+                    assert(reader_frags@.dom().contains(i));
+                    assert(!big.stashed_frags@.contains_key(i));
+                }
+                big.stashed_frags.combine(reader_frags);
+            }
+            let tracked vacant_ref = &mut big.vacant_perm;
+            self.vacant_flag.store(Tracked(vacant_ref), true);
+            proof {
+                let ghost kk = self.inv@.constant();
+                assert(SlotBigPred::<T>::inv(kk, big));
+            }
+        });
+        open_atomic_invariant!(self.inv.borrow() => big => {
+            let tracked perm_ref = &mut big.claimed_perm;
+            proof {
+                big.stashed_frags.combine_points_to(retirer_frag);
+            }
+            self.claimed.store(Tracked(perm_ref), false);
+        });
+    }
+
     // Extracts the managed fragment entirely, swapping the gate to `Vacant`. Sound regardless of
     // occupancy (a never-occupied slot is already `Vacant`, so this is a no-op swap). Takes the
     // caller's own retirer fragment (from `try_claim`) purely to expose, via `agree` against the
@@ -832,28 +903,29 @@ impl<T> Slot<T> {
         (ptr, Tracked(out.tracked_unwrap()))
     }
 
-    // For a slot that has *never* been installed: atomically (via a single `compare_exchange`,
-    // false -> true) claims that fact *and* takes every reader's ledger fragment out of the
+    // For a slot that is currently *vacant* -- either never installed, or fully drained and
+    // returned to idle by `release_to_idle` -- atomically (via a single `compare_exchange`,
+    // `true -> false`) claims that fact *and* takes every reader's ledger fragment out of the
     // invariant in the same step -- exactly mirroring how `try_claim`'s own CAS and its retirer
     // fragment come out together. The pairing is what keeps the invariant satisfied throughout:
-    // the ledger clause reads `contains_key(i) <==> (Present || !installed)`, so flipping
-    // `installed` to `true` while every cell is still `Empty` is *only* consistent if the reader
-    // keys leave the invariant in the very same step. The justifying fact (`!installed ==> every
-    // cell Empty`) is read from `big` as it stood at this open's start, before the CAS mutated it.
+    // the ledger clause reads `contains_key(i) <==> (Present || vacant)`, so flipping `vacant` to
+    // `false` while every cell is still `Empty` is *only* consistent if the reader keys leave the
+    // invariant in the very same step. The justifying fact (`vacant ==> every cell Empty`) is
+    // read from `big` as it stood at this open's start, before the CAS mutated it.
     //
     // This is where the ledger encoding pays off most visibly: what used to be a loop-free
     // recursive proof fn splitting `n` separate fractional resources one at a time is now a single
     // `GhostSubmap::split` over the whole reader key range.
     //
-    // The returned `bool` is `false` when this slot had already been installed before -- the
-    // caller falls back to the ordinary drain sequence in that case (whose fragments come from
+    // The returned `bool` is `false` when this slot was occupied (not vacant) -- the caller falls
+    // back to the ordinary drain sequence in that case (whose fragments come from
     // `drain_and_extract` instead).
-    pub fn extract_fresh_reader_frags(&self) -> (result: (bool, Tracked<GhostSubmap<int, Loc>>))
+    pub fn extract_idle_reader_frags(&self) -> (result: (bool, Tracked<GhostSubmap<int, Loc>>))
         ensures
             result.1@.id() == self.gen_loc(),
             result.0 ==> forall|k: int| #[trigger]
                 result.1@@.contains_key(k) <==> (0 <= k < self.num_readers()),
-            // The non-fresh case matters to the caller too: an empty submap of this ledger is
+            // The not-vacant case matters to the caller too: an empty submap of this ledger is
             // exactly the right seed for its drain-loop accumulator.
             !result.0 ==> forall|k: int| !(#[trigger] result.1@@.contains_key(k)),
     {
@@ -864,12 +936,12 @@ impl<T> Slot<T> {
             0,
             self.num_readers() as int,
         );
-        let tracked mut fresh_frags: Option<GhostSubmap<int, Loc>> = None;
+        let tracked mut idle_frags: Option<GhostSubmap<int, Loc>> = None;
         let r;
         open_atomic_invariant!(self.inv.borrow() => big => {
             proof {
-                // Read the justifying clause *before* the CAS mutates `installed_perm`.
-                if !big.installed_perm.value() {
+                // Read the justifying clause *before* the CAS mutates `vacant_perm`.
+                if big.vacant_perm.value() {
                     assert forall|k: int| reader_keys.contains(k) implies
                         #[trigger] big.stashed_frags@.dom().contains(k) by {
                         assert(big.stash_states[k] is Empty);
@@ -877,19 +949,19 @@ impl<T> Slot<T> {
                     assert(reader_keys <= big.stashed_frags@.dom());
                 }
             }
-            let tracked perm_ref = &mut big.installed_perm;
-            r = self.installed_flag.compare_exchange(Tracked(perm_ref), false, true);
+            let tracked perm_ref = &mut big.vacant_perm;
+            r = self.vacant_flag.compare_exchange(Tracked(perm_ref), true, false);
             proof {
                 if r is Ok {
-                    fresh_frags = Some(big.stashed_frags.split(reader_keys));
+                    idle_frags = Some(big.stashed_frags.split(reader_keys));
                 } else {
-                    // Not fresh: hand back an empty submap of the right ledger, so the return
+                    // Not vacant: hand back an empty submap of the right ledger, so the return
                     // type needs no `Option` and the caller's `id()` fact holds unconditionally.
-                    fresh_frags = Some(big.stashed_frags.empty());
+                    idle_frags = Some(big.stashed_frags.empty());
                 }
             }
         });
-        (r.is_ok(), Tracked(fresh_frags.tracked_unwrap()))
+        (r.is_ok(), Tracked(idle_frags.tracked_unwrap()))
     }
 
     // Drains reader `reader_idx`'s stash cell. Returns the drained pointer (non-null iff a piece
@@ -961,11 +1033,11 @@ impl<T> Slot<T> {
     // per-cell proof fn (and a matching per-cell disjunction refutation) to arrange.
     //
     // Holding all the reader keys is also, by the ledger clause alone, the proof that every cell
-    // is currently `Empty` and this slot is installed: `GhostSubmap::disjoint` against the
+    // is currently `Empty` and this slot is no longer vacant: `GhostSubmap::disjoint` against the
     // invariant's own `stashed_frags` says the invariant cannot be holding any of them.
     //
-    // `reader_frags`: every reader key, from this call's own drain sequence (or, for a slot's very
-    // first install, from `extract_fresh_reader_frags`).
+    // `reader_frags`: every reader key, from this call's own drain sequence (or, for a vacant
+    // slot, from `extract_idle_reader_frags`).
     pub fn writer_put(
         &self,
         v: T,
@@ -1101,11 +1173,11 @@ impl<T> Slot<T> {
                 // The one derivation that used to need a recursive proof fn and a per-cell
                 // fraction refutation: holding every key means the invariant holds none of them,
                 // and the ledger clause turns that directly into "every cell is Empty, and this
-                // slot is installed" (and, for the retirer's key, "this slot is claimed").
+                // slot is no longer vacant" (and, for the retirer's key, "this slot is claimed").
                 all_frags.disjoint(&big.stashed_frags);
                 assert forall|i: int| 0 <= i < n_int implies {
                     &&& #[trigger] big.stash_states[i] is Empty
-                    &&& big.installed_perm.value()
+                    &&& !big.vacant_perm.value()
                 } by {
                     assert(all_frags@.dom().contains(i));
                     assert(!big.stashed_frags@.contains_key(i));
@@ -1147,7 +1219,7 @@ impl<T> Slot<T> {
         // already `gen_id` (retagged above, in the gate-store open), so nothing here touches the
         // authority -- a `combine_points_to` is the whole ghost step, and its own
         // `!old(self)@.contains_key(..)` postcondition is what re-proves this cell was empty and
-        // this slot installed.
+        // this slot no longer vacant.
         let mut j: usize = 0;
         while j < n
             invariant
@@ -1295,7 +1367,7 @@ pub fn reclaim<T>(ptr: *mut T, Tracked(occupant): Tracked<SlotState<T>>) -> (res
 
 } // verus!
 // `Slot<T>`'s only fields with any actual runtime bytes are the physical atomics (`gate`,
-// `stash`, `claimed`, `installed_flag` -- all `core::sync::atomic` wrappers, already `Send`/`Sync`
+// `stash`, `claimed`, `vacant_flag` -- all `core::sync::atomic` wrappers, already `Send`/`Sync`
 // unconditionally). `inv: Tracked<AtomicInvariant<..>>` is `PhantomData`-backed (see
 // `verus_builtin::Tracked`'s definition) and holds *zero* bytes in any build that actually runs
 // (i.e. one not compiled through the Verus frontend) -- but Rust's auto-trait inference for

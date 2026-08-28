@@ -72,7 +72,6 @@ pub fn run_client<C, Conn>(args: ClientArgs, connector: &Conn) -> Result<(), Err
         S = echo::proto::Request,
         Id = (u64, u64),
     >,
-    C: Sync + Send,
  {
     let (request_ctr, request_ctr_perm) = PAtomicU64::new(0);
 
@@ -148,7 +147,7 @@ pub mod server {
     pub fn run_server<L, C>(server_id: u64, listener: L, num_threads: usize)
     where
         L: Listener<C> + Sync,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
     {
         let (server, raw_receivers) = create_server::<_, _>(server_id, listener, num_threads);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
@@ -163,7 +162,7 @@ pub mod server {
     pub fn run_server_epoll<L, C>(server_id: u64, listener: L, num_threads: usize)
     where
         L: RawFdListener<C> + Sync,
-        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
     {
         let (server, raw_receivers) = create_server::<_, _>(server_id, listener, num_threads);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());

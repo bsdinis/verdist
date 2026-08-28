@@ -122,7 +122,6 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
         S = abd::proto::Request,
         Id = (u64, u64),
     >,
-    C: Sync + Send,
 
     requires
         connectors.len() == args.servers@.len(),
@@ -334,7 +333,7 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
         ML: MutLinearizer<RegisterWrite> + Send,
         RL: ReadLinearizer<RegisterRead> + Send,
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
@@ -359,7 +358,7 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: RawFdListener<C> + Sync,
-        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
         ML: MutLinearizer<RegisterWrite> + Send,
         RL: ReadLinearizer<RegisterRead> + Send,
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,

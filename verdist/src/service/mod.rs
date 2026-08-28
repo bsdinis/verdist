@@ -328,8 +328,14 @@ pub struct Server<S, L, C> where
     /// `C` no longer appears in any field (connections are never `Server` state -- see
     /// `raw_senders`'s doc), but `Server<S, L, C>` is still meaningfully parameterized by it (via
     /// the `Listener<C>`/`Channel` bounds), so it needs an explicit marker to stay a valid type
-    /// parameter.
-    _marker: PhantomData<C>,
+    /// parameter. `PhantomData<C::Id>` (rather than bare `PhantomData<C>`) is deliberate: this
+    /// struct's own bound already fixes `C::Id == (u64, u64)`, so this field's Send/Sync-ness is
+    /// pinned to that concrete, always-`Sync` tuple type regardless of `C`'s -- ordinary,
+    /// fully-checked Rust, no `unsafe`/`external_body` needed. A bare `PhantomData<C>` would
+    /// otherwise force every `Channel` impl to be `Sync` purely to satisfy `Server`'s own
+    /// auto-trait derivation, even though nothing ever actually shares a `C` value across threads
+    /// (see `raw_senders`'s doc).
+    _marker: PhantomData<C::Id>,
 }
 
 impl<S, L, C> Server<S, L, C> where
@@ -1020,7 +1026,11 @@ impl<S, L, C> Server<S, L, C>
 where
     S: Service<Request = C::R, Response = C::S, ChanInv = C::K> + Sync,
     L: Listener<C> + Sync,
-    C: Channel<Id = (u64, u64)> + Send + Sync,
+    // No `Send`/`Sync` bound on `C`: every `C` value is created and used entirely within one
+    // worker thread's `connected: Vec<C>` local (see that variable's doc below) -- it is never
+    // captured into a thread closure from outside nor shared across threads, so nothing here
+    // actually requires `C` to be either.
+    C: Channel<Id = (u64, u64)>,
 {
     /// Spawns one dedicated accept thread plus one dedicated worker thread per shard, and
     /// blocks until they all exit. The accept thread stops on a fatal listener error; each
@@ -1081,7 +1091,8 @@ impl<S, L, C> Server<S, L, C>
 where
     S: Service<Request = C::R, Response = C::S, ChanInv = C::K> + Sync,
     L: RawFdListener<C> + Sync,
-    C: RawFdChannel<Id = (u64, u64)> + Send + Sync,
+    // See `run`'s identical bound above for why `C` needs neither `Send` nor `Sync`.
+    C: RawFdChannel<Id = (u64, u64)>,
 {
     /// Same thread topology as `run` (one accept thread, one worker thread per shard), but each
     /// thread blocks on real fd readiness (via `mio`/epoll, see `poll_accept_epoll`/

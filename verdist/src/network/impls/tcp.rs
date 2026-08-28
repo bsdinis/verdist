@@ -593,9 +593,9 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for TcpConnector<A> where
 }
 
 } // verus!
-// SAFETY: see `TypedTcpStream::read_ahead`'s field doc -- exclusivity is the caller's
-// responsibility, not proven by this type (`verus!` disallows `unsafe impl` inside its own
-// block, hence this living out here, same as `vlib::reclaim::Slot`'s identical pattern). `R`/`S`
-// are phantom-only in this struct (no value of either type is ever stored), so their own
-// `Sync`-ness is irrelevant to this impl's soundness.
-unsafe impl<R, S> Sync for TypedTcpStream<R, S> {}
+// `TypedTcpStream` is deliberately NOT `Sync`: `Server`'s connection-ownership design (see
+// claude-files/ServerOwnershipTransferPlan.md) means a channel is only ever touched by the one
+// shard thread that owns it, so nothing requires `Sync` here -- and now that `Channel`'s callers
+// no longer bound `C: Sync` (see `Server::_marker`'s `ChannelTypeMarker` doc), there's no reason
+// to manually assert a stronger guarantee than the type's fields (`read_ahead`'s `UnsafeCell`)
+// actually earn.

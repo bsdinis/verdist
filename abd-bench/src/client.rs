@@ -59,7 +59,6 @@ where
         S = abd::proto::Request,
         Id = (u64, u64),
     >,
-    C: Sync + Send,
 {
     let (client_ctr, _) = PAtomicU64::new(0);
     let (request_ctr, _) = PAtomicU64::new(0);

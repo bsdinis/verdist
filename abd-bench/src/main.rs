@@ -133,7 +133,7 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv> + Send + Sync,
+        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
         ML: MutLinearizer<RegisterWrite> + Send,
         RL: ReadLinearizer<RegisterRead> + Send,
         <ML as MutLinearizer<RegisterWrite>>::Completion: Send,

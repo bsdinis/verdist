@@ -1,0 +1,8 @@
+n_reads = 4
+n_writes = 3
+
+network = "io_uring_tcp"
+
+[[server]]
+id = 1
+addr = "127.0.0.1:6663"

@@ -78,6 +78,36 @@ fn main() {
 
             client::run_client(args, &connectors).expect("run_client: error");
         }
+        cli::NetworkType::IoUringTcp => {
+            let connectors = args
+                .servers
+                .values()
+                .map(|server_conf| {
+                    let addr = server_conf.addr.expect("server addr should be set");
+                    verdist::network::io_uring_tcp::IoUringTcpConnector::new(addr, server_conf.id)
+                        .expect("failed to create connector")
+                })
+                .collect::<Vec<_>>();
+
+            client::run_client(args, &connectors).expect("run_client: error");
+        }
+        cli::NetworkType::IoUringUdp => {
+            let connectors = args
+                .servers
+                .values()
+                .map(|server_conf| {
+                    let addr = server_conf.addr.expect("server addr should be set");
+                    verdist::network::io_uring_udp::IoUringUdpConnector::new(
+                        addr,
+                        args.client_addr,
+                        server_conf.id,
+                    )
+                    .expect("failed to create connector")
+                })
+                .collect::<Vec<_>>();
+
+            client::run_client(args, &connectors).expect("run_client: error");
+        }
     }
 }
 

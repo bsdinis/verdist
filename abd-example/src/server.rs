@@ -61,5 +61,53 @@ fn main() {
                 );
             }
         }
+        cli::NetworkType::IoUringTcp => {
+            let listener = verdist::network::io_uring_tcp::IoUringTcpListener::listen(
+                args.addr(),
+                args.server_id,
+            )
+            .expect("failed to create listener");
+            if args.epoll {
+                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                    backend,
+                );
+            } else {
+                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                    backend,
+                );
+            }
+        }
+        cli::NetworkType::IoUringUdp => {
+            let listener = verdist::network::io_uring_udp::IoUringUdpListener::listen(
+                args.addr(),
+                args.server_id,
+            )
+            .expect("failed to create listener");
+            if args.epoll {
+                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                    backend,
+                );
+            } else {
+                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    &server_ids,
+                    args.server_id,
+                    listener,
+                    args.num_threads,
+                    backend,
+                );
+            }
+        }
     }
 }

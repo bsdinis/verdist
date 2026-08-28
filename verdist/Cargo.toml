@@ -11,6 +11,8 @@ version = { workspace = true }
 [dependencies]
 crossbeam-channel = { workspace = true }
 flexbuffers = { workspace = true }
+io-uring = { workspace = true }
+libc = { workspace = true }
 mio = { workspace = true }
 serde = { workspace = true }
 

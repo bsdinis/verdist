@@ -1,0 +1,7 @@
+n_ops = 4
+delay = false
+client_id = 1
+server_id = 10
+client_addr = "0.0.0.0"
+network = "io_uring_tcp"
+server_addr = "127.0.0.1:7553"

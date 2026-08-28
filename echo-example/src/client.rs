@@ -34,5 +34,22 @@ fn main() {
                     .expect("failed to create connector");
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
+        cli::NetworkType::IoUringTcp => {
+            let connector = verdist::network::io_uring_tcp::IoUringTcpConnector::new(
+                args.server_addr,
+                args.server_id,
+            )
+            .expect("failed to create connector");
+            echo_example::run_client(args, &connector).expect("run_client: error");
+        }
+        cli::NetworkType::IoUringUdp => {
+            let connector = verdist::network::io_uring_udp::IoUringUdpConnector::new(
+                args.server_addr,
+                args.client_addr,
+                args.server_id,
+            )
+            .expect("failed to create connector");
+            echo_example::run_client(args, &connector).expect("run_client: error");
+        }
     }
 }

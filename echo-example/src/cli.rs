@@ -17,6 +17,18 @@ pub enum NetworkType {
 
     /// Run with UDP connections
     Udp,
+
+    /// Run with TCP connections over io_uring instead of blocking read/write syscalls (see
+    /// `verdist::network::io_uring_tcp`'s design doc, `claude-files/io_uring_design.md`)
+    #[serde(rename = "io_uring_tcp")]
+    #[value(name = "io_uring_tcp")]
+    IoUringTcp,
+
+    /// Run with UDP connections over io_uring instead of blocking recv/send syscalls (see
+    /// `verdist::network::io_uring_udp`)
+    #[serde(rename = "io_uring_udp")]
+    #[value(name = "io_uring_udp")]
+    IoUringUdp,
 }
 
 #[derive(Parser)]

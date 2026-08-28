@@ -40,6 +40,21 @@ use vlib::serde::ExSerialize;
 
 use vstd::prelude::*;
 
+/// See `io_uring_tcp::submit_and_wait_1`'s doc -- identical rationale (submission and wait happen
+/// in the same `io_uring_enter` syscall, so an un-retried `EINTR` here would abandon an
+/// already-in-flight op, a use-after-free risk once the caller's buffer is dropped/reused) and
+/// identical reason for living outside `verus! {}` (a `&mut IoUring` parameter isn't representable
+/// even under `#[verifier::external_body]`, which only skips body-checking, not signature-checking).
+fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
+    loop {
+        match ring.submit_and_wait(1) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 verus! {
 
 /// Same value as `network::impls::udp::RECV_TIMEOUT_MILLIS`.
@@ -140,9 +155,9 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                 |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
             )?;
         }
-        ring.submit_and_wait(1)?;
+        submit_and_wait_1(ring)?;
         let cqe = ring.completion().next().expect(
-            "submit_and_wait(1) returned Ok, so at least one completion must be present",
+            "submit_and_wait_1 returned Ok, so at least one completion must be present",
         );
         Ok(cqe.result())
     }
@@ -160,9 +175,9 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                 |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
             )?;
         }
-        ring.submit_and_wait(1)?;
+        submit_and_wait_1(ring)?;
         let cqe = ring.completion().next().expect(
-            "submit_and_wait(1) returned Ok, so at least one completion must be present",
+            "submit_and_wait_1 returned Ok, so at least one completion must be present",
         );
         Ok(cqe.result())
     }
@@ -172,7 +187,7 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         let mut buf = [0;BUF_SIZE];
         let res = self.recv_once(&mut buf)?;
         if res < 0 {
-            let errno = -res;
+            let errno = res.wrapping_neg();
             if is_recv_timeout_errno(errno) {
                 return Ok(None);
             }
@@ -187,31 +202,33 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(Some(res))
     }
 
+    /// One `Send` op, one datagram -- matching `udp.rs`'s original `send`/`send_to` exactly (see
+    /// their doc): a UDP `send` is atomic-or-fails at the socket layer, unlike a TCP stream write,
+    /// so there is no such thing as "resuming" a short send with another op. Doing that (an
+    /// earlier version of this function did, in a loop) would emit the remainder as a *second,
+    /// independent datagram* -- corrupting the wire protocol into two malformed messages instead
+    /// of logging a warning, exactly the bug this doc is now warning the next editor away from.
+    /// `EINTR` retries the *same* full datagram (never partial), since nothing has been sent yet.
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
         let s = udp_serialize(v)?;
-        let mut filled = 0usize;
         let view = s.view();
-        while filled < view.len() {
-            let res = self.send_once(&view[filled..])?;
+        loop {
+            let res = self.send_once(view)?;
             if res < 0 {
-                let errno = -res;
+                let errno = res.wrapping_neg();
                 if errno == libc::EINTR {
                     continue;
                 }
                 return Err(std::io::Error::from_raw_os_error(errno));
             }
-            if res == 0 {
-                vlib::veprintln!("warning: partial write of 0 bytes");
-                break;
+            let sent_len = res as usize;
+            if sent_len != view.len() {
+                vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
+                sent_len, view.len(), i32::MAX);
             }
-            filled += res as usize;
+            return Ok(());
         }
-        if filled != view.len() {
-            vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-            filled, view.len(), i32::MAX);
-        }
-        Ok(())
     }
 
     #[verifier::external_body]
@@ -516,23 +533,28 @@ impl<K, R, S, A> Connector<IoUringServerChannel<K, R, S>> for IoUringUdpConnecto
 
         let req = udp_serialize(&(local_id, channel_socket.local_addr().unwrap()))?;
         connect_socket.send(req.view())?;
+        // Tolerant-of-noise loop matching `udp.rs`'s original `connect` exactly: a stray/malformed
+        // datagram landing on this ephemeral rendezvous socket (plausible: a retransmit from a
+        // previous failed attempt reusing a nearby port, or just line noise) is *not* a fatal
+        // error here -- only a recognized (server_id, addr) reply ends the loop. An earlier
+        // version of this function treated a recv error or a bad deserialize as fatal, aborting
+        // the whole connection attempt on the first anomaly instead of tolerating it like the
+        // blocking-syscall transport does; fixed after review.
         loop {
             let mut buf = [0;BUF_SIZE];
-            match connect_socket.recv(&mut buf) {
-                Ok(r) => {
-                    let (server_id, addr): (u64, SocketAddr) = udp_deserialize(&buf[..r])?;
-                    channel_socket.connect(addr)?;
-                    let tsocket = IoUringUdpSocket::new(channel_socket)?;
-                    let pred = gen_pred(self, local_id);
+            let reply: Option<(u64, SocketAddr)> = connect_socket.recv(&mut buf).ok().and_then(
+                |r| udp_deserialize(&buf[..r]).ok(),
+            );
+            if let Some((server_id, addr)) = reply {
+                channel_socket.connect(addr)?;
+                let tsocket = IoUringUdpSocket::new(channel_socket)?;
+                let pred = gen_pred(self, local_id);
 
-                    let chan = IoUringServerChannel::new(pred, server_id, local_id, tsocket);
-                    vlib::veprintln!(
-                            "[client|{:>3}]: connected to server {server_id} (channel_id: {:?}, server addr: {addr:?}) [io_uring]", local_id, chan.id()
-                        );
-                    return Ok(chan);
-                },
-                Err(e) if is_recv_timeout(&e) => continue,
-                Err(e) => return Err(e.into()),
+                let chan = IoUringServerChannel::new(pred, server_id, local_id, tsocket);
+                vlib::veprintln!(
+                        "[client|{:>3}]: connected to server {server_id} (channel_id: {:?}, server addr: {addr:?}) [io_uring]", local_id, chan.id()
+                    );
+                return Ok(chan);
             }
         }
     }

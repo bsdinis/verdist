@@ -59,6 +59,29 @@ use vlib::serde::ExSerialize;
 
 use vstd::prelude::*;
 
+/// `submit_and_wait(1)`, retrying if the underlying `io_uring_enter` syscall is interrupted by a
+/// signal. This matters more than an ordinary EINTR retry: submission and the wait happen in the
+/// *same* syscall, so by the time `io_uring_enter` can return `EINTR` the SQE has already been
+/// accepted by the kernel and is in flight -- bailing out here without retrying would abandon a
+/// live op whose buffer the caller is about to drop/reuse (a real use-after-free), and would leave
+/// its eventual completion sitting in the CQ ring to be wrongly reaped by the *next*, unrelated
+/// call. Caught by review before this ever shipped anywhere it could run.
+///
+/// Lives outside `verus! {}` (unlike this file's other helpers): `IoUring`/`squeue::Entry`/
+/// `cqueue::Entry` have no `external_type_specification` shim, so a fn *signature* mentioning
+/// `&mut IoUring` directly (not hidden behind an already-opaque `external_body` struct's `&self`)
+/// isn't representable even with `#[verifier::external_body]` -- that annotation skips checking a
+/// function's *body*, but its signature still has to type-check in Verus's model.
+fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
+    loop {
+        match ring.submit_and_wait(1) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 verus! {
 
 /// Same value as `network::impls::tcp::RECV_TIMEOUT_MILLIS` -- kept as a literal, separate
@@ -170,9 +193,9 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                 |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
             )?;
         }
-        ring.submit_and_wait(1)?;
+        submit_and_wait_1(ring)?;
         let cqe = ring.completion().next().expect(
-            "submit_and_wait(1) returned Ok, so at least one completion must be present",
+            "submit_and_wait_1 returned Ok, so at least one completion must be present",
         );
         Ok(cqe.result())
     }
@@ -191,9 +214,9 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                 |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
             )?;
         }
-        ring.submit_and_wait(1)?;
+        submit_and_wait_1(ring)?;
         let cqe = ring.completion().next().expect(
-            "submit_and_wait(1) returned Ok, so at least one completion must be present",
+            "submit_and_wait_1 returned Ok, so at least one completion must be present",
         );
         Ok(cqe.result())
     }
@@ -211,7 +234,7 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         while filled < buf.len() {
             let res = self.read_once(&mut buf[filled..])?;
             if res < 0 {
-                let errno = -res;
+                let errno = res.wrapping_neg();
                 if is_recv_timeout_errno(errno) {
                     if bail_if_empty && filled == 0 {
                         return Ok(false);
@@ -261,7 +284,7 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         while filled < combined.len() {
             let res = self.write_once(&combined[filled..])?;
             if res < 0 {
-                let errno = -res;
+                let errno = res.wrapping_neg();
                 if errno == libc::EINTR {
                     continue;
                 }

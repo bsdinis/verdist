@@ -61,19 +61,116 @@ fn is_recv_timeout(e: &std::io::Error) -> bool {
 
 const BUF_SIZE: usize = 1 << 12;
 
+/// How many datagrams one `recvmmsg` call asks the kernel for at once (see `try_recv`'s doc
+/// comment). Generous relative to any burst this workload produces; `recvmmsg` never blocks
+/// waiting to fill this many -- it returns as soon as no more are *immediately* available, so an
+/// idle/single-message socket costs exactly the same one syscall as the old `recv`-based version.
+const RECV_BATCH: usize = 32;
+
+/// Buffers datagrams already pulled off the socket by `recvmmsg` but not yet handed to the
+/// caller, plus the (reused, allocated once) raw scratch buffers `recvmmsg` writes into.
+struct RecvBatch<R> {
+    pending: std::collections::VecDeque<R>,
+    bufs: Vec<[u8; BUF_SIZE]>,
+}
+
+impl<R> RecvBatch<R> {
+    fn new() -> Self {
+        RecvBatch {
+            pending: std::collections::VecDeque::new(),
+            bufs: vec![[0u8; BUF_SIZE]; RECV_BATCH],
+        }
+    }
+}
+
 /// Udp Socket that unmarshals receiving types (R) and marshals sending types (S)
+// `#[verifier::external_body]`: needed once `recv_batch` (a `std::cell::UnsafeCell`, which Verus
+// has no spec surface for) became a field -- same reasoning as `ClientChannel`/`ServerChannel`
+// just below in this file. This makes every field opaque to Verus even from this type's own impl
+// block, so every method touching a field directly (`new`, `refill`, `local_addr`, `peer_addr`,
+// `raw_fd`, in addition to the already-external_body `try_recv`/`send`/`send_to`) needs the
+// annotation too -- mechanical, not new hidden logic.
+#[verifier::external_body]
+#[verifier::reject_recursive_types(R)]
+#[verifier::reject_recursive_types(S)]
 pub struct TypedUdpSocket<R, S> {
     inner: UdpSocket,
+    // See `try_recv`'s doc comment. `UnsafeCell`, not a lock, for the same reason as
+    // `network::impls::tcp::TypedTcpStream::read_ahead`: exclusivity here is a documented caller
+    // invariant (only the single thread that owns this channel's connection ever calls
+    // `send`/`try_recv` on it), not something the type system enforces -- `Channel::send`/
+    // `try_recv` already take `&self`, not `&mut self`, so nothing before this prevented a caller
+    // from racing two calls on one instance either.
+    recv_batch: std::cell::UnsafeCell<RecvBatch<R>>,
     _marker: PhantomData<(R, S)>,
 }
 
 impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
+    #[verifier::external_body]
     pub fn new(socket: UdpSocket) -> Self {
         socket.set_nonblocking(false).expect("this should never fail");
         socket.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect(
             "this should never fail",
         );
-        TypedUdpSocket { inner: socket, _marker: PhantomData }
+        TypedUdpSocket {
+            inner: socket,
+            recv_batch: std::cell::UnsafeCell::new(RecvBatch::new()),
+            _marker: PhantomData,
+        }
+    }
+
+    /// One `recvmmsg` syscall pulling up to `RECV_BATCH` already-queued datagrams off this
+    /// (`connect`ed, single-peer) socket into `recv_batch`'s reused buffers, deserializing each
+    /// into `recv_batch.pending`. Returns how many were actually received (0 on a timeout with no
+    /// error, matching `try_recv`'s old `Ok(None)` case).
+    #[verifier::external_body]
+    fn refill(&self) -> Result<usize, std::io::Error> {
+        let mut iovecs: [libc::iovec; RECV_BATCH] = unsafe { std::mem::zeroed() };
+        let mut msgs: [libc::mmsghdr; RECV_BATCH] = unsafe { std::mem::zeroed() };
+        {
+            // SAFETY: single-owner-thread invariant, see `recv_batch`'s field doc. This borrow
+            // ends before any further `recv_batch` access (the `deserialize`/`push_back` loop
+            // below re-borrows fresh), so it never overlaps with another live `&mut` into the
+            // same cell.
+            let rb = unsafe { &mut *self.recv_batch.get() };
+            for i in 0..RECV_BATCH {
+                iovecs[i] = libc::iovec {
+                    iov_base: rb.bufs[i].as_mut_ptr() as *mut libc::c_void,
+                    iov_len: BUF_SIZE,
+                };
+                msgs[i].msg_hdr.msg_iov = &mut iovecs[i] as *mut libc::iovec;
+                msgs[i].msg_hdr.msg_iovlen = 1;
+            }
+        }
+        let fd = self.inner.as_raw_fd();
+        // `timeout: null` -- relies entirely on the socket's own `SO_RCVTIMEO` (set via
+        // `set_read_timeout` above) for the "block up to RECV_TIMEOUT_MILLIS for the *first*
+        // datagram" behavior, matching the old single-`recv` version's timeout contract exactly;
+        // `recvmmsg` then greedily grabs any additional datagrams already queued, without waiting
+        // further, which is the entire point (batches free, already-arrived work into one
+        // syscall instead of one syscall per message).
+        let n = unsafe {
+            libc::recvmmsg(fd, msgs.as_mut_ptr(), RECV_BATCH as u32, 0, std::ptr::null_mut())
+        };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if is_recv_timeout(&e) {
+                return Ok(0);
+            }
+            return Err(e);
+        }
+        let n = n as usize;
+        let rb = unsafe { &mut *self.recv_batch.get() };
+        for (i, msg) in msgs.iter().enumerate().take(n) {
+            let len = msg.msg_len as usize;
+            if len == BUF_SIZE {
+                vlib::veprintln!("[udp:{:?}]: warning: receiving {:x} bytes from {:?} may have exhausted the buffer, message may have been truncated",
+                    self.local_addr(), BUF_SIZE, self.peer_addr());
+            }
+            let v = Self::deserialize(&rb.bufs[i][..len])?;
+            rb.pending.push_back(v);
+        }
+        Ok(n)
     }
 
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
@@ -98,25 +195,22 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(value)
     }
 
+    /// Reads one message, serving it straight out of `recv_batch.pending` (zero syscalls) if a
+    /// previous `refill` already queued it -- common under any pipelining/backlog, since a burst
+    /// of datagrams already sitting in this (`connect`ed) socket's receive buffer all come back
+    /// in one `recvmmsg` call the first time any of them is asked for. Otherwise calls `refill`
+    /// once and serves from whatever it just fetched. Same `Ok(None)`-on-timeout contract as the
+    /// old single-`recv` version.
     #[verifier::external_body]
     pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
-        let mut buf = [0;BUF_SIZE];
-        let res = self.inner.recv(&mut buf);
-        let r = match res {
-            Ok(r) => r,
-            Err(e) if is_recv_timeout(&e) => {
-                return Ok(None);
-            },
-            Err(e) => {
-                return Err(e);
-            },
-        };
-        if r == BUF_SIZE {
-            vlib::veprintln!("[udp:{:?}]: warning: receiving {:x} bytes from {:?} may have exhausted the buffer, message may have been truncated",
-                self.local_addr(), BUF_SIZE, self.peer_addr());
+        // SAFETY: single-owner-thread invariant, see `recv_batch`'s field doc. Not held across
+        // the `self.refill()` call below, so it never overlaps with `refill`'s own borrow.
+        if let Some(v) = unsafe { &mut *self.recv_batch.get() }.pending.pop_front() {
+            return Ok(Some(v));
         }
-        let res = Self::deserialize(&buf[..r])?;
-        Ok(Some(res))
+        self.refill()?;
+        // SAFETY: same as above -- a fresh, independent borrow.
+        Ok(unsafe { &mut *self.recv_batch.get() }.pending.pop_front())
     }
 
     #[verifier::external_body]
@@ -175,16 +269,19 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(())
     }
 
+    #[verifier::external_body]
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr().expect("local addr should be set")
     }
 
+    #[verifier::external_body]
     pub fn peer_addr(&self) -> SocketAddr {
         self.inner.peer_addr().expect("peer addr should be set")
     }
 
     /// The underlying socket's raw fd, for `Server::run_epoll` to register with an `mio::Poll`
     /// instance (see `crate::network::channel::RawFdChannel`).
+    #[verifier::external_body]
     pub fn raw_fd(&self) -> i32 {
         self.inner.as_raw_fd()
     }
@@ -516,3 +613,12 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for UdpConnector<A> where
 }
 
 } // verus!
+// SAFETY: see `TypedUdpSocket::recv_batch`'s field doc -- exclusivity is the caller's
+// responsibility, not proven by this type (`verus!` disallows `unsafe impl` inside its own
+// block, hence this living out here, same as `vlib::reclaim::Slot`'s identical pattern). Unlike
+// `TypedTcpStream::read_ahead` (which only ever buffers raw bytes), `RecvBatch<R>` genuinely
+// stores `R` values, so this impl additionally requires `R: Send`: the caller-invariant
+// single-owner-thread model this relies on means a value deserialized on one thread can be
+// handed to a *different* thread across later calls (whichever thread next happens to own this
+// connection), which is exactly what `Send` (not `Sync`) permits.
+unsafe impl<R: Send, S> Sync for TypedUdpSocket<R, S> {}

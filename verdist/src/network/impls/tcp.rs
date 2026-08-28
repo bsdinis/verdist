@@ -33,13 +33,64 @@ fn is_recv_timeout(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut
 }
 
+/// Read-ahead scratch buffer for `try_recv` (see its doc comment): unconsumed bytes live at
+/// `buf[pos..len]`, and `buf[len..]` is scratch capacity the next `read()` may fill.
+struct ReadAhead {
+    buf: Vec<u8>,
+    pos: usize,
+    len: usize,
+}
+
+impl ReadAhead {
+    #[verifier::external_body]
+    fn new() -> Self {
+        ReadAhead { buf: vec![0u8; 4096], pos: 0, len: 0 }
+    }
+
+    /// Slides unconsumed bytes to the front (so a `read()` always appends at `buf[len..]` instead
+    /// of needing a ring), then grows capacity if fewer than `min_free` scratch bytes remain.
+    #[verifier::external_body]
+    fn make_room(&mut self, min_free: usize) {
+        if self.pos > 0 {
+            self.buf.copy_within(self.pos..self.len, 0);
+            self.len -= self.pos;
+            self.pos = 0;
+        }
+        let free = self.buf.len() - self.len;
+        if free < min_free {
+            self.buf.resize(self.len + min_free, 0);
+        }
+    }
+}
+
 /// Tcp Socket that unmarshals receiving types (R) and marshals sending types (S)
+// `#[verifier::external_body]`: needed once `read_ahead` (a `std::cell::UnsafeCell`, which Verus
+// has no spec surface for) became a field -- same reasoning as `ClientChannel`/`ServerChannel`
+// just below in this file, which are external_body for the same kind of reason. This makes every
+// field opaque to Verus even from this type's own impl block, so every method touching a field
+// directly (`new`, `local_addr`, `peer_addr`, `raw_fd`, in addition to the already-external_body
+// `try_recv`/`send`) needs the annotation too -- mechanical, not new hidden logic.
+#[verifier::external_body]
+#[verifier::reject_recursive_types(R)]
+#[verifier::reject_recursive_types(S)]
 pub struct TypedTcpStream<R, S> {
     inner: TcpStream,
+    // See `try_recv`'s doc comment for what this buffers and why it cuts recv-side syscalls.
+    // `UnsafeCell`, not a lock: exclusivity here is a documented caller invariant, not something
+    // enforced by the type system -- this channel is only ever driven by the single thread that
+    // owns its connection (server side: `ServerOwnershipTransferPlan.md`, one shard thread
+    // exclusively owns its `connected: Vec<C>`; client side: one thread per channel, e.g.
+    // `RpcChannel::invoke`'s synchronous send-then-wait). `Channel::send`/`try_recv` already take
+    // `&self`, not `&mut self`, so nothing before this prevented a caller from racing two calls on
+    // one instance either -- a real lock here would be pure overhead for contention that
+    // structurally cannot happen, exactly the tradeoff `vlib::reclaim::Slot`'s own
+    // `unsafe impl Sync` already makes for the same reason.
+    read_ahead: std::cell::UnsafeCell<ReadAhead>,
     _marker: PhantomData<(R, S)>,
 }
 
 impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
+    #[verifier::external_body]
     pub fn new(stream: TcpStream) -> Self {
         stream.set_nonblocking(false).expect("this should never fail");
         stream.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS))).expect(
@@ -49,7 +100,11 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         // without this, Nagle's algorithm (sender-side) interacting with delayed ACKs
         // (receiver-side) can add tens of milliseconds of latency per hop.
         stream.set_nodelay(true).expect("this should never fail");
-        TypedTcpStream { inner: stream, _marker: PhantomData }
+        TypedTcpStream {
+            inner: stream,
+            read_ahead: std::cell::UnsafeCell::new(ReadAhead::new()),
+            _marker: PhantomData,
+        }
     }
 
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
@@ -74,20 +129,53 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(value)
     }
 
-    /// Fills `buf` completely, retrying through recv-timeouts by resuming from where the
-    /// previous attempt left off (tracked in `filled`) rather than restarting `read_exact` from
-    /// `buf[0]`
+    /// Default read-ahead chunk size when we don't yet know how long the next message is (i.e.
+    /// fewer than 4 bytes are buffered) -- generously larger than any observed ABD message
+    /// (45-113B), so one `read()` can often capture several whole pipelined messages at once, not
+    /// just the current one.
+    const READ_AHEAD_CHUNK: usize = 4096;
+
+    /// Reads one message, serving it straight out of `read_ahead` with **zero syscalls** if a
+    /// previous `read()` already buffered a complete one (common under any pipelining/backlog --
+    /// a client that doesn't wait for each response before sending the next leaves several
+    /// messages queued in the kernel socket buffer, all of which one `read()` can capture at
+    /// once). Otherwise issues `read()` calls (via `stream.read`, `&TcpStream` also implements
+    /// `Read`) until a complete message is buffered, appending each call's result after whatever
+    /// is already held rather than the old two-syscalls-per-message (length prefix, then payload)
+    /// shape.
     ///
-    /// If `bail_if_empty` is set, returns `Ok(false)` (without having consumed anything) the
-    /// first time a timeout occurs with zero bytes of *this* field read so far
+    /// Same liveness contract as before: bails out with `Ok(None)` (consuming nothing) only when
+    /// a read times out with *zero* buffered bytes belonging to a not-yet-complete message;  once
+    /// any byte of a message has arrived, further timeouts are retried rather than bailing, so a
+    /// partially-arrived message is never abandoned partway.
     #[verifier::external_body]
-    fn read_exact_or_none(stream: &mut &TcpStream, buf: &mut [u8], bail_if_empty: bool) -> Result<
-        bool,
-        std::io::Error,
-    > {
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            match stream.read(&mut buf[filled..]) {
+    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
+        // SAFETY: see `read_ahead`'s field doc -- only the single thread that owns this channel's
+        // connection ever calls `try_recv`/`send`, so this is the only live reference to `*ra` for
+        // the duration of this call.
+        let ra = unsafe { &mut *self.read_ahead.get() };
+        // TcpStream implements Read, which takes in a mut ref
+        // However, &TcpStream also implements Read, so this is how we get around it
+        let mut stream = &self.inner;
+        loop {
+            let available = ra.len - ra.pos;
+            if available >= 4 {
+                let len_bytes: [u8; 4] = ra.buf[ra.pos..ra.pos + 4].try_into().unwrap();
+                let msg_len = u32::from_ne_bytes(len_bytes) as usize;
+                if available >= 4 + msg_len {
+                    let start = ra.pos + 4;
+                    let res = Self::deserialize(&ra.buf[start..start + msg_len])?;
+                    ra.pos = start + msg_len;
+                    return Ok(Some(res));
+                }
+                // Know the exact length now -- make room for the rest of *this* message.
+
+                ra.make_room((4 + msg_len) - available);
+            } else {
+                ra.make_room(Self::READ_AHEAD_CHUNK);
+            }
+            let had_any = ra.len > ra.pos;
+            match stream.read(&mut ra.buf[ra.len..]) {
                 Ok(0) => {
                     return Err(
                         std::io::Error::new(
@@ -97,10 +185,10 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                     );
                 },
                 Ok(n) => {
-                    filled += n;
+                    ra.len += n;
                 },
-                Err(e) if is_recv_timeout(&e) && bail_if_empty && filled == 0 => {
-                    return Ok(false);
+                Err(e) if is_recv_timeout(&e) && !had_any => {
+                    return Ok(None);
                 },
                 Err(e) if is_recv_timeout(&e) => {
                     continue;
@@ -110,24 +198,6 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                 },
             }
         }
-        Ok(true)
-    }
-
-    #[verifier::external_body]
-    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
-        // TcpStream implements Read, which takes in a mut ref
-        // However, &TcpStream also implements Read, so this is how we get around it
-        let mut stream = &self.inner;
-        let mut len_bytes = [0u8;4];
-        if !Self::read_exact_or_none(&mut stream, &mut len_bytes, true)? {
-            return Ok(None);
-        }
-        let len = u32::from_ne_bytes(len_bytes) as usize;
-
-        let mut buf = vec![0u8; len];
-        Self::read_exact_or_none(&mut stream, &mut buf, false)?;
-        let res = Self::deserialize(&buf)?;
-        Ok(Some(res))
     }
 
     fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
@@ -188,16 +258,19 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(())
     }
 
+    #[verifier::external_body]
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr().expect("local addr should be set")
     }
 
+    #[verifier::external_body]
     pub fn peer_addr(&self) -> SocketAddr {
         self.inner.peer_addr().expect("peer addr should be set")
     }
 
     /// The underlying stream's raw fd, for `Server::run_epoll` to register with an `mio::Poll`
     /// instance (see `crate::network::channel::RawFdChannel`).
+    #[verifier::external_body]
     pub fn raw_fd(&self) -> i32 {
         self.inner.as_raw_fd()
     }
@@ -520,3 +593,9 @@ impl<K, R, S, A> Connector<ServerChannel<K, R, S>> for TcpConnector<A> where
 }
 
 } // verus!
+// SAFETY: see `TypedTcpStream::read_ahead`'s field doc -- exclusivity is the caller's
+// responsibility, not proven by this type (`verus!` disallows `unsafe impl` inside its own
+// block, hence this living out here, same as `vlib::reclaim::Slot`'s identical pattern). `R`/`S`
+// are phantom-only in this struct (no value of either type is ever stored), so their own
+// `Sync`-ness is irrelevant to this impl's soundness.
+unsafe impl<R, S> Sync for TypedTcpStream<R, S> {}

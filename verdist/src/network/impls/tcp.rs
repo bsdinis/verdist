@@ -148,12 +148,42 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
         let s = Self::serialize(v)?;
         let len = s.view().len() as u32;
-        // See above (try_recv) for &TcpStream impl Read discussion
+        let len_bytes = len.to_ne_bytes();
+        // One `write_vectored` call instead of two separate `write_all`s -- on Linux this maps to
+        // a single `writev(2)`, so the common (small-message, no-backpressure) case costs one
+        // syscall instead of two, with no extra copy to combine the length prefix and payload
+        // into one buffer. This changes nothing about atomicity: TCP already gives no atomicity
+        // guarantee across *any* split of bytes into separate `send`/`write` calls, whether we
+        // choose the split (the old two-call version) or the kernel does (a `writev` can return a
+        // partial count torn anywhere, including exactly at this same prefix/payload boundary). A
+        // partial-but-successful write (`Ok(n)` short of everything queued) is not a failure --
+        // `advance_slices` just resumes from where it left off, same as `write_all` already does
+        // internally for a single buffer. Only a hard error partway through is the same
+        // "non-atomic write" case the old code already flagged: some bytes are already
+        // irrevocably in the kernel's send buffer but not all, and there is no way to un-send
+        // them, so this channel must be treated as broken -- same recovery (log + `Err`) as before.
+        // See above (try_recv) for &TcpStream impl Read discussion.
         let mut stream = &self.inner;
-        stream.write_all(&len.to_ne_bytes())?;
-        if let Err(e) = stream.write_all(s.view()) {
-            vlib::veprintln!("warning: non-atomic write of len + payload failed");
-            return Err(e);
+        let mut bufs_storage = [std::io::IoSlice::new(&len_bytes), std::io::IoSlice::new(s.view())];
+        let mut bufs: &mut [std::io::IoSlice] = &mut bufs_storage;
+        while !bufs.is_empty() {
+            match stream.write_vectored(bufs) {
+                Ok(0) => {
+                    vlib::veprintln!("warning: non-atomic write of len + payload failed");
+                    return Err(
+                        std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ),
+                    );
+                },
+                Ok(n) => std::io::IoSlice::advance_slices(&mut bufs, n),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    vlib::veprintln!("warning: non-atomic write of len + payload failed");
+                    return Err(e);
+                },
+            }
         }
         Ok(())
     }

@@ -140,6 +140,22 @@ pub trait Service {
         ensures
             self.spec_id() == r,
     ;
+
+    /// Whether this service has periodic background maintenance work (see `background_tick`) --
+    /// default `false`, so `Server::run`/`run_epoll` spawn no extra thread for services (e.g.
+    /// `echo`'s) that have none. A service overriding this to `true` (e.g. `abd`'s lock-free
+    /// register backend, whose reclaim pass needs to run somewhere off the request-handling
+    /// path) gets exactly one dedicated background thread calling `background_tick` in a loop.
+    /// Plain exec, no spec meaning -- unlike `handle`, nothing here is part of the verified
+    /// request/response contract.
+    fn has_background_work(&self) -> bool {
+        false
+    }
+
+    /// Called periodically, on its own dedicated thread, by `Server::run`/`run_epoll` -- but only
+    /// if `has_background_work` returns `true`. Default no-op.
+    fn background_tick(&self) {
+    }
 }
 
 /// Upper bound on how many connections a shard's scan (`Server::poll_shard`'s inner scan,
@@ -991,6 +1007,11 @@ impl<S, L, C> Server<S, L, C> where
 }
 
 } // verus!
+// How often a service's `background_tick` is called, on its own dedicated thread, when
+// `has_background_work` opts in (see `run`/`run_epoll` below). Not a spec-relevant value -- only
+// affects how promptly a service's background maintenance runs, never correctness.
+const BACKGROUND_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_micros(100);
+
 // Why is this unverified:
 // - major: verus does not support scoped threads (`vstd::thread::spawn` only wraps
 //   `std::thread::spawn`'s `'static`, owned case) -- this mirrors the pattern every
@@ -1013,6 +1034,14 @@ where
     pub fn run(&self, raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>>) {
         std::thread::scope(|s| {
             s.spawn(|| while self.poll_accept() {});
+            // One dedicated background-maintenance thread, only if the service actually has any
+            // (see `Service::has_background_work`'s doc) -- e.g. `echo` never spawns this.
+            if self.service.has_background_work() {
+                s.spawn(|| loop {
+                    self.service.background_tick();
+                    std::thread::sleep(BACKGROUND_TICK_INTERVAL);
+                });
+            }
             for (shard, raw_rx) in raw_receivers.into_iter().enumerate() {
                 s.spawn(move || {
                     let mut connected: Vec<C> = Vec::new();
@@ -1074,6 +1103,12 @@ where
                 let mut events_scratch = mio::Events::with_capacity(1);
                 while self.poll_accept_epoll(&mut events_scratch) {}
             });
+            if self.service.has_background_work() {
+                s.spawn(|| loop {
+                    self.service.background_tick();
+                    std::thread::sleep(BACKGROUND_TICK_INTERVAL);
+                });
+            }
             for (shard, raw_rx) in raw_receivers.into_iter().enumerate() {
                 s.spawn(move || {
                     let mut connected: Vec<C> = Vec::new();

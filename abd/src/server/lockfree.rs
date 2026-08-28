@@ -1025,6 +1025,15 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
         atomic_with_ghost!(&self.gate => store(false); update prev -> next; ghost g => { });
         resp
     }
+
+    /// Forwards to `EpochAtomicPtr::reclaim_pass` -- see its doc comment. Meant to be called
+    /// periodically from a dedicated background thread (via `Service::background_tick`, wired up
+    /// through `RegisterStore`/`RegisterService` in `server/mod.rs`), so that `write`'s own
+    /// `claim_and_install` -- reached through `self.data.write` above -- finds slots already idle
+    /// instead of having to drain+spin for one inline.
+    pub fn reclaim_pass(&self) {
+        self.data.reclaim_pass();
+    }
 }
 
 } // verus!

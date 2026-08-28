@@ -154,6 +154,17 @@ impl<ML, RL> RegisterStore<ML, RL> where
             RegisterStore::Lockfree(r) => r.write(shard_idx, req),
         }
     }
+
+    /// Background-maintenance hook (`Service::background_tick`, via `RegisterService`): a no-op
+    /// on `Locked` (its `RwLock` needs no reclaim), forwarded to
+    /// `EpochMonotonicRegister::reclaim_pass` on `Lockfree`. Plain exec, not part of any spec --
+    /// see `reclaim_pass`'s own doc there.
+    pub fn reclaim_pass(&self) {
+        match self {
+            RegisterStore::Locked(_) => (),
+            RegisterStore::Lockfree(r) => r.reclaim_pass(),
+        }
+    }
 }
 
 #[verifier::reject_recursive_types(ML)]
@@ -446,6 +457,17 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
 
     fn id(&self) -> (r: u64) {
         self.id
+    }
+
+    // Only the `Lockfree` backend has anything to do here -- `Locked`'s `RwLock` needs no
+    // background maintenance, so `Server::run`/`run_epoll` spawn no extra thread at all in that
+    // case (see `Service::has_background_work`'s doc).
+    fn has_background_work(&self) -> bool {
+        matches!(self.register, RegisterStore::Lockfree(_))
+    }
+
+    fn background_tick(&self) {
+        self.register.reclaim_pass();
     }
 }
 

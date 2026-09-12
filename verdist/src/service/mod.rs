@@ -192,6 +192,12 @@ const ACCEPT_BACKOFF_MILLIS: u64 = 2;
 /// thread is genuinely idle for the whole interval, not repeatedly re-checking.
 const EPOLL_FALLBACK_MILLIS: u64 = 100;
 
+/// `mio::Token` a shard's `Poll` instance registers its `Waker` under (see `Server::shard_wakers`'s
+/// doc). Every real fd's token is `fd as usize` (see `drain_raw_epoll`/`poll_accept_epoll`), and a
+/// raw fd is always a small non-negative `i32`, so `usize::MAX` can never collide with one --
+/// reserving it as the one token value no real fd registration ever uses.
+const WAKER_TOKEN: usize = usize::MAX;
+
 /// How many connections `Server::choose_shard` fills an already-active shard with before it
 /// starts routing new connections to the next shard, instead of the old policy's immediate
 /// modulo-hash spread across every shard from the very first connection. See
@@ -277,16 +283,16 @@ impl ShardLoad {
     }
 }
 
-/// Trivial invariant for the `mio::Poll` handle backing the accept thread's blocking wait in
-/// `Server::run_epoll` (see §9/§10 of Performance.md). A `Poll` handle is pure scheduling state,
-/// not part of any correctness invariant -- there is nothing to state about it beyond "some
-/// `mio::Poll` value lives here" -- so this exists only to get verified interior mutability for
-/// `mio::Poll::poll`'s `&mut self` requirement through `Server`'s `&self` methods. The accept
-/// thread is the only thread that ever touches `accept_poll` (there is exactly one of it), so
-/// this remains an `RwLock` purely for that interior-mutability reason, not because of any real
-/// cross-thread contention -- unlike the per-shard `mio::Poll`/`Registry` handles, which are now
-/// owned directly by each worker thread's local state (see `run_epoll`) since ownership-transfer
-/// removed the need to reach them through `&self` at all.
+/// Trivial invariant for an `mio::Poll` handle reached through `Server`'s `&self` methods (the
+/// accept thread's `accept_poll` and, since `shard_wakers` needed a way to reach a shard's
+/// `Registry`/`Waker` from `Server::new` onward, each shard's own `shard_polls[shard_idx]` too --
+/// see that field's doc). A `Poll` handle is pure scheduling state, not part of any correctness
+/// invariant -- there is nothing to state about it beyond "some `mio::Poll` value lives here" --
+/// so this exists only to get verified interior mutability for `mio::Poll::poll`'s `&mut self`
+/// requirement through a shared reference. Each `RwLock` here is only ever touched by exactly one
+/// thread (the accept thread for `accept_poll`, that shard's own worker thread for
+/// `shard_polls[shard_idx]`), so this is an `RwLock` purely for that interior-mutability reason,
+/// never because of real cross-thread contention.
 pub struct TrivialPollInv;
 
 impl vstd::rwlock::RwLockPredicate<mio::Poll> for TrivialPollInv {
@@ -325,6 +331,35 @@ pub struct Server<S, L, C> where
     /// `&self` -- registering the listener fd never contends with the accept thread's blocking
     /// `poll()` call the way sharing `accept_poll`'s lock would.
     accept_registry: mio::Registry,
+    /// One `Poll` per shard, indexed the same way as `raw_senders` -- backs that shard's worker
+    /// thread's blocking wait in `poll_shard_epoll` (see §9/§10 of Performance.md), exactly like
+    /// `accept_poll` backs the accept thread's. Promoted from a `run_epoll`-local variable (as it
+    /// was right after the ownership-transfer redesign) back into a `Server` field for one reason:
+    /// `shard_wakers[shard]` (see that field's doc) must be constructed from
+    /// *this exact* `Poll`'s `Registry` up front, in `Server::new`, before the accept thread that
+    /// will call `wake()` on it even exists -- so the `Poll` itself has to be built there too. Only
+    /// that shard's own worker thread ever calls `.poll()`/`.registry()` on this, so -- like
+    /// `accept_poll` -- this is an `RwLock` purely for interior mutability, never real contention.
+    shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>>,
+    /// Registry clone for `shard_polls[shard]`, same rationale as `accept_registry`: registering a
+    /// newly-drained connection's fd (`drain_raw_epoll`) never needs to contend with that shard's
+    /// own blocking `poll()` call the way sharing `shard_polls[shard]`'s lock would.
+    shard_registries: Vec<mio::Registry>,
+    /// One `mio::Waker` per shard, built from `shard_registries[shard]` at construction time (see
+    /// that field's doc). `Server::dispatch_raw` calls `shard_wakers[shard].wake()` right after
+    /// handing a newly-accepted raw connection to that shard over `raw_senders[shard]` -- this is
+    /// the fix for the latency bug this field was added for: without it, a shard's worker thread
+    /// already blocked in `poll_shard_epoll`'s `Poll::poll()` call (see `shard_polls`'s doc) has no
+    /// fd registered for a connection it hasn't drained yet, so nothing could make that blocking
+    /// call return before its full `EPOLL_FALLBACK_MILLIS` fallback timeout elapsed -- stalling
+    /// that connection's very first request by up to `EPOLL_FALLBACK_MILLIS`, regardless of how
+    /// promptly the client sent it. `wake()` makes the same `poll()` call return immediately
+    /// instead (mio's documented purpose for `Waker`), so `drain_raw_epoll` registers the new
+    /// connection's fd on the very next loop iteration rather than after a ~100ms stall. A `Waker`
+    /// carries no proof-relevant state of its own (same rationale as `ShardLoad`'s trivial
+    /// invariant), so this needs no lock: `wake()` only needs `&self` (see `vlib::mio`'s trusted
+    /// shim), same as `ShardLoad::increment`/`decrement_by`.
+    shard_wakers: Vec<mio::Waker>,
     /// `C` no longer appears in any field (connections are never `Server` state -- see
     /// `raw_senders`'s doc), but `Server<S, L, C>` is still meaningfully parameterized by it (via
     /// the `Listener<C>`/`Channel` bounds), so it needs an explicit marker to stay a valid type
@@ -387,6 +422,9 @@ impl<S, L, C> Server<S, L, C> where
         let mut raw_senders: Vec<crossbeam_channel::Sender<L::Raw>> = Vec::new();
         let mut raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>> = Vec::new();
         let mut shard_loads: Vec<ShardLoad> = Vec::new();
+        let mut shard_polls: Vec<RwLock<mio::Poll, TrivialPollInv>> = Vec::new();
+        let mut shard_registries: Vec<mio::Registry> = Vec::new();
+        let mut shard_wakers: Vec<mio::Waker> = Vec::new();
         let mut i = 0;
         while i < num_shards
             invariant
@@ -394,17 +432,34 @@ impl<S, L, C> Server<S, L, C> where
                 raw_senders.len() == i,
                 raw_receivers.len() == i,
                 shard_loads.len() == i,
+                shard_polls.len() == i,
+                shard_registries.len() == i,
+                shard_wakers.len() == i,
             decreases num_shards - i,
         {
             let (tx, rx) = crossbeam_channel::unbounded();
             raw_senders.push(tx);
             raw_receivers.push(rx);
             shard_loads.push(ShardLoad::new());
+            // See `Server::shard_polls`/`shard_registries`/`shard_wakers`'s docs: the `Waker` must
+            // be built from this exact `Poll`'s own `Registry` right here, before the accept
+            // thread that will later call `wake()` on it (via `dispatch_raw`) even exists.
+            let poll_raw = mio::Poll::new().expect("mio::Poll::new should not fail");
+            let registry = poll_raw.registry().try_clone().expect(
+                "mio::Registry::try_clone should not fail",
+            );
+            let waker = vlib::mio::mio_waker_new(&registry, WAKER_TOKEN).expect(
+                "mio::Waker::new should not fail",
+            );
+            shard_polls.push(RwLock::new(poll_raw, Ghost(TrivialPollInv)));
+            shard_registries.push(registry);
+            shard_wakers.push(waker);
             i += 1;
         }
         assert(raw_senders.len() == num_shards);
         assert(raw_receivers.len() == num_shards);
         assert(shard_loads.len() == num_shards);
+        assert(shard_polls.len() == num_shards);
         let accept_poll_raw = mio::Poll::new().expect("mio::Poll::new should not fail");
         let accept_registry = accept_poll_raw.registry().try_clone().expect(
             "mio::Registry::try_clone should not fail",
@@ -417,6 +472,9 @@ impl<S, L, C> Server<S, L, C> where
             shard_loads,
             accept_poll,
             accept_registry,
+            shard_polls,
+            shard_registries,
+            shard_wakers,
             _marker: PhantomData,
         };
         assert(server.spec_num_shards() == num_shards as int);
@@ -428,6 +486,9 @@ impl<S, L, C> Server<S, L, C> where
         &&& self.raw_senders.len() > 0
         &&& self.listener.spec_id() == self.service.spec_id()
         &&& self.shard_loads.len() == self.raw_senders.len()
+        &&& self.shard_polls.len() == self.raw_senders.len()
+        &&& self.shard_registries.len() == self.raw_senders.len()
+        &&& self.shard_wakers.len() == self.raw_senders.len()
     }
 
     /// Number of independent shards connections are split across -- exposed so public
@@ -491,10 +552,15 @@ impl<S, L, C> Server<S, L, C> where
     }
 
     /// Sends a just-accepted raw connection to whichever shard's handoff channel owns it (chosen
-    /// by `choose_shard`), and records the routing decision in that shard's `ShardLoad` counter.
-    /// Unlike the old `accept`, this never touches anything invariant-relevant -- `L::Raw`
-    /// carries no spec-relevant content at all (see `Listener::Raw`'s doc), so there is nothing
-    /// to prove about the value being sent, only that a shard index is picked in bounds.
+    /// by `choose_shard`), records the routing decision in that shard's `ShardLoad` counter, and
+    /// wakes that shard's `Poll` (see `shard_wakers`'s doc). Unlike the old `accept`, this never
+    /// touches anything invariant-relevant -- `L::Raw` carries no spec-relevant content at all
+    /// (see `Listener::Raw`'s doc), so there is nothing to prove about the value being sent, only
+    /// that a shard index is picked in bounds. The `wake()` call is best-effort (like the
+    /// registration warnings in `drain_raw_epoll`/`poll_accept_epoll`): if it fails, that shard's
+    /// worker thread still eventually reaches this connection on its next `EPOLL_FALLBACK_MILLIS`
+    /// timeout, same as before this field existed -- `wake()` only removes that wait in the common
+    /// case, it is never required for correctness.
     fn dispatch_raw(&self, shard_key: u64, raw: L::Raw)
         requires
             self.spec_num_shards() > 0,
@@ -505,6 +571,7 @@ impl<S, L, C> Server<S, L, C> where
         let shard = self.choose_shard(shard_key);
         self.shard_loads[shard].increment();
         let _ = self.raw_senders[shard].send(raw);
+        let _ = vlib::mio::mio_waker_wake(&self.shard_wakers[shard]);
     }
 
     /// Drains up to 10 pending `try_accept_raw`s from the listener, dispatching each to its
@@ -929,20 +996,24 @@ impl<S, L, C> Server<S, L, C> where
     }
 
     /// Blocks (via real epoll/kqueue readiness, with `EPOLL_FALLBACK_MILLIS` as a safety-net
-    /// timeout) until `shard` likely has work, drains+registers any newly-handed-off connections
-    /// (`drain_raw_epoll`), then dispatches only to the connections epoll reported as ready
-    /// (`scan_ready`), falling back to a full `scan_full` scan only when epoll reported nothing
-    /// at all (see `scan_ready`'s doc and `claude-files/UdpReadRegression.md`). Meant to be driven
-    /// by `run_epoll`'s per-shard worker thread in place of `poll_shard` alone. No lock of any
-    /// kind: `connected`/`cursor`/`registry`/`poll` are all owned outright by the calling thread.
+    /// timeout -- but see `Server::shard_wakers`'s doc: `dispatch_raw` wakes this shard's `Poll`
+    /// the instant a new connection is routed here, so that timeout is now a genuine "nothing else
+    /// woke me" fallback rather than the primary bound on how long a fresh connection's first
+    /// request can be stalled) until `shard` likely has work, drains+registers any
+    /// newly-handed-off connections (`drain_raw_epoll`), then dispatches only to the connections
+    /// epoll reported as ready (`scan_ready`), falling back to a full `scan_full` scan only when
+    /// epoll reported nothing at all (see `scan_ready`'s doc and
+    /// `claude-files/UdpReadRegression.md`). Meant to be driven by `run_epoll`'s per-shard worker
+    /// thread in place of `poll_shard` alone. No lock of any kind on `connected`/`cursor`: those
+    /// are owned outright by the calling thread. `shard_polls[shard_idx]`/
+    /// `shard_registries[shard_idx]` *are* `Server` fields (unlike before this fix), but each is
+    /// still only ever touched by this one shard's own worker thread -- see those fields' docs.
     #[allow(clippy::too_many_arguments)]
     pub fn poll_shard_epoll(
         &self,
         raw_rx: &crossbeam_channel::Receiver<L::Raw>,
         connected: &mut Vec<C>,
         cursor: &mut usize,
-        registry: &mio::Registry,
-        poll: &mut mio::Poll,
         events_scratch: &mut mio::Events,
         ready_scratch: &mut std::collections::HashSet<i32>,
         drop_scratch: &mut HashSet<C::Id>,
@@ -950,6 +1021,7 @@ impl<S, L, C> Server<S, L, C> where
         shard_idx: usize,
     )
         requires
+            shard_idx < self.spec_num_shards(),
             self.shard_inv(old(connected)@),
         ensures
             self.shard_inv(final(connected)@),
@@ -957,9 +1029,17 @@ impl<S, L, C> Server<S, L, C> where
         proof {
             use_type_invariant(self);
         }
+        let (mut poll, poll_handle) = self.shard_polls[shard_idx].acquire_write();
         let _ = poll.poll(events_scratch, Some(Duration::from_millis(EPOLL_FALLBACK_MILLIS)));
+        poll_handle.release_write(poll);
         vlib::mio::mio_fill_ready_fds(events_scratch, ready_scratch);
-        self.drain_raw_epoll(raw_rx, connected, registry);
+        // A connection dispatched while this shard was blocked in the `poll()` call just above
+        // (the common case `dispatch_raw`'s `wake()` targets -- see `shard_wakers`'s doc) is
+        // registered right here, on the very first drain after the wakeup, rather than only after
+        // an unrelated `EPOLL_FALLBACK_MILLIS` timeout: `wake()` makes `poll()` return almost
+        // immediately instead of only at that timeout, and this drain is unconditional every call
+        // regardless of *why* `poll()` returned.
+        self.drain_raw_epoll(raw_rx, connected, &self.shard_registries[shard_idx]);
         if ready_scratch.is_empty() {
             // Nothing reported ready before the fallback timeout elapsed -- either the shard is
             // genuinely idle, or a just-drained connection hasn't been picked up by a subsequent
@@ -1100,10 +1180,13 @@ where
     /// Performance.md instead of just mitigating them. Only usable when both `L` and `C` have a
     /// real OS fd (TCP/UDP) -- the in-process `modelled` network keeps using `run`.
     ///
-    /// Same `raw_receivers` contract as `run`. Each worker thread now also owns its own
-    /// `mio::Poll`/`Registry` pair as plain local state -- unlike the old RwLock-wrapped
-    /// `shard_polls`/`shard_registries` `Server` fields these replace, nothing else ever needs to
-    /// reach them, so there is no reason for them to be anything but ordinary locals anymore.
+    /// Same `raw_receivers` contract as `run`. Each worker thread's `mio::Poll`/`Registry` pair
+    /// now lives in `Server::shard_polls`/`shard_registries` (built up front in `Server::new`)
+    /// rather than as a thread-local here -- see those fields' docs for why: `dispatch_raw` (on
+    /// the accept thread) needs to reach a shard's `Waker`, built from that exact `Poll`'s
+    /// `Registry`, to fix the missed-wakeup latency bug described there. Only this shard's own
+    /// worker thread ever calls `.poll()`/`.registry()` on its entry, so this remains
+    /// effectively single-owner despite being reachable through `&self`.
     pub fn run_epoll(&self, raw_receivers: Vec<crossbeam_channel::Receiver<L::Raw>>) {
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -1124,12 +1207,6 @@ where
                 s.spawn(move || {
                     let mut connected: Vec<C> = Vec::new();
                     let mut cursor: usize = 0;
-                    let poll = mio::Poll::new().expect("mio::Poll::new should not fail");
-                    let registry = poll
-                        .registry()
-                        .try_clone()
-                        .expect("mio::Registry::try_clone should not fail");
-                    let mut poll = poll;
                     // Same rationale as `run`'s `drop_scratch` -- owned by this shard's single
                     // worker thread, reused across calls instead of allocating fresh every poll.
                     let mut events_scratch = mio::Events::with_capacity(MAX_POLL_BATCH);
@@ -1141,8 +1218,6 @@ where
                             &raw_rx,
                             &mut connected,
                             &mut cursor,
-                            &registry,
-                            &mut poll,
                             &mut events_scratch,
                             &mut ready_scratch,
                             &mut drop_scratch,

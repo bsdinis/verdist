@@ -38,6 +38,25 @@ pub fn mio_deregister(registry: &mio::Registry, fd: i32) -> std::io::Result<()> 
     registry.deregister(&mut mio::unix::SourceFd(&fd))
 }
 
+/// Constructs a `mio::Waker` bound to `registry`, keyed by `token`. A `Waker`'s `wake()` (see
+/// below) is the only supported way to make a *different* thread's blocked `Poll::poll()` return
+/// promptly instead of waiting out its full timeout -- registering a new fd with a `Registry`
+/// only wakes a blocked `poll()` once that fd itself becomes readable, which does nothing for
+/// "a new fd was just handed to this shard and isn't registered yet" (see
+/// `Server::dispatch_raw`/`Server::shard_wakers`'s doc in `verdist::service`).
+pub fn mio_waker_new(registry: &mio::Registry, token: usize) -> std::io::Result<mio::Waker> {
+    mio::Waker::new(registry, mio::Token(token))
+}
+
+/// Wakes the `Poll` instance `waker` was built from, causing its (possibly other-thread) blocked
+/// `Poll::poll()` call to return immediately with an event carrying `waker`'s token, same as any
+/// other readiness event. Idempotent-ish per mio's own docs (multiple `wake()` calls before the
+/// blocked `poll()` drains them coalesce into a single wakeup), so this is safe to call whenever
+/// a wakeup might be warranted, not just when one is strictly needed.
+pub fn mio_waker_wake(waker: &mio::Waker) -> std::io::Result<()> {
+    waker.wake()
+}
+
 /// Fills `out` (cleared first) with the fds reported ready by a completed `Poll::poll` call,
 /// keyed by `mio_register_readable`'s registration token (== the fd itself, see that function's
 /// doc). Lets a caller dispatch only to the connections epoll actually reported as readable
@@ -65,6 +84,11 @@ pub struct ExRegistry(mio::Registry);
 #[verifier::external_body]
 #[allow(dead_code)]
 pub struct ExEvents(mio::Events);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
+pub struct ExWaker(mio::Waker);
 
 pub assume_specification[ mio::Poll::new ]() -> (r: std::io::Result<mio::Poll>)
     ensures
@@ -108,6 +132,19 @@ pub assume_specification[ mio_register_readable ](
 
 pub assume_specification[ mio_deregister ](registry: &mio::Registry, fd: i32) -> (res:
     std::io::Result<()>)
+    no_unwind
+;
+
+pub assume_specification[ mio_waker_new ](registry: &mio::Registry, token: usize) -> (res:
+    std::io::Result<mio::Waker>)
+    ensures
+        res is Ok,  // same rationale as `mio::Registry::try_clone` above: constructing the extra
+                     // waker fd (an eventfd on Linux) failing due to fd exhaustion is not modeled
+
+    no_unwind
+;
+
+pub assume_specification[ mio_waker_wake ](waker: &mio::Waker) -> (res: std::io::Result<()>)
     no_unwind
 ;
 

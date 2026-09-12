@@ -42,13 +42,11 @@ thread_local! {
     /// Grown (never shrunk) to the largest message seen so far on this thread, then resliced down
     /// to each message's actual length.
     static RECV_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// `flexbuffers::FlexbufferSerializer::reset()` clears its internal `Vec`s via `.clear()`
-    /// (capacity kept) rather than freeing them, so reusing one serializer across `send` calls --
-    /// instead of `FlexbufferSerializer::new()` allocating fresh `Vec`s every time -- is exactly
-    /// what the crate's own API is designed to support.
-    static SEND_SER: RefCell<flexbuffers::FlexbufferSerializer> = RefCell::new(
-        flexbuffers::FlexbufferSerializer::new(),
-    );
+    /// `postcard::to_extend` takes a `Vec<u8>` by value and returns it back with the encoded
+    /// bytes appended, so `.clear()` (capacity kept, no dealloc) then `to_extend` into the same
+    /// `Vec` reuses this thread's allocation across `send` calls, the same way this used to reuse
+    /// a `flexbuffers::FlexbufferSerializer` via its own `.reset()`.
+    static SEND_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 verus! {
@@ -80,17 +78,15 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         TypedTcpStream { inner: stream, _marker: PhantomData }
     }
 
+    /// `#[verifier::external_body]` (rather than a new `assume_specification` for `postcard`,
+    /// which Verus's error otherwise suggests): this is a small, self-contained helper with no
+    /// `requires`/`ensures` of its own, so trusting its body -- the same treatment every other
+    /// I/O-touching function in this `impl` already gets -- is a strictly smaller trust
+    /// addition than registering a spec for `postcard`'s own API surface, and needs no new axiom
+    /// category (`external_body` is already used throughout this file).
+    #[verifier::external_body]
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
-        let root = flexbuffers::Reader::get_root(buf).map_err(
-            |e|
-                {
-                    #[cfg(not(verus_only))]
-                    { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
-                    #[cfg(verus_only)]
-                    { std::io::Error::from_raw_os_error(-1) }
-                },
-        )?;
-        let value = R::deserialize(root).map_err(
+        let value = postcard::from_bytes::<R>(buf).map_err(
             |e|
                 {
                     #[cfg(not(verus_only))]
@@ -174,15 +170,16 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
 
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
-        SEND_SER.with(
+        SEND_BUF.with(
             |cell| -> Result<(), std::io::Error> {
-                let mut ser = cell.borrow_mut();
-                // `reset()` clears the serializer's internal buffers with `Vec::clear` (capacity
-                // kept), so this reuses the thread's persistent `FlexbufferSerializer` across
-                // `send` calls instead of allocating a fresh one (which
-                // `FlexbufferSerializer::new()` would do) every time.
-                ser.reset();
-                v.serialize(&mut *ser).map_err(
+                let mut buf = cell.borrow_mut();
+                // `.clear()` keeps the allocation (no dealloc), same reuse discipline the old
+                // `FlexbufferSerializer::reset()` gave us. `to_extend` takes the `Vec` by value
+                // and hands it back with the encoded bytes appended, so it's swapped out of the
+                // `RefCell` for the call and swapped back in below once we're done borrowing it.
+                let mut taken = std::mem::take(&mut *buf);
+                taken.clear();
+                let taken = postcard::to_extend(v, taken).map_err(
                     |e|
                         {
                             #[cfg(not(verus_only))]
@@ -191,7 +188,8 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                             { std::io::Error::from_raw_os_error(-1) }
                         },
                 )?;
-                let len = ser.view().len() as u32;
+                *buf = taken;
+                let len = buf.len() as u32;
                 let len_bytes = len.to_ne_bytes();
                 // One `write_vectored` call instead of two separate `write_all`s -- on Linux this
                 // maps to a single `writev(2)`, so the common (small-message, no-backpressure)
@@ -211,7 +209,7 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                 let mut stream = &self.inner;
                 let mut bufs_storage = [
                     std::io::IoSlice::new(&len_bytes),
-                    std::io::IoSlice::new(ser.view()),
+                    std::io::IoSlice::new(buf.as_slice()),
                 ];
                 let mut bufs: &mut [std::io::IoSlice] = &mut bufs_storage;
                 while !bufs.is_empty() {

@@ -3,7 +3,7 @@
 //! spinning or sleeping-with-backoff.
 //!
 //! Follows this codebase's existing convention for foreign crates (see `crossbeam.rs`,
-//! `serde.rs`, `flexbuffers.rs`, `std/net.rs`): an `external_type_specification` shim makes each
+//! `serde.rs`, `std/net.rs`): an `external_type_specification` shim makes each
 //! foreign type nameable inside `verus! {}`, and a tight set of `assume_specification`s gives
 //! trusted signatures to the handful of functions actually called. Everything built on top of
 //! these (in `verdist::service`) is ordinary verified Verus code -- these are the only new

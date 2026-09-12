@@ -48,9 +48,10 @@ use vstd::prelude::*;
 
 thread_local! {
     // Reused across `send`/`send_to` calls *on the thread that owns them* to avoid a fresh
-    // `Vec<u8>` (buffer) + key-pool allocation per outgoing message: `FlexbufferSerializer::reset`
-    // (vendored `flexbuffers` crate, `src/builder/ser.rs`) clears the internal buffers in place
-    // rather than reallocating, so later sends reuse whatever capacity earlier ones grew.
+    // `Vec<u8>` allocation per outgoing message: `postcard::to_extend` takes this `Vec` by value
+    // and hands it back with the encoded bytes appended, and `.clear()` before that (capacity
+    // kept, no dealloc) means later sends reuse whatever capacity earlier ones grew -- the same
+    // reuse discipline this used to get from `flexbuffers::FlexbufferSerializer::reset()`.
     //
     // Deliberately a module-level `thread_local!` rather than a `TypedUdpSocket` struct field:
     // a `RefCell<flexbuffers::FlexbufferSerializer>` field was tried first and rejected by Verus
@@ -70,8 +71,7 @@ thread_local! {
     // sites), and nothing calls `send`/`send_to` reentrantly. A future violation of that
     // assumption would still be safe (a `RefCell` double-borrow panics) rather than corrupt data,
     // since each thread has its own independent cell.
-    static SEND_SER: std::cell::RefCell<flexbuffers::FlexbufferSerializer> =
-        std::cell::RefCell::new(flexbuffers::FlexbufferSerializer::new());
+    static SEND_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 verus! {
@@ -104,17 +104,15 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         TypedUdpSocket { inner: socket, _marker: PhantomData }
     }
 
+    /// `#[verifier::external_body]` (rather than a new `assume_specification` for `postcard`,
+    /// which Verus's error otherwise suggests): this is a small, self-contained helper with no
+    /// `requires`/`ensures` of its own, so trusting its body -- the same treatment every other
+    /// I/O-touching function in this `impl` already gets -- is a strictly smaller trust
+    /// addition than registering a spec for `postcard`'s own API surface, and needs no new axiom
+    /// category (`external_body` is already used throughout this file).
+    #[verifier::external_body]
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
-        let root = flexbuffers::Reader::get_root(buf).map_err(
-            |e|
-                {
-                    #[cfg(not(verus_only))]
-                    { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
-                    #[cfg(verus_only)]
-                    { std::io::Error::from_raw_os_error(-1) }
-                },
-        )?;
-        let value = R::deserialize(root).map_err(
+        let value = postcard::from_bytes::<R>(buf).map_err(
             |e|
                 {
                     #[cfg(not(verus_only))]
@@ -169,10 +167,11 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
 
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
-        SEND_SER.with(|cell| {
-            let mut s = cell.borrow_mut();
-            s.reset();
-            v.serialize(&mut *s).map_err(
+        SEND_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            let mut taken = std::mem::take(&mut *buf);
+            taken.clear();
+            let taken = postcard::to_extend(v, taken).map_err(
                 |e|
                     {
                         #[cfg(not(verus_only))]
@@ -181,10 +180,11 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                         { std::io::Error::from_raw_os_error(-1) }
                     },
             )?;
-            let sent_len = self.inner.send(s.view())?;
-            if sent_len != s.view().len() {
+            *buf = taken;
+            let sent_len = self.inner.send(buf.as_slice())?;
+            if sent_len != buf.len() {
                 vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-                sent_len, s.view().len(), i32::MAX);
+                sent_len, buf.len(), i32::MAX);
             }
             Ok(())
         })
@@ -192,10 +192,11 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
 
     #[verifier::external_body]
     pub fn send_to<A: ToSocketAddrs>(&self, v: &S, addr: A) -> Result<(), std::io::Error> {
-        SEND_SER.with(|cell| {
-            let mut s = cell.borrow_mut();
-            s.reset();
-            v.serialize(&mut *s).map_err(
+        SEND_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            let mut taken = std::mem::take(&mut *buf);
+            taken.clear();
+            let taken = postcard::to_extend(v, taken).map_err(
                 |e|
                     {
                         #[cfg(not(verus_only))]
@@ -204,10 +205,11 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
                         { std::io::Error::from_raw_os_error(-1) }
                     },
             )?;
-            let sent_len = self.inner.send_to(s.view(), addr)?;
-            if sent_len != s.view().len() {
+            *buf = taken;
+            let sent_len = self.inner.send_to(buf.as_slice(), addr)?;
+            if sent_len != buf.len() {
                 vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-                sent_len, s.view().len(), i32::MAX);
+                sent_len, buf.len(), i32::MAX);
             }
             Ok(())
         })

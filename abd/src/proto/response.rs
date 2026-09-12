@@ -672,6 +672,35 @@ mod serde_impls {
                         {
                             self.visit_str(&value)
                         }
+
+                        // `postcard` (unlike `flexbuffers`) encodes an enum's variant tag as a
+                        // raw integer index (the same one passed to
+                        // `serialize_newtype_variant`/`serialize_unit_variant` above), not a
+                        // string -- its `EnumAccess::variant_seed` hands this visitor a plain
+                        // `u32` wrapped in `serde::de::value::U32Deserializer`, which calls
+                        // `visit_u64` (via its default `deserialize_identifier` -> `visit_u32` ->
+                        // default `visit_u64` chain), not `visit_str`. Without this, postcard
+                        // deserialization of `ResponseInner` fails with a `SerdeDeCustom` error
+                        // (confirmed empirically -- postcard collapses `Error::invalid_type`'s
+                        // default fallback, hit when no `visit_u64` is present, into that one
+                        // opaque variant). Indices must match `serialize_newtype_variant`'s
+                        // second argument above exactly: 0=Get, 1=GetTimestamp, 2=Write.
+                        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            match value {
+                                0 => Ok(Variant::Get),
+                                1 => Ok(Variant::GetTimestamp),
+                                2 => Ok(Variant::Write),
+                                _ => Err(
+                                    serde::de::Error::invalid_value(
+                                        serde::de::Unexpected::Unsigned(value),
+                                        &"variant index 0 <= i < 3",
+                                    ),
+                                ),
+                            }
+                        }
                     }
 
                     deserializer.deserialize_identifier(FieldVisitor)

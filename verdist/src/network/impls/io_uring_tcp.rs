@@ -212,17 +212,15 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(IoUringTcpStream { inner: stream, ring: UnsafeCell::new(ring), _marker: PhantomData })
     }
 
+    /// `#[verifier::external_body]` (rather than a new `assume_specification` for `postcard`,
+    /// which Verus's error otherwise suggests): this is a small, self-contained helper with no
+    /// `requires`/`ensures` of its own, so trusting its body -- the same treatment every other
+    /// I/O-touching function in this `impl` already gets -- is a strictly smaller trust
+    /// addition than registering a spec for `postcard`'s own API surface, and needs no new axiom
+    /// category (`external_body` is already used throughout this file).
+    #[verifier::external_body]
     fn deserialize(buf: &[u8]) -> Result<R, std::io::Error> {
-        let root = flexbuffers::Reader::get_root(buf).map_err(
-            |e|
-                {
-                    #[cfg(not(verus_only))]
-                    { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
-                    #[cfg(verus_only)]
-                    { std::io::Error::from_raw_os_error(-1) }
-                },
-        )?;
-        let value = R::deserialize(root).map_err(
+        let value = postcard::from_bytes::<R>(buf).map_err(
             |e|
                 {
                     #[cfg(not(verus_only))]
@@ -234,9 +232,14 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(value)
     }
 
-    fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
-        let mut s = flexbuffers::FlexbufferSerializer::new();
-        v.serialize(&mut s).map_err(
+    /// Unlike `tcp.rs`/`udp.rs`, this allocates a fresh `Vec` per call rather than reusing a
+    /// thread-local buffer -- that reuse optimization was applied to `tcp.rs`/`udp.rs` earlier
+    /// this session but never extended to the io_uring paths; left as-is here (out of scope for
+    /// the flexbuffers->postcard swap this function is otherwise part of). `external_body` for
+    /// the same reason as `deserialize` above.
+    #[verifier::external_body]
+    fn serialize(v: &S) -> Result<Vec<u8>, std::io::Error> {
+        postcard::to_allocvec(v).map_err(
             |e|
                 {
                     #[cfg(not(verus_only))]
@@ -244,8 +247,7 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                     #[cfg(verus_only)]
                     { std::io::Error::from_raw_os_error(-1) }
                 },
-        )?;
-        Ok(s)
+        )
     }
 
     /// Submits one `Read` op for `buf[filled..]`, waits for its single completion, and returns
@@ -336,10 +338,10 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
         let s = Self::serialize(v)?;
-        let len = s.view().len() as u32;
+        let len = s.len() as u32;
         let len_bytes = len.to_ne_bytes();
         let ring = unsafe { &mut *self.ring.get() };
-        writev_all(ring, self.inner.as_raw_fd(), &len_bytes, s.view())
+        writev_all(ring, self.inner.as_raw_fd(), &len_bytes, &s)
     }
 
     #[verifier::external_body]

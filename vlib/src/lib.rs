@@ -1,5 +1,4 @@
 pub mod crossbeam;
-pub mod flexbuffers;
 pub mod map;
 pub mod mio;
 pub mod monotonic;

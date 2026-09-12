@@ -74,19 +74,17 @@ fn is_recv_timeout_errno(errno: i32) -> bool {
     errno == libc::EAGAIN || errno == libc::EWOULDBLOCK || errno == libc::ETIMEDOUT
 }
 
+/// `#[verifier::external_body]` (rather than a new `assume_specification` for `postcard`, which
+/// Verus's error otherwise suggests): this is a small, self-contained helper with no
+/// `requires`/`ensures` of its own, so trusting its body -- the same treatment every other
+/// I/O-touching function in this file already gets -- is a strictly smaller trust addition than
+/// registering a spec for `postcard`'s own API surface, and needs no new axiom category
+/// (`external_body` is already used throughout this file).
+#[verifier::external_body]
 fn udp_deserialize<R>(buf: &[u8]) -> Result<R, std::io::Error> where
     for <'de>R: serde::Deserialize<'de>,
  {
-    let root = flexbuffers::Reader::get_root(buf).map_err(
-        |e|
-            {
-                #[cfg(not(verus_only))]
-                { std::io::Error::other(format!("failed to deserialize: {e:?}")) }
-                #[cfg(verus_only)]
-                { std::io::Error::from_raw_os_error(-1) }
-            },
-    )?;
-    let value = R::deserialize(root).map_err(
+    let value = postcard::from_bytes::<R>(buf).map_err(
         |e|
             {
                 #[cfg(not(verus_only))]
@@ -98,12 +96,14 @@ fn udp_deserialize<R>(buf: &[u8]) -> Result<R, std::io::Error> where
     Ok(value)
 }
 
-fn udp_serialize<S: serde::Serialize>(v: &S) -> Result<
-    flexbuffers::FlexbufferSerializer,
-    std::io::Error,
-> {
-    let mut s = flexbuffers::FlexbufferSerializer::new();
-    v.serialize(&mut s).map_err(
+/// Unlike `tcp.rs`/`udp.rs`, this allocates a fresh `Vec` per call rather than reusing a
+/// thread-local buffer -- that reuse optimization was applied to `tcp.rs`/`udp.rs` earlier this
+/// session but never extended to the io_uring paths; left as-is here (out of scope for the
+/// flexbuffers->postcard swap this function is otherwise part of). `external_body` for the same
+/// reason as `udp_deserialize` above.
+#[verifier::external_body]
+fn udp_serialize<S: serde::Serialize>(v: &S) -> Result<Vec<u8>, std::io::Error> {
+    postcard::to_allocvec(v).map_err(
         |e|
             {
                 #[cfg(not(verus_only))]
@@ -111,8 +111,7 @@ fn udp_serialize<S: serde::Serialize>(v: &S) -> Result<
                 #[cfg(verus_only)]
                 { std::io::Error::from_raw_os_error(-1) }
             },
-    )?;
-    Ok(s)
+    )
 }
 
 /// `io_uring`-backed analogue of `network::impls::udp::TypedUdpSocket`, for the per-connection
@@ -212,7 +211,7 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
         let s = udp_serialize(v)?;
-        let view = s.view();
+        let view = s.as_slice();
         loop {
             let res = self.send_once(view)?;
             if res < 0 {
@@ -467,10 +466,10 @@ impl<K, R, S> Listener<IoUringClientChannel<K, R, S>> for IoUringUdpListener whe
         );
 
         let reply = udp_serialize(&(self.id, socket.local_addr().unwrap()))?;
-        let sent_len = self.listening_socket.send_to(reply.view(), addr)?;
-        if sent_len != reply.view().len() {
+        let sent_len = self.listening_socket.send_to(reply.as_slice(), addr)?;
+        if sent_len != reply.len() {
             vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-            sent_len, reply.view().len(), i32::MAX);
+            sent_len, reply.len(), i32::MAX);
         }
         socket.connect(connect_addr)?;
 
@@ -532,7 +531,7 @@ impl<K, R, S, A> Connector<IoUringServerChannel<K, R, S>> for IoUringUdpConnecto
         connect_socket.connect(&self.listening_addr)?;
 
         let req = udp_serialize(&(local_id, channel_socket.local_addr().unwrap()))?;
-        connect_socket.send(req.view())?;
+        connect_socket.send(req.as_slice())?;
         // Tolerant-of-noise loop matching `udp.rs`'s original `connect` exactly: a stray/malformed
         // datagram landing on this ephemeral rendezvous socket (plausible: a retransmit from a
         // previous failed attempt reusing a nearby port, or just line noise) is *not* a fatal

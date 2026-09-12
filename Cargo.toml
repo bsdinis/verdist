@@ -23,12 +23,12 @@ repository = "https://github.com/bsdinis/verdist"
 [workspace.dependencies]
 clap = { version = "4.4.12", features = ["derive"] }
 crossbeam-channel = "0.5.15"
-flexbuffers = "25.12"
 humantime = "2.4.0"
 io-uring = "0.7"
 libc = "0.2"
 mio = { version = "1.2.2", features = ["os-poll", "os-ext"] }
 polars = { version = "0.53", features = ["lazy"] }
+postcard = { version = "1.1", features = ["alloc"] }
 rand = "0.10.1"
 rand_distr = "0.6.0"
 serde = { version = "1.0", features = ["derive"] }

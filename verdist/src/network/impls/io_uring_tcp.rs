@@ -82,6 +82,82 @@ fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
     }
 }
 
+/// Submits one `Writev` op for `iovecs` (built by `writev_all` below), waits for its single
+/// completion, and returns the raw result (negative errno, or bytes written). Same split as
+/// `submit_and_wait_1`: `libc::iovec` -- like `IoUring` itself -- has no `external_type_specification`
+/// shim, so a fn *signature* naming `&[libc::iovec]` isn't representable even under
+/// `#[verifier::external_body]` (which only skips body-checking, not signature-checking), so this
+/// lives outside `verus! {}` entirely rather than as a method inside it.
+fn writev_once_raw(ring: &mut IoUring, fd: i32, iovecs: &[libc::iovec]) -> std::io::Result<i32> {
+    let entry = opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32).build()
+        .user_data(0);
+    // SAFETY: same contract as `IoUringTcpStream::read_once`/`write_once` (see their doc):
+    // `SubmissionQueue::push` requires the memory named by every `iovec` -- including the
+    // `iovec` array itself, which the kernel also reads -- to stay valid and unaliased until
+    // the op's completion is reaped. `iovecs` here is a caller-owned local on the stack, and this
+    // function submits and immediately `submit_and_wait_1`s for exactly that one completion
+    // before returning, so nothing named by `iovecs` is ever touched again after that point.
+    unsafe {
+        ring.submission().push(&entry).map_err(
+            |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
+        )?;
+    }
+    submit_and_wait_1(ring)?;
+    let cqe = ring.completion().next().expect(
+        "submit_and_wait_1 returned Ok, so at least one completion must be present",
+    );
+    Ok(cqe.result())
+}
+
+/// `writev(2)`-shaped send of `prefix` followed by `payload` as two `iovec`s in a single SQE per
+/// attempt, instead of copying both into one contiguous buffer first (which is what `send`, below,
+/// used to do). Mirrors `tcp.rs`'s vectored-write `send` (one `write_vectored` call, no copy) --
+/// see that function's doc for the atomicity discussion, which applies verbatim here. Lives outside
+/// `verus! {}` for the same reason as `writev_once_raw`: it builds `libc::iovec` values directly.
+fn writev_all(ring: &mut IoUring, fd: i32, mut prefix: &[u8], mut payload: &[u8]) -> std::io::Result<
+    (),
+> {
+    loop {
+        if prefix.is_empty() && payload.is_empty() {
+            return Ok(());
+        }
+        let iovecs_storage = [
+            libc::iovec { iov_base: prefix.as_ptr() as *mut libc::c_void, iov_len: prefix.len() },
+            libc::iovec { iov_base: payload.as_ptr() as *mut libc::c_void, iov_len: payload.len() },
+        ];
+        let iovecs: &[libc::iovec] = if prefix.is_empty() {
+            &iovecs_storage[1..]
+        } else {
+            &iovecs_storage[..]
+        };
+        let res = writev_once_raw(ring, fd, iovecs)?;
+        if res < 0 {
+            let errno = res.wrapping_neg();
+            if errno == libc::EINTR {
+                continue;
+            }
+            vlib::veprintln!("warning: non-atomic write of len + payload failed");
+            return Err(std::io::Error::from_raw_os_error(errno));
+        }
+        if res == 0 {
+            vlib::veprintln!("warning: non-atomic write of len + payload failed");
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::WriteZero, "failed to write whole buffer"),
+            );
+        }
+        let mut n = res as usize;
+        if !prefix.is_empty() {
+            let take = n.min(prefix.len());
+            prefix = &prefix[take..];
+            n -= take;
+        }
+        if n > 0 {
+            let take = n.min(payload.len());
+            payload = &payload[take..];
+        }
+    }
+}
+
 verus! {
 
 /// Same value as `network::impls::tcp::RECV_TIMEOUT_MILLIS` -- kept as a literal, separate
@@ -269,40 +345,21 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(Some(res))
     }
 
-    /// Unlike `tcp.rs`'s vectored-write send (one `writev(2)` for prefix + payload, no copy),
-    /// this combines them into one buffer before the single `Write` op -- `io_uring` has a
-    /// vectored `Writev` opcode too, but combining is simpler for a Phase A prototype and this
-    /// file isn't chasing that optimization yet (see the top doc's scope note).
+    /// Same `writev(2)`-shaped send as `tcp.rs`'s vectored-write `send` (one op per attempt for
+    /// the length-prefix + payload together, no copy to combine them into one buffer first --
+    /// unlike this function's own previous version). The actual `iovec` construction/partial-write
+    /// retry loop lives in the free function `writev_all`, above this file's `verus! {}` block:
+    /// `libc::iovec` has no `external_type_specification` shim, so it can't appear in a signature
+    /// Verus has to check, even under `#[verifier::external_body]` (see `writev_all`'s doc) -- but
+    /// this method's own signature only ever mentions `&S`/`std::io::Error`, so it keeps its
+    /// `#[verifier::external_body]` like every other method here and just delegates.
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
         let s = Self::serialize(v)?;
         let len = s.view().len() as u32;
-        let mut combined = Vec::with_capacity(4 + s.view().len());
-        combined.extend_from_slice(&len.to_ne_bytes());
-        combined.extend_from_slice(s.view());
-        let mut filled = 0usize;
-        while filled < combined.len() {
-            let res = self.write_once(&combined[filled..])?;
-            if res < 0 {
-                let errno = res.wrapping_neg();
-                if errno == libc::EINTR {
-                    continue;
-                }
-                vlib::veprintln!("warning: non-atomic write of len + payload failed");
-                return Err(std::io::Error::from_raw_os_error(errno));
-            }
-            if res == 0 {
-                vlib::veprintln!("warning: non-atomic write of len + payload failed");
-                return Err(
-                    std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ),
-                );
-            }
-            filled += res as usize;
-        }
-        Ok(())
+        let len_bytes = len.to_ne_bytes();
+        let ring = unsafe { &mut *self.ring.get() };
+        writev_all(ring, self.inner.as_raw_fd(), &len_bytes, s.view())
     }
 
     #[verifier::external_body]

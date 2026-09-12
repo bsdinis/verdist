@@ -23,4 +23,12 @@ run-examples:
 verify:
     cargo verus verify
 
+# profile a change to verified code: `just profile-proof "closed up Pending and Committed"`
+# logs to timing_tracker/, prepends a summary.md entry, and flags a regression
+# against the previous logged run. Not part of pre-commit -- run it by hand
+# whenever a proof-structure change (new invariant, refactored lemma, etc.) is
+# worth tracking, not on every commit.
+profile-proof *desc:
+    ./scripts/profile_proof.sh {{desc}}
+
 pre-commit: fmt check clippy verify run-examples

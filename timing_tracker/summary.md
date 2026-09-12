@@ -1,3 +1,35 @@
+# 0007: 2026-09-12 11:04:34
+
+- overhauled profile_proof.sh/print_profile_stats.sh: single verify pass (was 2), jq -s stream fix for multi-crate --output-json output, explicit -p abd default with cargo clean -p to dodge cargo's content-hash fingerprint cache, auto-appended summary.md entry, regression check
+
+|                                     |                                          |
+|---|---|
+|                             package |                                   abd    |
+|                             profile |                               release    |
+|                             version |            0.2026.09.11.307b4d5.dirty    |
+|                            platform |                          linux_x86_64    |
+|                           toolchain |       1.98.1-x86_64-unknown-linux-gnu    |
+|                         (overridden |                                    by    |
+|                         environment |                              variable    |
+|                   RUSTUP_TOOLCHAIN) |                                          |
+|                        verus commit | 307b4d57eabbff063dc5fa432b026509276ef292 |
+|                            hostname |                        verdist-387b3f    |
+|                           n_threads |                                    15    |
+|                            verified |                                   346    |
+|                  total (wall-clock) |                                  4831 ms |
+|                         total (cpu) |                                 12929 ms |
+|           verification (wall-clock) |                                  2951 ms |
+|                  verification (cpu) |                                  9414 ms |
+|                       smt run (cpu) |                                  3428 ms |
+|                              client |                                  1219 ms |
+|              client::net_invs::read |                                   981 ms |
+|               invariants::lin_queue |                                   848 ms |
+|              invariants::quorum::lb |                                   642 ms |
+|                    server::lockfree |                                   550 ms |
+|                  elapsed wall clock |                               0:05.79    |
+
+---
+
 # 0006: 2025-12-26 09:56:08
 
 - manually selected triggers

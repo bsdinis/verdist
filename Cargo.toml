@@ -28,7 +28,7 @@ io-uring = "0.7"
 libc = "0.2"
 mio = { version = "1.2.2", features = ["os-poll", "os-ext"] }
 polars = { version = "0.53", features = ["lazy"] }
-postcard = { version = "1.1", features = ["alloc"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rand = "0.10.1"
 rand_distr = "0.6.0"
 serde = { version = "1.0", features = ["derive"] }

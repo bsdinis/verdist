@@ -46,6 +46,34 @@ use vlib::serde::ExSerialize;
 
 use vstd::prelude::*;
 
+thread_local! {
+    // Reused across `send`/`send_to` calls *on the thread that owns them* to avoid a fresh
+    // `Vec<u8>` (buffer) + key-pool allocation per outgoing message: `FlexbufferSerializer::reset`
+    // (vendored `flexbuffers` crate, `src/builder/ser.rs`) clears the internal buffers in place
+    // rather than reallocating, so later sends reuse whatever capacity earlier ones grew.
+    //
+    // Deliberately a module-level `thread_local!` rather than a `TypedUdpSocket` struct field:
+    // a `RefCell<flexbuffers::FlexbufferSerializer>` field was tried first and rejected by Verus
+    // (`core::cell::RefCell` and `RefCell::new` have no existing Verus specification, and
+    // `TypedUdpSocket` itself is not `#[verifier::external_body]`, so Verus type-checks its field
+    // types directly). Declaring the cell here, entirely outside the `verus! {}` block below,
+    // means Verus never sees this type at all -- the struct layout is unchanged -- and the only
+    // places that touch it are inside `send`/`send_to`, which are already
+    // `#[verifier::external_body]` (their bodies are unchecked by Verus regardless of what
+    // stdlib/foreign types they use). No new trust-boundary annotation of any kind is added.
+    //
+    // Soundness of reuse relies on no two threads ever being mid-`send`/`send_to` on this thread's
+    // cell at once, which holds for a stronger reason than mutual exclusion would need: each
+    // `TypedUdpSocket` (and the `ClientChannel`/`ServerChannel` that owns it) is moved wholesale
+    // into exactly one worker thread for its whole lifetime (`verdist::service::Server` never
+    // `Arc`-shares a channel across shards/threads -- see `service/mod.rs`'s `s.spawn` call
+    // sites), and nothing calls `send`/`send_to` reentrantly. A future violation of that
+    // assumption would still be safe (a `RefCell` double-borrow panics) rather than corrupt data,
+    // since each thread has its own independent cell.
+    static SEND_SER: std::cell::RefCell<flexbuffers::FlexbufferSerializer> =
+        std::cell::RefCell::new(flexbuffers::FlexbufferSerializer::new());
+}
+
 verus! {
 
 /// How long a `recv`/`recv_from` call is allowed to block before giving up and reporting "no
@@ -139,40 +167,50 @@ impl<R, S> TypedUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         Ok(Some((v, addr)))
     }
 
-    fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
-        let mut s = flexbuffers::FlexbufferSerializer::new();
-        v.serialize(&mut s).map_err(
-            |e|
-                {
-                    #[cfg(not(verus_only))]
-                    { std::io::Error::other(format!("failed to serialize: {e:?}")) }
-                    #[cfg(verus_only)]
-                    { std::io::Error::from_raw_os_error(-1) }
-                },
-        )?;
-        Ok(s)
-    }
-
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
-        let s = Self::serialize(v)?;
-        let sent_len = self.inner.send(s.view())?;
-        if sent_len != s.view().len() {
-            vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-            sent_len, s.view().len(), i32::MAX);
-        }
-        Ok(())
+        SEND_SER.with(|cell| {
+            let mut s = cell.borrow_mut();
+            s.reset();
+            v.serialize(&mut *s).map_err(
+                |e|
+                    {
+                        #[cfg(not(verus_only))]
+                        { std::io::Error::other(format!("failed to serialize: {e:?}")) }
+                        #[cfg(verus_only)]
+                        { std::io::Error::from_raw_os_error(-1) }
+                    },
+            )?;
+            let sent_len = self.inner.send(s.view())?;
+            if sent_len != s.view().len() {
+                vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
+                sent_len, s.view().len(), i32::MAX);
+            }
+            Ok(())
+        })
     }
 
     #[verifier::external_body]
     pub fn send_to<A: ToSocketAddrs>(&self, v: &S, addr: A) -> Result<(), std::io::Error> {
-        let s = Self::serialize(v)?;
-        let sent_len = self.inner.send_to(s.view(), addr)?;
-        if sent_len != s.view().len() {
-            vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
-            sent_len, s.view().len(), i32::MAX);
-        }
-        Ok(())
+        SEND_SER.with(|cell| {
+            let mut s = cell.borrow_mut();
+            s.reset();
+            v.serialize(&mut *s).map_err(
+                |e|
+                    {
+                        #[cfg(not(verus_only))]
+                        { std::io::Error::other(format!("failed to serialize: {e:?}")) }
+                        #[cfg(verus_only)]
+                        { std::io::Error::from_raw_os_error(-1) }
+                    },
+            )?;
+            let sent_len = self.inner.send_to(s.view(), addr)?;
+            if sent_len != s.view().len() {
+                vlib::veprintln!("warning: partial write (only 0x{:x}B / 0x{:x}B sent). partial writes should be impossible for sizes <= 0x{:x}",
+                sent_len, s.view().len(), i32::MAX);
+            }
+            Ok(())
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {

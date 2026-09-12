@@ -91,7 +91,7 @@ fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
 fn writev_once_raw(ring: &mut IoUring, fd: i32, iovecs: &[libc::iovec]) -> std::io::Result<i32> {
     let entry = opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32).build()
         .user_data(0);
-    // SAFETY: same contract as `IoUringTcpStream::read_once`/`write_once` (see their doc):
+    // SAFETY: same contract as `IoUringTcpStream::read_once`/`writev_once_raw` (see their doc):
     // `SubmissionQueue::push` requires the memory named by every `iovec` -- including the
     // `iovec` array itself, which the kernel also reads -- to stay valid and unaliased until
     // the op's completion is reaped. `iovecs` here is a caller-owned local on the stack, and this
@@ -276,26 +276,6 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(cqe.result())
     }
 
-    /// Same write-side `unsafe` contract as `read_once`, for `Write` instead of `Read`.
-    #[verifier::external_body]
-    fn write_once(&self, buf: &[u8]) -> Result<i32, std::io::Error> {
-        let ring = unsafe { &mut *self.ring.get() };
-        let entry = opcode::Write::new(
-            types::Fd(self.inner.as_raw_fd()),
-            buf.as_ptr(),
-            buf.len() as u32,
-        ).build().user_data(0);
-        unsafe {
-            ring.submission().push(&entry).map_err(
-                |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
-            )?;
-        }
-        submit_and_wait_1(ring)?;
-        let cqe = ring.completion().next().expect(
-            "submit_and_wait_1 returned Ok, so at least one completion must be present",
-        );
-        Ok(cqe.result())
-    }
 
     /// Same shape/contract as `tcp.rs`'s `TypedTcpStream::read_exact_or_none` (see its doc):
     /// fills `buf` completely, retrying through recv-timeouts and resuming from where the

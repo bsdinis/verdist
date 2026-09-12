@@ -41,7 +41,7 @@ use vstd::prelude::*;
 thread_local! {
     /// Grown (never shrunk) to the largest message seen so far on this thread, then resliced down
     /// to each message's actual length.
-    static RECV_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static RECV_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// `flexbuffers::FlexbufferSerializer::reset()` clears its internal `Vec`s via `.clear()`
     /// (capacity kept) rather than freeing them, so reusing one serializer across `send` calls --
     /// instead of `FlexbufferSerializer::new()` allocating fresh `Vec`s every time -- is exactly

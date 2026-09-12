@@ -23,6 +23,12 @@ run-examples:
 verify:
     cargo verus verify
 
+# real end-to-end smoke tests: spawns a real abd_server + abd_client over io_uring_tcp/udp
+# (real sockets, not the modelled network run-examples above exercises) and fails loudly if
+# the wire path is broken. Not a benchmark -- just a handful of ops, seconds not minutes.
+test-smoke:
+    cargo test -p abd-example --test io_uring_network_smoke
+
 # profile a change to verified code: `just profile-proof "closed up Pending and Committed"`
 # logs to timing_tracker/, prepends a summary.md entry, and flags a regression
 # against the previous logged run. Not part of pre-commit -- run it by hand
@@ -31,4 +37,4 @@ verify:
 profile-proof *desc:
     ./scripts/profile_proof.sh {{desc}}
 
-pre-commit: fmt check clippy verify run-examples
+pre-commit: fmt check clippy verify run-examples test-smoke

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::Read;
 use std::io::Write;
 use std::marker::PhantomData;
@@ -22,6 +23,33 @@ use vlib::serde::ExDeserialize;
 use vlib::serde::ExSerialize;
 
 use vstd::prelude::*;
+
+// Deliberately declared *outside* the `verus! {}` block below (and touched only from the bodies
+// of `TypedTcpStream::try_recv`/`send`, both already `#[verifier::external_body]`): Verus's model
+// of shared references assumes `&self` implies immutability (see the "On channel equality" note
+// in `crate::network::channel`), so any interior-mutability type (`RefCell` included) used as a
+// *struct field* is rejected outright ("core::cell::RefCell is not supported") -- confirmed by
+// actually running `cargo verus verify` against that version of this change, not assumed. Kept as
+// plain per-thread statics instead, never as fields of `TypedTcpStream`, so Verus's struct layout
+// for it never has to reason about interior mutability at all. Reused across `try_recv`/`send`
+// calls to avoid a fresh heap allocation per message/serialize: sound to share per-thread (not
+// even per-channel) because every worker/client thread in this codebase calls `try_recv`/`send`
+// on its channels strictly sequentially, never concurrently with itself (see the doc comment
+// repeated at each call site below), so a `RefCell` (no `unsafe`, no locking) can never actually
+// hit a double-borrow at runtime, and reuse across the several channels one thread owns just
+// amortizes the allocation further.
+thread_local! {
+    /// Grown (never shrunk) to the largest message seen so far on this thread, then resliced down
+    /// to each message's actual length.
+    static RECV_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    /// `flexbuffers::FlexbufferSerializer::reset()` clears its internal `Vec`s via `.clear()`
+    /// (capacity kept) rather than freeing them, so reusing one serializer across `send` calls --
+    /// instead of `FlexbufferSerializer::new()` allocating fresh `Vec`s every time -- is exactly
+    /// what the crate's own API is designed to support.
+    static SEND_SER: RefCell<flexbuffers::FlexbufferSerializer> = RefCell::new(
+        flexbuffers::FlexbufferSerializer::new(),
+    );
+}
 
 verus! {
 
@@ -124,68 +152,94 @@ impl<R, S> TypedTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: se
         }
         let len = u32::from_ne_bytes(len_bytes) as usize;
 
-        let mut buf = vec![0u8; len];
-        Self::read_exact_or_none(&mut stream, &mut buf, false)?;
-        let res = Self::deserialize(&buf)?;
-        Ok(Some(res))
-    }
-
-    fn serialize(v: &S) -> Result<flexbuffers::FlexbufferSerializer, std::io::Error> {
-        let mut s = flexbuffers::FlexbufferSerializer::new();
-        v.serialize(&mut s).map_err(
-            |e|
+        // Reuse this thread's persistent recv buffer instead of allocating a fresh `Vec` every
+        // call: grow it (keeping the larger capacity) if this message is bigger than any seen so
+        // far on this thread, otherwise just reslice the existing allocation down to `len`. See
+        // the `RECV_BUF`/`SEND_SER` doc comment above for why this is a thread-local rather than
+        // a struct field.
+        RECV_BUF.with(
+            |cell|
                 {
-                    #[cfg(not(verus_only))]
-                    { std::io::Error::other(format!("failed to serialize: {e:?}")) }
-                    #[cfg(verus_only)]
-                    { std::io::Error::from_raw_os_error(-1) }
+                    let mut buf = cell.borrow_mut();
+                    if buf.len() < len {
+                        buf.resize(len, 0u8);
+                    }
+                    let slice = &mut buf[..len];
+                    Self::read_exact_or_none(&mut stream, slice, false)?;
+                    let res = Self::deserialize(slice)?;
+                    Ok(Some(res))
                 },
-        )?;
-        Ok(s)
+        )
     }
 
     #[verifier::external_body]
     pub fn send(&self, v: &S) -> Result<(), std::io::Error> {
-        let s = Self::serialize(v)?;
-        let len = s.view().len() as u32;
-        let len_bytes = len.to_ne_bytes();
-        // One `write_vectored` call instead of two separate `write_all`s -- on Linux this maps to
-        // a single `writev(2)`, so the common (small-message, no-backpressure) case costs one
-        // syscall instead of two, with no extra copy to combine the length prefix and payload
-        // into one buffer. This changes nothing about atomicity: TCP already gives no atomicity
-        // guarantee across *any* split of bytes into separate `send`/`write` calls, whether we
-        // choose the split (the old two-call version) or the kernel does (a `writev` can return a
-        // partial count torn anywhere, including exactly at this same prefix/payload boundary). A
-        // partial-but-successful write (`Ok(n)` short of everything queued) is not a failure --
-        // `advance_slices` just resumes from where it left off, same as `write_all` already does
-        // internally for a single buffer. Only a hard error partway through is the same
-        // "non-atomic write" case the old code already flagged: some bytes are already
-        // irrevocably in the kernel's send buffer but not all, and there is no way to un-send
-        // them, so this channel must be treated as broken -- same recovery (log + `Err`) as before.
-        // See above (try_recv) for &TcpStream impl Read discussion.
-        let mut stream = &self.inner;
-        let mut bufs_storage = [std::io::IoSlice::new(&len_bytes), std::io::IoSlice::new(s.view())];
-        let mut bufs: &mut [std::io::IoSlice] = &mut bufs_storage;
-        while !bufs.is_empty() {
-            match stream.write_vectored(bufs) {
-                Ok(0) => {
-                    vlib::veprintln!("warning: non-atomic write of len + payload failed");
-                    return Err(
-                        std::io::Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "failed to write whole buffer",
-                        ),
-                    );
-                },
-                Ok(n) => std::io::IoSlice::advance_slices(&mut bufs, n),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    vlib::veprintln!("warning: non-atomic write of len + payload failed");
-                    return Err(e);
-                },
-            }
-        }
-        Ok(())
+        SEND_SER.with(
+            |cell| -> Result<(), std::io::Error> {
+                let mut ser = cell.borrow_mut();
+                // `reset()` clears the serializer's internal buffers with `Vec::clear` (capacity
+                // kept), so this reuses the thread's persistent `FlexbufferSerializer` across
+                // `send` calls instead of allocating a fresh one (which
+                // `FlexbufferSerializer::new()` would do) every time.
+                ser.reset();
+                v.serialize(&mut *ser).map_err(
+                    |e|
+                        {
+                            #[cfg(not(verus_only))]
+                            { std::io::Error::other(format!("failed to serialize: {e:?}")) }
+                            #[cfg(verus_only)]
+                            { std::io::Error::from_raw_os_error(-1) }
+                        },
+                )?;
+                let len = ser.view().len() as u32;
+                let len_bytes = len.to_ne_bytes();
+                // One `write_vectored` call instead of two separate `write_all`s -- on Linux this
+                // maps to a single `writev(2)`, so the common (small-message, no-backpressure)
+                // case costs one syscall instead of two, with no extra copy to combine the length
+                // prefix and payload into one buffer. This changes nothing about atomicity: TCP
+                // already gives no atomicity guarantee across *any* split of bytes into separate
+                // `send`/`write` calls, whether we choose the split (the old two-call version) or
+                // the kernel does (a `writev` can return a partial count torn anywhere, including
+                // exactly at this same prefix/payload boundary). A partial-but-successful write
+                // (`Ok(n)` short of everything queued) is not a failure -- `advance_slices` just
+                // resumes from where it left off, same as `write_all` already does internally for
+                // a single buffer. Only a hard error partway through is the same "non-atomic
+                // write" case the old code already flagged: some bytes are already irrevocably in
+                // the kernel's send buffer but not all, and there is no way to un-send them, so
+                // this channel must be treated as broken -- same recovery (log + `Err`) as before.
+                // See above (try_recv) for &TcpStream impl Read discussion.
+                let mut stream = &self.inner;
+                let mut bufs_storage = [
+                    std::io::IoSlice::new(&len_bytes),
+                    std::io::IoSlice::new(ser.view()),
+                ];
+                let mut bufs: &mut [std::io::IoSlice] = &mut bufs_storage;
+                while !bufs.is_empty() {
+                    match stream.write_vectored(bufs) {
+                        Ok(0) => {
+                            vlib::veprintln!(
+                                "warning: non-atomic write of len + payload failed"
+                            );
+                            return Err(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::WriteZero,
+                                    "failed to write whole buffer",
+                                ),
+                            );
+                        },
+                        Ok(n) => std::io::IoSlice::advance_slices(&mut bufs, n),
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            vlib::veprintln!(
+                                "warning: non-atomic write of len + payload failed"
+                            );
+                            return Err(e);
+                        },
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 
     pub fn local_addr(&self) -> SocketAddr {

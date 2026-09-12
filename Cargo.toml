@@ -57,4 +57,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_k
 
 [profile.release]
 strip = "debuginfo"
+lto = "fat"
+codegen-units = 1
 

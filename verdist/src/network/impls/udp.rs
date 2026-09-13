@@ -87,7 +87,17 @@ fn is_recv_timeout(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut
 }
 
-const BUF_SIZE: usize = 1 << 12;
+/// The real ceiling on a single UDP/IPv4 datagram's payload -- 65,535 (max IP packet length,
+/// itself bounded by the 16-bit `IPv4` total-length field) minus the 20-byte IP header minus the
+/// 8-byte UDP header. Not a tunable choice: `sendto`/`recv` cannot exceed this regardless of
+/// buffer size, socket options, or link MTU -- IP fragmentation only helps a datagram cross the
+/// *link* MTU (loopback's 65,536, Ethernet's 1500), it cannot make a single UDP datagram's own
+/// payload bigger than this. A message that needs to be larger than this needs a different
+/// transport (e.g. this crate's TCP backend) or application-level fragmentation across multiple
+/// datagrams -- neither of which this type does. Previously `1 << 12` (4096), an arbitrary pick
+/// with no protocol justification that silently truncated (and corrupted) anything bigger;
+/// confirmed via direct testing (see `claude-docs/PROFILING.md` §7.7's payload-size sweep).
+const BUF_SIZE: usize = 65_507;
 
 /// Udp Socket that unmarshals receiving types (R) and marshals sending types (S)
 pub struct TypedUdpSocket<R, S> {

@@ -109,7 +109,10 @@ const RECV_TIMEOUT_MILLIS: u64 = 2;
 /// See `io_uring_tcp.rs::RING_ENTRIES` -- same rationale, same "picked, not measured" caveat.
 const RING_ENTRIES: u32 = 8;
 
-const BUF_SIZE: usize = 1 << 12;
+/// See `network::impls::udp::BUF_SIZE`'s doc -- identical rationale and identical value: the real,
+/// non-tunable ceiling on a single UDP/IPv4 datagram's payload (65,535-byte max IP packet length
+/// minus 20-byte IP header minus 8-byte UDP header), not an arbitrary buffer choice.
+const BUF_SIZE: usize = 65_507;
 
 fn is_recv_timeout(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut

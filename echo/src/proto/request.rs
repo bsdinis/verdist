@@ -434,6 +434,28 @@ mod serde_impls {
                         {
                             self.visit_str(&value)
                         }
+
+                        // See `abd::proto::request::RequestInner`'s identical `visit_u64` for the
+                        // full explanation: `postcard` encodes an enum's variant tag as a raw
+                        // integer index, not a string, so its `EnumAccess::variant_seed` calls
+                        // `visit_u64` (via `deserialize_identifier`'s default chain), not
+                        // `visit_str`. Without this, postcard deserialization of `RequestInner`
+                        // fails with an opaque `SerdeDeCustom` error. Index must match
+                        // `serialize_newtype_variant`'s second argument above: 0=Echo.
+                        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            match value {
+                                0 => Ok(Variant::Echo),
+                                _ => Err(
+                                    serde::de::Error::invalid_value(
+                                        serde::de::Unexpected::Unsigned(value),
+                                        &"variant index 0 <= i < 1",
+                                    ),
+                                ),
+                            }
+                        }
                     }
 
                     deserializer.deserialize_identifier(FieldVisitor)

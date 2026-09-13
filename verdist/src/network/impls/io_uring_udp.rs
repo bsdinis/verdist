@@ -55,6 +55,52 @@ fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
     }
 }
 
+/// See `io_uring_tcp::submit_now`'s doc -- identical rationale, used by this file's receive path
+/// instead of `submit_and_wait_1` for the same reason (`poll_recv`, below).
+fn submit_now(ring: &mut IoUring) -> std::io::Result<()> {
+    loop {
+        match ring.submit() {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// See `io_uring_tcp::poll_read`'s doc -- identical mechanism and identical motivation (this
+/// file's `recv_once`/`try_recv` had exactly the same `SO_RCVTIMEO`/`O_NONBLOCK`-are-both-ignored
+/// bug, confirmed by the same direct probe). Submits a `Recv` op for `dst` if `*op_in_flight` is
+/// `false`, then does a non-blocking peek of the completion queue -- never `submit_and_wait`.
+fn poll_recv(
+    ring: &mut IoUring,
+    fd: i32,
+    op_in_flight: &mut bool,
+    dst: &mut [u8],
+) -> std::io::Result<Option<i32>> {
+    if !*op_in_flight {
+        let entry = opcode::Recv::new(types::Fd(fd), dst.as_mut_ptr(), dst.len() as u32).build()
+            .user_data(0);
+        // SAFETY: see `io_uring_tcp::poll_read`'s identical note -- `dst` is borrowed from the
+        // caller's persistent per-socket state, untouched again until `*op_in_flight` is next
+        // observed `false`, which only happens once this op's completion has actually been
+        // reaped.
+        unsafe {
+            ring.submission().push(&entry).map_err(
+                |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
+            )?;
+        }
+        submit_now(ring)?;
+        *op_in_flight = true;
+    }
+    match ring.completion().next() {
+        None => Ok(None),
+        Some(cqe) => {
+            *op_in_flight = false;
+            Ok(Some(cqe.result()))
+        }
+    }
+}
+
 verus! {
 
 /// Same value as `network::impls::udp::RECV_TIMEOUT_MILLIS`.
@@ -123,42 +169,39 @@ fn udp_serialize<S: serde::Serialize>(v: &S) -> Result<Vec<u8>, std::io::Error> 
 pub struct IoUringUdpSocket<R, S> {
     inner: UdpSocket,
     ring: UnsafeCell<IoUring>,
+    recv_state: UnsafeCell<UdpRecvState>,
     _marker: PhantomData<(R, S)>,
+}
+
+/// Per-socket receive state: just an in-flight flag and the fixed-size destination buffer, since
+/// (unlike TCP) a UDP `Recv` op is always exactly one whole datagram, never a resumable partial
+/// field. `external_body` for the same reason as `io_uring_tcp::TcpRecvState`.
+#[verifier::external_body]
+struct UdpRecvState {
+    op_in_flight: bool,
+    buf: [u8; BUF_SIZE],
+}
+
+impl UdpRecvState {
+    #[verifier::external_body]
+    fn new() -> Self {
+        UdpRecvState { op_in_flight: false, buf: [0u8; BUF_SIZE] }
+    }
 }
 
 impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: serde::Serialize {
     #[verifier::external_body]
     pub fn new(socket: UdpSocket) -> std::io::Result<Self> {
         socket.set_nonblocking(false)?;
-        socket.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS)))?;
         let ring = IoUring::new(RING_ENTRIES)?;
-        Ok(IoUringUdpSocket { inner: socket, ring: UnsafeCell::new(ring), _marker: PhantomData })
-    }
-
-    /// Same `unsafe` contract as `io_uring_tcp::IoUringTcpStream::read_once`/`write_once`: cell
-    /// access justified by the single-owner-thread invariant (see this struct's field doc via
-    /// `io_uring_tcp.rs`'s identical one); `SubmissionQueue::push` is `unsafe` in the `io-uring`
-    /// crate itself, whose safety contract (buffer stays valid+unaliased until the completion is
-    /// reaped) holds here because this function submits and immediately waits for that exact one
-    /// completion, never leaving an op in flight past the call.
-    #[verifier::external_body]
-    fn recv_once(&self, buf: &mut [u8]) -> Result<i32, std::io::Error> {
-        let ring = unsafe { &mut *self.ring.get() };
-        let entry = opcode::Recv::new(
-            types::Fd(self.inner.as_raw_fd()),
-            buf.as_mut_ptr(),
-            buf.len() as u32,
-        ).build().user_data(0);
-        unsafe {
-            ring.submission().push(&entry).map_err(
-                |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
-            )?;
-        }
-        submit_and_wait_1(ring)?;
-        let cqe = ring.completion().next().expect(
-            "submit_and_wait_1 returned Ok, so at least one completion must be present",
-        );
-        Ok(cqe.result())
+        Ok(
+            IoUringUdpSocket {
+                inner: socket,
+                ring: UnsafeCell::new(ring),
+                recv_state: UnsafeCell::new(UdpRecvState::new()),
+                _marker: PhantomData,
+            },
+        )
     }
 
     #[verifier::external_body]
@@ -181,10 +224,18 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         Ok(cqe.result())
     }
 
+    /// Uses `poll_recv` (never `submit_and_wait` -- see its doc, and `io_uring_tcp::poll_read`'s,
+    /// for why) so an empty socket returns `Ok(None)` instead of blocking the shard-scan loop
+    /// indefinitely on this connection.
     #[verifier::external_body]
     pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
-        let mut buf = [0;BUF_SIZE];
-        let res = self.recv_once(&mut buf)?;
+        let ring = unsafe { &mut *self.ring.get() };
+        let state = unsafe { &mut *self.recv_state.get() };
+        let fd = self.inner.as_raw_fd();
+        let res = match poll_recv(ring, fd, &mut state.op_in_flight, &mut state.buf)? {
+            None => return Ok(None),
+            Some(res) => res,
+        };
         if res < 0 {
             let errno = res.wrapping_neg();
             if is_recv_timeout_errno(errno) {
@@ -197,7 +248,7 @@ impl<R, S> IoUringUdpSocket<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
             vlib::veprintln!("[io_uring_udp:{:?}]: warning: receiving {:x} bytes from {:?} may have exhausted the buffer, message may have been truncated",
                 self.local_addr(), BUF_SIZE, self.peer_addr());
         }
-        let res = udp_deserialize(&buf[..r])?;
+        let res = udp_deserialize(&state.buf[..r])?;
         Ok(Some(res))
     }
 

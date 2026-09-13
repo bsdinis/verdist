@@ -37,7 +37,6 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 use std::os::fd::AsRawFd;
-use std::time::Duration;
 
 use io_uring::opcode;
 use io_uring::types;
@@ -78,6 +77,73 @@ fn submit_and_wait_1(ring: &mut IoUring) -> std::io::Result<()> {
             Ok(_) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Like `submit_and_wait_1`, but never waits: flushes queued SQEs to the kernel
+/// (`io_uring_enter` with no `GETEVENTS` flag) and returns as soon as the kernel has accepted
+/// them, regardless of whether any have completed yet. Used by the receive path instead of
+/// `submit_and_wait_1` -- see `poll_read`'s doc for why.
+fn submit_now(ring: &mut IoUring) -> std::io::Result<()> {
+    loop {
+        match ring.submit() {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Submits a `Read` op for `dst` if `*op_in_flight` is `false`, then does a **non-blocking** peek
+/// of the completion queue -- never `submit_and_wait`. Returns `Ok(None)` if nothing has completed
+/// yet (and sets `*op_in_flight = true`, so the caller knows not to submit a second op for the
+/// same memory -- doing so while one is still in flight would violate `SubmissionQueue::push`'s
+/// own safety contract, see this file's other `unsafe` docs); `Ok(Some(result))` with the raw
+/// `cqe.result()` once a completion has been reaped (resetting `*op_in_flight = false`).
+///
+/// This is the fix for the io_uring "wakeup bug" (`claude-docs/PROFILING.md` §7.4 item 2). The
+/// original design submitted one `Read` op and `submit_and_wait`ed on it, assuming
+/// `SO_RCVTIMEO`/`O_NONBLOCK` would make that wait return quickly with "no data yet" on an empty
+/// socket, the same way a direct blocking `recv(2)` with a receive timeout does. Directly testing
+/// this against a real empty socket (both blocking- and non-blocking-mode) showed io_uring's
+/// `Read` op honors **neither**: it simply waits until real data arrives, with no timeout and no
+/// `EAGAIN`-on-empty behavior at all. `submit_and_wait`ing on it therefore blocked the whole
+/// shard-scan loop on whichever connection it visited first that had nothing to read yet, instead
+/// of bailing out after ~2ms the way the plain TCP/UDP backends do -- serializing per-connection
+/// turnaround and producing the missed-wakeup-shaped context-switch cost this session's benchmark
+/// saw. The fix has to live on the completion-queue side, not the socket: submit once, then only
+/// ever *peek* for it, exactly as this function does. Lives outside `verus! {}` for the same
+/// reason as `submit_and_wait_1`: `&mut IoUring` isn't representable in a signature Verus has to
+/// check, even under `#[verifier::external_body]`.
+fn poll_read(
+    ring: &mut IoUring,
+    fd: i32,
+    op_in_flight: &mut bool,
+    dst: &mut [u8],
+) -> std::io::Result<Option<i32>> {
+    if !*op_in_flight {
+        let entry = opcode::Read::new(types::Fd(fd), dst.as_mut_ptr(), dst.len() as u32).build()
+            .user_data(0);
+        // SAFETY: same contract as `writev_once_raw`'s (see its doc): `dst`'s memory must stay
+        // valid and unaliased until this op's completion is reaped. It does: `dst` is borrowed
+        // from the caller's persistent per-stream state (not a transient local), which is never
+        // touched again -- by this connection's single owner thread, per this file's own
+        // single-owner-thread invariant -- until `*op_in_flight` is observed `false` again, which
+        // only happens once the completion below has actually been reaped.
+        unsafe {
+            ring.submission().push(&entry).map_err(
+                |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
+            )?;
+        }
+        submit_now(ring)?;
+        *op_in_flight = true;
+    }
+    match ring.completion().next() {
+        None => Ok(None),
+        Some(cqe) => {
+            *op_in_flight = false;
+            Ok(Some(cqe.result()))
         }
     }
 }
@@ -160,18 +226,45 @@ fn writev_all(ring: &mut IoUring, fd: i32, mut prefix: &[u8], mut payload: &[u8]
 
 verus! {
 
-/// Same value as `network::impls::tcp::RECV_TIMEOUT_MILLIS` -- kept as a literal, separate
-/// constant (not re-exported from `tcp.rs`) so this file has zero dependency on that one beyond
-/// the plain, already-`pub` `TcpStream`/std types every transport shares.
-const RECV_TIMEOUT_MILLIS: u64 = 2;
-
 /// Submission/completion ring size. 8 is generous for this file's one-op-at-a-time usage (never
 /// more than one op in flight per connection); picked, not measured -- see the file's top doc.
 const RING_ENTRIES: u32 = 8;
 
+/// Kept only as a defensive fallback inside `try_recv`'s loop (a completed op reporting this errno
+/// would previously have driven the old `SO_RCVTIMEO`-based bail-out): direct testing (see
+/// `poll_read`'s doc) showed io_uring's `Read` op never actually completes with it in practice, so
+/// this is not load-bearing for correctness, just a "treat it as not-ready-yet rather than a hard
+/// error" safety net should some kernel/path ever surface it.
 #[verifier::external_body]
 fn is_recv_timeout_errno(errno: i32) -> bool {
     errno == libc::EAGAIN || errno == libc::EWOULDBLOCK || errno == libc::ETIMEDOUT
+}
+
+/// Per-connection receive state, resumed across calls to `try_recv` since a `Read` op may
+/// complete on one call and be picked up (or still be in flight) on a later one -- unlike the old
+/// design, which submitted and fully waited out one op per call. `external_body`: a plain
+/// state-holder with no spec surface of its own, held only inside `IoUringTcpStream`'s own
+/// already-opaque cell (same treatment as that struct's `ring` field).
+#[verifier::external_body]
+struct TcpRecvState {
+    op_in_flight: bool,
+    reading_payload: bool,
+    len_buf: [u8; 4],
+    filled: usize,
+    payload_buf: Vec<u8>,
+}
+
+impl TcpRecvState {
+    #[verifier::external_body]
+    fn new() -> Self {
+        TcpRecvState {
+            op_in_flight: false,
+            reading_payload: false,
+            len_buf: [0u8; 4],
+            filled: 0,
+            payload_buf: Vec::new(),
+        }
+    }
 }
 
 /// `io_uring`-backed analogue of `network::impls::tcp::TypedTcpStream`. See this file's top doc
@@ -199,6 +292,7 @@ pub struct IoUringTcpStream<R, S> {
     // nothing requires it to be (see `Server::_marker`'s `PhantomData<C::Id>` doc in
     // `service/mod.rs` for why `Channel` impls no longer need `Sync` at all).
     ring: UnsafeCell<IoUring>,
+    recv_state: UnsafeCell<TcpRecvState>,
     _marker: PhantomData<(R, S)>,
 }
 
@@ -206,10 +300,16 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
     #[verifier::external_body]
     pub fn new(stream: TcpStream) -> std::io::Result<Self> {
         stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_millis(RECV_TIMEOUT_MILLIS)))?;
         stream.set_nodelay(true)?;
         let ring = IoUring::new(RING_ENTRIES)?;
-        Ok(IoUringTcpStream { inner: stream, ring: UnsafeCell::new(ring), _marker: PhantomData })
+        Ok(
+            IoUringTcpStream {
+                inner: stream,
+                ring: UnsafeCell::new(ring),
+                recv_state: UnsafeCell::new(TcpRecvState::new()),
+                _marker: PhantomData,
+            },
+        )
     }
 
     /// `#[verifier::external_body]` (rather than a new `assume_specification` for `postcard`,
@@ -250,53 +350,28 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
         )
     }
 
-    /// Submits one `Read` op for `buf[filled..]`, waits for its single completion, and returns
-    /// how many bytes it reported (`Ok(0)` means EOF, matching `Read::read`'s own convention).
-    /// `unsafe`: (a) the cell access, justified by this struct's single-owner-thread invariant
-    /// (see `ring`'s field doc); (b) `SubmissionQueue::push`, which is `unsafe` in the `io-uring`
-    /// crate itself -- its safety contract is that `buf`'s memory must stay valid and unaliased
-    /// until the op's completion is reaped, which holds here because this function submits and
-    /// immediately `submit_and_wait`s for exactly that one completion before returning, never
-    /// leaving an op in flight past this call.
+    /// Drives this connection's persistent `TcpRecvState` forward using `poll_read` (never
+    /// `submit_and_wait` -- see its doc for why) until either a full message has been read
+    /// (`Ok(Some(_))`), no more progress is available right now (`Ok(None)`, leaving whatever was
+    /// read so far intact in `recv_state` for the next call), or a real error/EOF occurs.
     #[verifier::external_body]
-    fn read_once(&self, buf: &mut [u8]) -> Result<i32, std::io::Error> {
+    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
         let ring = unsafe { &mut *self.ring.get() };
-        let entry = opcode::Read::new(
-            types::Fd(self.inner.as_raw_fd()),
-            buf.as_mut_ptr(),
-            buf.len() as u32,
-        ).build().user_data(0);
-        unsafe {
-            ring.submission().push(&entry).map_err(
-                |e| std::io::Error::other(format!("io_uring submission queue full: {e}")),
-            )?;
-        }
-        submit_and_wait_1(ring)?;
-        let cqe = ring.completion().next().expect(
-            "submit_and_wait_1 returned Ok, so at least one completion must be present",
-        );
-        Ok(cqe.result())
-    }
-
-
-    /// Same shape/contract as `tcp.rs`'s `TypedTcpStream::read_exact_or_none` (see its doc):
-    /// fills `buf` completely, retrying through recv-timeouts and resuming from where the
-    /// previous attempt left off. If `bail_if_empty`, returns `Ok(false)` (consuming nothing) the
-    /// first time a timeout occurs with zero bytes of *this* field read so far.
-    #[verifier::external_body]
-    fn read_exact_or_none(&self, buf: &mut [u8], bail_if_empty: bool) -> Result<
-        bool,
-        std::io::Error,
-    > {
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            let res = self.read_once(&mut buf[filled..])?;
+        let state = unsafe { &mut *self.recv_state.get() };
+        let fd = self.inner.as_raw_fd();
+        loop {
+            let dst: &mut [u8] = if state.reading_payload {
+                &mut state.payload_buf[state.filled..]
+            } else {
+                &mut state.len_buf[state.filled..]
+            };
+            let res = match poll_read(ring, fd, &mut state.op_in_flight, dst)? {
+                None => return Ok(None),
+                Some(res) => res,
+            };
             if res < 0 {
                 let errno = res.wrapping_neg();
                 if is_recv_timeout_errno(errno) {
-                    if bail_if_empty && filled == 0 {
-                        return Ok(false);
-                    }
                     continue;
                 }
                 return Err(std::io::Error::from_raw_os_error(errno));
@@ -309,22 +384,32 @@ impl<R, S> IoUringTcpStream<R, S> where for <'de>R: serde::Deserialize<'de>, S: 
                     ),
                 );
             }
-            filled += res as usize;
+            state.filled += res as usize;
+            if !state.reading_payload {
+                if state.filled < state.len_buf.len() {
+                    continue;
+                }
+                let len = u32::from_ne_bytes(state.len_buf) as usize;
+                state.filled = 0;
+                if len == 0 {
+                    // Empty payload: nothing left to read, matches the old
+                    // `read_exact_or_none`'s no-op-on-empty-buffer behavior (its `while filled <
+                    // buf.len()` loop never issued a read at all when `buf.len() == 0`).
+                    let result = Self::deserialize(&[])?;
+                    return Ok(Some(result));
+                }
+                state.payload_buf = vec![0u8; len];
+                state.reading_payload = true;
+                continue;
+            }
+            if state.filled < state.payload_buf.len() {
+                continue;
+            }
+            let result = Self::deserialize(&state.payload_buf)?;
+            state.filled = 0;
+            state.reading_payload = false;
+            return Ok(Some(result));
         }
-        Ok(true)
-    }
-
-    #[verifier::external_body]
-    pub fn try_recv(&self) -> Result<Option<R>, std::io::Error> {
-        let mut len_bytes = [0u8;4];
-        if !self.read_exact_or_none(&mut len_bytes, true)? {
-            return Ok(None);
-        }
-        let len = u32::from_ne_bytes(len_bytes) as usize;
-        let mut buf = vec![0u8; len];
-        self.read_exact_or_none(&mut buf, false)?;
-        let res = Self::deserialize(&buf)?;
-        Ok(Some(res))
     }
 
     /// Same `writev(2)`-shaped send as `tcp.rs`'s vectored-write `send` (one op per attempt for

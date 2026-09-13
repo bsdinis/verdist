@@ -12,6 +12,7 @@ version = { workspace = true }
 crossbeam-channel = { workspace = true }
 mio = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 vstd = { workspace = true }
 
 [lints]

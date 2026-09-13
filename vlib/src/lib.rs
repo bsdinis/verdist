@@ -7,3 +7,4 @@ pub mod reclaim;
 pub mod serde;
 pub mod set;
 pub mod std;
+pub mod trace;

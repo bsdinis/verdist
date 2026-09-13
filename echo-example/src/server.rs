@@ -4,6 +4,15 @@ use echo_example::cli;
 use echo_example::cli::ServerArgs;
 
 fn main() {
+    // Opt-in only: with no `RUST_LOG` set, this installs a subscriber filtered to `off`, which is
+    // indistinguishable (in cost) from installing nothing at all -- `vlib::vdebug!`'s callsite
+    // interest check still short-circuits before formatting anything. Set `RUST_LOG=debug` to see
+    // `echo::server::EchoService::handle`'s per-request trace output.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = match ServerArgs::parse().apply_config() {
         Ok(args) => args,
         Err(e) => {

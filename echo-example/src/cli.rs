@@ -38,6 +38,10 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = 3)]
     pub n_ops: u64,
 
+    /// Size (bytes) of the random payload string each op echoes
+    #[arg(long, default_value_t = 32)]
+    pub payload_size: usize,
+
     /// Id of the client
     #[arg(long, default_value_t = 1)]
     pub client_id: u64,

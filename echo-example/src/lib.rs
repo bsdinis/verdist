@@ -89,12 +89,12 @@ pub fn run_client<C, Conn>(args: ClientArgs, connector: &Conn) -> Result<(), Err
     );
 
     for _ in 0..args.n_ops {
-        let input = generate_string(32);
-        vlib::veprintln!("[client|{:>3}]: sending {input}", args.client_id);
+        let input = generate_string(args.payload_size);
+        vlib::vdebug!(client_id = args.client_id, %input, "sending");
         match client.echo(input) {
             Ok(output) => {
                 assert(input == output);
-                vlib::vprintln!("[client|{:>3}]: output == input {output}", args.client_id);
+                vlib::vdebug!(client_id = args.client_id, %output, "output == input");
             },
             Err(e) => {
                 vlib::vprintln!("echo failed: {e:?}");

@@ -15,6 +15,7 @@ libc = { workspace = true }
 mio = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 
 vlib = { workspace = true }
 vstd = { workspace = true }

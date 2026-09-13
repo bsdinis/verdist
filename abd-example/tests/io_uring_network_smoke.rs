@@ -138,6 +138,11 @@ fn run_smoke_test(config_name: &str, addr: SocketAddr, proto: Proto) {
     let client = Command::new(env!("CARGO_BIN_EXE_abd_client"))
         .arg("--config")
         .arg(&config_path)
+        // Per-op completion logging (`vlib::vdebug!`) is silent by default -- see
+        // `claude-docs/PROFILING.md` §7.7. Force it on here so the "did every op actually
+        // complete" content check below (not just a zero exit status) still has something to
+        // look at, and incidentally exercises the opt-in `RUST_LOG` path end-to-end too.
+        .env("RUST_LOG", "debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

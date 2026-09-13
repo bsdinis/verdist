@@ -224,16 +224,16 @@ impl<C> BufChannel<C> where C: Channel, C::R: TaggedMessage, C::Id: std::fmt::De
         }
         handle.release_write(guard);
 
-        //vlib::veprintln!("[client]: polling on channel {:?}", self.id());
+        vlib::vdebug!(id = ?self.id(), "polling on channel");
         match self.channel.try_recv() {
             Ok(r) if r.tag() == tag => {
-                // vlib::veprintln!("[client]: received correct message on channel {:?}", self.id());
+                vlib::vdebug!(id = ?self.id(), "received correct message on channel");
                 assert(r.spec_tag() == tag);
                 assert(C::K::recv_inv(self.constant(), self.spec_id(), r));
                 Ok(Some(r))
             },
             Ok(r) => {
-                // vlib::veprintln!("[client]: received message on channel {:?} (wrong tag)", self.id());
+                vlib::vdebug!(id = ?self.id(), tag = r.tag(), "received message on channel (wrong tag)");
                 let (mut guard, handle) = self.buffered.acquire_write();
                 // Bound how many distinct out-of-order tags can accumulate: normally this is
                 // bounded by the number of concurrently in-flight request tags on this

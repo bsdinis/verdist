@@ -381,10 +381,10 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         }
         replies.lemma_max_min();
         assert(replies.spec_min_timestamp() <= replies.spec_max_timestamp());
-        // vlib::veprintln!("[client|{:>3}]: got first round reads quorum_size: {}, agree_with_max: {:?}", self.id, self.quorum_size(), replies.agree_with_max());
+        vlib::vdebug!(client_id = self.id, quorum_size = self.quorum_size(), agree_with_max = ?replies.agree_with_max(), "got first round reads");
         // check early return
         if replies.agree_with_max().len() >= self.quorum_size() {
-            // vlib::veprintln!("[client|{:>3}]: first round is unanimous", self.id);
+            vlib::vdebug!(client_id = self.id, "first round is unanimous");
             replies.lemma_quorum();
             replies.lemma_max_timestamp();
             let Tracked(replies_servers) = replies.servers_lb();  // needed to have an owned instance
@@ -524,7 +524,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             },
         };
 
-        // vlib::veprintln!("[client|{:>3}]: got read writeback round quorum_size: {}, agree_with_max: {:?}", self.id, self.quorum_size(), wb_replies.agree_with_max());
+        vlib::vdebug!(client_id = self.id, quorum_size = self.quorum_size(), agree_with_max = ?wb_replies.agree_with_max(), "got read writeback round");
 
         let tracked comp;
         wb_replies.lemma_quorum();
@@ -770,7 +770,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             }
         };
 
-        //vlib::veprintln!("[client|{:>3}]: got write get timestamp round quorum_size: {} quorum: {:?} max_timestamp: {:?}", self.id, self.quorum_size() , get_ts_replies.get_ts_replies(), get_ts_replies.max_resp().timestamp() );
+        vlib::vdebug!(client_id = self.id, quorum_size = self.quorum_size(), quorum = ?get_ts_replies.get_ts_replies(), max_timestamp = ?get_ts_replies.max_resp().timestamp(), "got write get timestamp round");
 
         assert(get_ts_replies.constant() == get_ts_pred@);
         let max_resp = get_ts_replies.max_resp();
@@ -932,7 +932,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 },
             };
 
-            // vlib::veprintln!("[client|{:>3}]: got write quorum quorum_size: {} quorum: {:?}", self.id, self.quorum_size() , write_replies.write_replies());
+            vlib::vdebug!(client_id = self.id, quorum_size = self.quorum_size(), quorum = ?write_replies.write_replies(), "got write quorum");
 
             let exec_comp;
             write_replies.lemma_quorum();

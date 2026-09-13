@@ -1431,7 +1431,7 @@ impl<C> ReplyAccumulator<C, ReadPred<C>> for ReadAccumGetPhase<C> where
 
             assume(C::K::recv_inv(self.channels()[id].constant(), id, reply));  // TODO(verus): this is a verus problem
         }
-        // vlib::veprintln!("[client|{:>3}]: received resp from {:>3}: {:?}", id.0, id.1, reply);
+        vlib::vdebug!(client_id = id.0, server_id = id.1, ?reply, "received resp");
 
         reply.agree_request(&mut self.inner.get_request);
         reply.lemma_inv();

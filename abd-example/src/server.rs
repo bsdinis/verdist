@@ -4,6 +4,13 @@ use specs::register::OwnedReadPerm;
 use specs::register::OwnedWritePerm;
 
 fn main() {
+    // Opt-in only: silent with no `RUST_LOG` set (`vlib::vdebug!`/`vinfo!` short-circuit before
+    // formatting anything either way); set `RUST_LOG=debug` to see per-request server trace output.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = match ServerArgs::parse() {
         Ok(args) => args,
         Err(e) => {

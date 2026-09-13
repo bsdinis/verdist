@@ -412,7 +412,7 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         channel_id: (u64, u64),
         request: Request,
     ) -> (r: Response) {
-        // vlib::veprintln!("[server|{:>3}]: received req: {:?}", self.id, request);
+        vlib::vdebug!(server_id = self.id, ?request, "received req");
         let (request_id, request_inner, request_proof) = request.destruct();
         let resp_inner = match request_inner {
             RequestInner::Get(req) => self.handle_get(shard_idx, req),
@@ -451,7 +451,7 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         proof {
             RequestInner::spec_eq_refl(r.request());
         }
-        // vlib::veprintln!("[server|{:>3}]: sending resp: {:?}", self.id, r);
+        vlib::vdebug!(server_id = self.id, resp = ?r, "sending resp");
         r
     }
 

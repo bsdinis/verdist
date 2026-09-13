@@ -194,11 +194,11 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
     #[allow(unused)]
     let (v, ts, orig_view) = match client.read(Tracked(read_perm)) {
         Ok((v, ts, view)) => {
-            vlib::veprintln!("[client|{:>3}]: read completed: {:?} @ {:?}\n", args.client_id, v, ts);
+            vlib::vdebug!(client_id = args.client_id, value = ?v, timestamp = ?ts, "read completed");
             (v, ts, view)
         },
         Err(e) => {
-            vlib::veprintln!("[client|{:>3}]: read error: {}", args.client_id, e);
+            vlib::vdebug!(client_id = args.client_id, error = %e, "read error");
             return Err(Error::Empty);
         },
     };
@@ -236,11 +236,11 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
             let tracked write_perm = OwnedWritePerm { register: perm, value };
             let write_view = match client.write(value, Tracked(write_perm)) {
                 Ok(comp) => {
-                    vlib::veprintln!("[client|{:>3}]: write completed: {:?}\n", args.client_id, value);
+                    vlib::vdebug!(client_id = args.client_id, value = ?value, "write completed");
                     comp
                 },
                 Err(e) => {
-                    vlib::veprintln!("[client|{:>3}]: write error: {}", args.client_id, e);
+                    vlib::vdebug!(client_id = args.client_id, error = %e, "write error");
                     return Err(Error::Empty);
                 },
             };
@@ -256,11 +256,11 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
             let tracked read_perm = OwnedReadPerm { register: perm };
             let (v, ts, read_view) = match client.read(Tracked(read_perm)) {
                 Ok((v, ts, comp)) => {
-                    vlib::veprintln!("[client|{:>3}]: read completed: {:?} @ {:?}\n", args.client_id, v, ts);
+                    vlib::vdebug!(client_id = args.client_id, value = ?v, timestamp = ?ts, "read completed");
                     (v, ts, comp)
                 },
                 Err(e) => {
-                    vlib::veprintln!("[client|{:>3}]: read error: {}", args.client_id, e);
+                    vlib::vdebug!(client_id = args.client_id, error = %e, "read error");
                     return Err(Error::Empty);
                 },
             };

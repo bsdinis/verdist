@@ -9,6 +9,14 @@ pub mod error;
 pub mod invariant;
 
 fn main() {
+    // Opt-in only: silent with no `RUST_LOG` set (`vlib::vdebug!`/`vinfo!` short-circuit before
+    // formatting anything either way, so this never costs anything during a real benchmark run);
+    // set `RUST_LOG=debug` to see per-request/per-op trace output from `abd`/`verdist`.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = match cli::ClientArgs::parse() {
         Ok(args) => args,
         Err(e) => {

@@ -11,6 +11,7 @@ version = { workspace = true }
 [dependencies]
 crossbeam-channel = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 
 specs = { workspace = true }
 verdist = { workspace = true }

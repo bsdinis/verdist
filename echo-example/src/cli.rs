@@ -15,16 +15,20 @@ pub enum NetworkType {
     /// Run with TCP connections
     Tcp,
 
-    /// Run with UDP connections
+    /// Run with UDP connections. This is `verdist::network::udp_muxed`: no rendezvous handshake,
+    /// the server demultiplexes a single (or, with `--num-router-threads` > 1, several
+    /// `SO_REUSEPORT`-shared) socket by source address instead of provisioning a dedicated
+    /// per-client socket at connect time. See `--network udp_legacy` for the older,
+    /// handshake-based implementation this superseded.
     Udp,
 
-    /// Run with UDP connections, but with no rendezvous handshake: the server demultiplexes a
-    /// single (or, with `--num-router-threads` > 1, several `SO_REUSEPORT`-shared) socket by
-    /// source address instead of provisioning a dedicated per-client socket at connect time (see
-    /// `verdist::network::udp_muxed`).
-    #[serde(rename = "udp_muxed")]
-    #[value(name = "udp_muxed")]
-    UdpMuxed,
+    /// The original UDP implementation (`verdist::network::udp`), kept for reference/comparison.
+    /// **Deprecated**: its connect handshake has a real, reproducible liveness bug under high
+    /// fan-out (no retransmission -- a lost request or reply leaves that client spinning forever).
+    /// Prefer plain `--network udp` unless specifically benchmarking against this.
+    #[serde(rename = "udp_legacy")]
+    #[value(name = "udp_legacy")]
+    UdpLegacy,
 
     /// Run with TCP connections over io_uring instead of blocking read/write syscalls (see
     /// `verdist::network::io_uring_tcp`'s design doc, `claude-files/io_uring_design.md`)
@@ -105,8 +109,8 @@ pub struct ServerArgs {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_epoll: bool,
 
-    /// (udp_muxed only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads to
-    /// bind, each demultiplexing its own share of inbound traffic (see
+    /// (--network udp only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads
+    /// to bind, each demultiplexing its own share of inbound traffic (see
     /// `verdist::network::udp_muxed`). `1` (the default) binds a single socket with no
     /// `SO_REUSEPORT` at all -- behavior is unaffected for every other `--network` value.
     #[arg(long, default_value_t = 1)]

@@ -92,7 +92,7 @@ fn run_smoke_test(addr: SocketAddr, num_router_threads: usize, num_clients: u64,
             "--server-addr",
             &addr.to_string(),
             "--network",
-            "udp_muxed",
+            "udp",
             "--num-threads",
             "4",
             "--num-router-threads",
@@ -126,7 +126,7 @@ fn run_smoke_test(addr: SocketAddr, num_router_threads: usize, num_clients: u64,
                     "--server-addr",
                     &addr.to_string(),
                     "--network",
-                    "udp_muxed",
+                    "udp",
                 ])
                 // Per-op completion logging is silent by default -- force it on so the content
                 // check below has something to look at (same as `io_uring_network_smoke.rs`).

@@ -61,6 +61,23 @@ fn main() {
                 .values()
                 .map(|server_conf| {
                     let addr = server_conf.addr.expect("server addr should be set");
+                    verdist::network::udp_muxed::MuxedConnector::new(
+                        addr,
+                        args.client_addr,
+                        server_conf.id,
+                    )
+                    .expect("failed to create connector")
+                })
+                .collect::<Vec<_>>();
+
+            abd_example::run_client(args, &connectors).expect("run_client: error");
+        }
+        cli::NetworkType::UdpLegacy => {
+            let connectors = args
+                .servers
+                .values()
+                .map(|server_conf| {
+                    let addr = server_conf.addr.expect("server addr should be set");
                     verdist::network::udp::UdpConnector::new(addr, args.client_addr, server_conf.id)
                         .expect("failed to create connector")
                 })

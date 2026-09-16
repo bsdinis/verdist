@@ -27,6 +27,27 @@ fn main() {
             eprintln!("server: the modelled server is instantiated in the same process as the client; shutting down server process");
         }
         cli::NetworkType::Udp => {
+            // No `--epoll` support yet for this backend (see `verdist::network::udp_muxed`'s
+            // module doc) -- always the plain backoff-based `run_server`, regardless of
+            // `args.epoll`.
+            if args.epoll {
+                eprintln!("server: --epoll is not yet supported for udp; running without it");
+            }
+            let listener = verdist::network::udp_muxed::MuxedListener::listen_reuseport(
+                args.addr(),
+                args.server_id,
+                args.num_router_threads,
+            )
+            .expect("failed to create listener");
+            abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                &server_ids,
+                args.server_id,
+                listener,
+                args.num_threads,
+                backend,
+            );
+        }
+        cli::NetworkType::UdpLegacy => {
             let listener = verdist::network::udp::UdpListener::listen(args.addr(), args.server_id)
                 .expect("failed to create listener");
             if args.epoll {

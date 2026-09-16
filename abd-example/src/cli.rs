@@ -20,8 +20,16 @@ pub enum NetworkType {
     /// Run with TCP connections
     Tcp,
 
-    /// Run with UDP connections
+    /// Run with UDP connections. This is `verdist::network::udp_muxed`: no rendezvous handshake
+    /// (see `echo_example::cli::NetworkType::Udp`'s doc for the full rationale). See `UdpLegacy`
+    /// for the older, handshake-based implementation this superseded.
     Udp,
+
+    /// The original UDP implementation (`verdist::network::udp`), kept for reference/comparison.
+    /// **Deprecated**: see `echo_example::cli::NetworkType::UdpLegacy`'s doc.
+    #[serde(rename = "udp_legacy")]
+    #[value(name = "udp_legacy")]
+    UdpLegacy,
 
     /// Run with TCP connections over io_uring instead of blocking read/write syscalls (see
     /// `verdist::network::io_uring_tcp`'s design doc, `claude-files/io_uring_design.md`)
@@ -121,6 +129,12 @@ pub struct ServerParsedArgs {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_epoll: bool,
 
+    /// (--network udp only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads
+    /// to bind (see `verdist::network::udp_muxed`). `1` (the default) binds a single socket with
+    /// no `SO_REUSEPORT` at all.
+    #[arg(long)]
+    pub num_router_threads: Option<usize>,
+
     #[arg(short, long)]
     pub config: std::path::PathBuf,
 }
@@ -161,6 +175,10 @@ pub struct ServerArgs {
     /// Use mio/epoll-driven blocking instead of the default backoff-based polling loop
     /// (TCP/UDP only, ignored for the modelled network)
     pub epoll: bool,
+
+    /// (--network udp only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads
+    /// to bind. `1` (the default) binds a single socket with no `SO_REUSEPORT` at all.
+    pub num_router_threads: usize,
 
     /// Servers in the system
     pub servers: HashMap<u64, ServerConfig>,
@@ -255,6 +273,9 @@ impl ServerArgs {
                 backend: config.backend,
                 // --no-epoll always wins if both are (redundantly) given.
                 epoll: args.epoll && !args.no_epoll,
+                num_router_threads: args.num_router_threads.or(config.num_router_threads)
+                    .filter(|n| *n != 0)
+                    .unwrap_or(1),
                 servers: config.servers,
             },
         )

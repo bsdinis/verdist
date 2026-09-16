@@ -24,6 +24,12 @@ pub struct ParsedConfig {
     /// Number of request-processing worker threads the server should spawn
     pub num_threads: Option<usize>,
 
+    /// (--network udp only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads
+    /// to bind. Defaulted (rather than required) so existing configs that predate this option
+    /// keep parsing.
+    #[serde(default)]
+    pub num_router_threads: Option<usize>,
+
     /// What network type to run
     pub network: crate::cli::NetworkType,
 
@@ -56,6 +62,10 @@ pub struct Config {
 
     /// Number of request-processing worker threads the server should spawn
     pub num_threads: Option<usize>,
+
+    /// (--network udp only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads
+    /// to bind.
+    pub num_router_threads: Option<usize>,
 
     /// What network type to run
     pub network: crate::cli::NetworkType,
@@ -114,6 +124,7 @@ impl Config {
             client_id: config.client_id,
             client_addr: config.client_addr,
             num_threads: config.num_threads,
+            num_router_threads: config.num_router_threads,
             network: config.network,
             backend: config.backend,
             servers,

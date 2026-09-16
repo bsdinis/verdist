@@ -27,7 +27,7 @@ fn main() {
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
-            let connector = verdist::network::udp::UdpConnector::new(
+            let connector = verdist::network::udp_muxed::MuxedConnector::new(
                 args.server_addr,
                 args.client_addr,
                 args.server_id,
@@ -35,8 +35,8 @@ fn main() {
             .expect("failed to create connector");
             echo_example::run_client(args, &connector).expect("run_client: error");
         }
-        cli::NetworkType::UdpMuxed => {
-            let connector = verdist::network::udp_muxed::MuxedConnector::new(
+        cli::NetworkType::UdpLegacy => {
+            let connector = verdist::network::udp::UdpConnector::new(
                 args.server_addr,
                 args.client_addr,
                 args.server_id,

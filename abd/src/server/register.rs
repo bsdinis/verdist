@@ -34,27 +34,28 @@ pub struct RegisterIds {
 }
 
 #[allow(dead_code)]
-pub struct MonotonicRegisterInner<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub struct MonotonicRegisterInner<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pub id: u64,
-    pub value: Option<u64>,
+    pub value: Option<[u8; N]>,
     pub timestamp: Timestamp,
-    pub commitment: Tracked<WriteCommitment>,
+    pub commitment: Tracked<WriteCommitment<N>>,
     pub resource: Tracked<MonotonicTimestampResource>,
-    pub state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+    pub state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
     pub server_token: Tracked<ServerToken>,
 }
 
-impl<ML, RL> MonotonicRegisterInner<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> MonotonicRegisterInner<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pub fn new(
         #[allow(unused_variables)]
         server_id: u64,
-        state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+        state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
     ) -> (r: Self)
         requires
             state_inv@.namespace() == invariants::state_inv_id(),
@@ -137,7 +138,7 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
     }
 
     #[allow(unused_variables)]
-    pub fn read(&self, mut req: GetRequest) -> (r: GetResponse)
+    pub fn read(&self, mut req: GetRequest) -> (r: GetResponse<N>)
         requires
             self.resource@@ is HalfRightToAdvance,
             self.inv(),
@@ -244,7 +245,7 @@ impl<ML, RL> MonotonicRegisterInner<ML, RL> where
         GetTimestampResponse::new(self.timestamp, Tracked(new_lb), Tracked(server_token))
     }
 
-    pub fn write(self, req: WriteRequest) -> (r: Self)
+    pub fn write(self, req: WriteRequest<N>) -> (r: Self)
         requires
             self.resource@@ is HalfRightToAdvance,
             self.inv(),
@@ -357,31 +358,32 @@ pub struct MonotonicRegisterInv {
     pub ids: RegisterIds,
 }
 
-impl<ML, RL> vstd::rwlock::RwLockPredicate<
-    MonotonicRegisterInner<ML, RL>,
+impl<const N: usize, ML, RL> vstd::rwlock::RwLockPredicate<
+    MonotonicRegisterInner<N, ML, RL>,
 > for MonotonicRegisterInv where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    open spec fn inv(self, v: MonotonicRegisterInner<ML, RL>) -> bool {
+    open spec fn inv(self, v: MonotonicRegisterInner<N, ML, RL>) -> bool {
         &&& v.inv()
         &&& v.ids() == self.ids
         &&& v.resource@@ is HalfRightToAdvance
     }
 }
 
-pub struct MonotonicRegister<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub struct MonotonicRegister<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    inner: RwLock<MonotonicRegisterInner<ML, RL>, MonotonicRegisterInv>,
+    inner: RwLock<MonotonicRegisterInner<N, ML, RL>, MonotonicRegisterInv>,
 }
 
-impl<ML, RL> MonotonicRegister<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> MonotonicRegister<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    pub fn new(server_id: u64, state_inv: Tracked<Arc<StateInvariant<ML, RL>>>) -> (r: Self)
+    pub fn new(server_id: u64, state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>) -> (r: Self)
         requires
             state_inv@.namespace() == invariants::state_inv_id(),
             state_inv@.constant().server_locs.contains_key(server_id),
@@ -416,7 +418,7 @@ impl<ML, RL> MonotonicRegister<ML, RL> where
         self.inner.pred().ids.id
     }
 
-    pub fn read(&self, req: GetRequest) -> (r: GetResponse)
+    pub fn read(&self, req: GetRequest) -> (r: GetResponse<N>)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),
@@ -455,7 +457,7 @@ impl<ML, RL> MonotonicRegister<ML, RL> where
         res
     }
 
-    pub fn write(&self, req: WriteRequest) -> (r: WriteResponse)
+    pub fn write(&self, req: WriteRequest<N>) -> (r: WriteResponse)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),

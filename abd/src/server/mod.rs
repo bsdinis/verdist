@@ -54,17 +54,18 @@ pub enum RegisterBackend {
 /// `RegisterService` below can hold either without any change to its own contracts. `shard_idx`
 /// only ever selects an `EpochMonotonicRegister` reader slot (see `lockfree.rs`'s module docs) --
 /// the `Locked` arm has no reader slots to pick between and simply ignores it.
-pub enum RegisterStore<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub enum RegisterStore<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    Locked(MonotonicRegister<ML, RL>),
-    Lockfree(EpochMonotonicRegister<ML, RL>),
+    Locked(MonotonicRegister<N, ML, RL>),
+    Lockfree(EpochMonotonicRegister<N, ML, RL>),
 }
 
-impl<ML, RL> RegisterStore<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> RegisterStore<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pub closed spec fn resource_loc(self) -> Loc {
         match self {
@@ -96,7 +97,7 @@ impl<ML, RL> RegisterStore<ML, RL> where
 
     /// Exactly `MonotonicRegister::read`'s contract (`register.rs`), plus a leading `shard_idx`
     /// forwarded to `EpochMonotonicRegister::read` and ignored by `Locked`.
-    pub fn read(&self, shard_idx: usize, req: GetRequest) -> (r: GetResponse)
+    pub fn read(&self, shard_idx: usize, req: GetRequest) -> (r: GetResponse<N>)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),
@@ -136,7 +137,7 @@ impl<ML, RL> RegisterStore<ML, RL> where
 
     /// Exactly `MonotonicRegister::write`'s contract (`register.rs`), plus a leading `shard_idx`
     /// forwarded to `EpochMonotonicRegister::write` and ignored by `Locked`.
-    pub fn write(&self, shard_idx: usize, req: WriteRequest) -> (r: WriteResponse)
+    pub fn write(&self, shard_idx: usize, req: WriteRequest<N>) -> (r: WriteResponse)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),
@@ -167,26 +168,27 @@ impl<ML, RL> RegisterStore<ML, RL> where
     }
 }
 
+#[verifier::reject_recursive_types(N)]
 #[verifier::reject_recursive_types(ML)]
 #[verifier::reject_recursive_types(RL)]
-pub struct RegisterService<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+pub struct RegisterService<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     /// ID of the server
     id: u64,
     /// Register state -- either backend (design doc section 5.5)
-    register: RegisterStore<ML, RL>,
+    register: RegisterStore<N, ML, RL>,
     /// Channel invariant this server's connections are held under
     #[allow(dead_code)]
     channel_inv: Ghost<ChannelInv>,
 }
 
-impl<ML, RL> RegisterService<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> RegisterService<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    pub fn new(id: u64, register: RegisterStore<ML, RL>, channel_inv: Ghost<ChannelInv>) -> (r:
+    pub fn new(id: u64, register: RegisterStore<N, ML, RL>, channel_inv: Ghost<ChannelInv>) -> (r:
         Self)
         requires
             register.id() == id,
@@ -222,7 +224,7 @@ impl<ML, RL> RegisterService<ML, RL> where
         self.channel_inv@.server_locs
     }
 
-    fn handle_get(&self, shard_idx: usize, req: GetRequest) -> (r: ResponseInner)
+    fn handle_get(&self, shard_idx: usize, req: GetRequest) -> (r: ResponseInner<N>)
         requires
             req.servers().locs() == self.server_locs(),
         ensures
@@ -244,7 +246,7 @@ impl<ML, RL> RegisterService<ML, RL> where
         ResponseInner::Get(self.register.read(shard_idx, req))
     }
 
-    fn handle_get_timestamp(&self, shard_idx: usize, req: GetTimestampRequest) -> (r: ResponseInner)
+    fn handle_get_timestamp(&self, shard_idx: usize, req: GetTimestampRequest) -> (r: ResponseInner<N>)
         requires
             req.servers().locs() == self.server_locs(),
         ensures
@@ -265,7 +267,7 @@ impl<ML, RL> RegisterService<ML, RL> where
         ResponseInner::GetTimestamp(self.register.read_timestamp(shard_idx, req))
     }
 
-    fn handle_write(&self, shard_idx: usize, req: WriteRequest) -> (r: ResponseInner)
+    fn handle_write(&self, shard_idx: usize, req: WriteRequest<N>) -> (r: ResponseInner<N>)
         requires
             req.servers().locs() == self.server_locs(),
             req.commitment_id() == self.commitment_id(),
@@ -289,13 +291,13 @@ impl<ML, RL> RegisterService<ML, RL> where
     }
 }
 
-impl<ML, RL> Service for RegisterService<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> Service for RegisterService<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    type Request = Request;
+    type Request = Request<N>;
 
-    type Response = Response;
+    type Response = Response<N>;
 
     type ChanInv = ChannelInv;
 
@@ -307,7 +309,7 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         self.channel_inv@
     }
 
-    open spec fn pre(self, channel_id: (u64, u64), request: Request) -> bool {
+    open spec fn pre(self, channel_id: (u64, u64), request: Request<N>) -> bool {
         &&& request.request_key() == (channel_id.1, request.spec_tag())
         &&& request.req_type() is Get ==> {
             let get_req = request.get();
@@ -324,7 +326,7 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         }
     }
 
-    open spec fn post(self, channel_id: (u64, u64), request: Request, response: Response) -> bool {
+    open spec fn post(self, channel_id: (u64, u64), request: Request<N>, response: Response<N>) -> bool {
         &&& response.spec_tag() == request.spec_tag()
         &&& response.request_id() == request.request_id()
         &&& response.request_key() == request.request_key()
@@ -361,7 +363,7 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         })
     }
 
-    proof fn recv_implies_pre(tracked &self, channel_id: (u64, u64), request: Request) {
+    proof fn recv_implies_pre(tracked &self, channel_id: (u64, u64), request: Request<N>) {
         use_type_invariant(self);
         assert(crate::channel::chan_request_inv(
             self.channel_inv(),
@@ -384,8 +386,8 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
     proof fn post_implies_send(
         tracked &self,
         channel_id: (u64, u64),
-        request: Request,
-        response: Response,
+        request: Request<N>,
+        response: Response<N>,
     ) {
         use_type_invariant(self);
         assert(crate::channel::chan_request_inv(
@@ -410,8 +412,8 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
         shard_idx: usize,
         #[allow(unused_variables)]
         channel_id: (u64, u64),
-        request: Request,
-    ) -> (r: Response) {
+        request: Request<N>,
+    ) -> (r: Response<N>) {
         vlib::vdebug!(server_id = self.id, ?request, "received req");
         let (request_id, request_inner, request_proof) = request.destruct();
         let resp_inner = match request_inner {
@@ -471,21 +473,21 @@ impl<ML, RL> Service for RegisterService<ML, RL> where
     }
 }
 
-pub type RegisterServer<L, C, ML, RL> = Server<RegisterService<ML, RL>, L, C>;
+pub type RegisterServer<const N: usize, L, C, ML, RL> = Server<RegisterService<N, ML, RL>, L, C>;
 
 #[allow(unused_variables)]
 #[allow(clippy::type_complexity)]
-pub fn create_server<L, C, ML, RL>(
+pub fn create_server<const N: usize, L, C, ML, RL>(
     server_ids: &HashSet<u64>,
     my_server_id: u64,
     listener: L,
     num_threads: usize,
     backend: RegisterBackend,
-) -> (RegisterServer<L, C, ML, RL>, Vec<crossbeam_channel::Receiver<L::Raw>>) where
+) -> (RegisterServer<N, L, C, ML, RL>, Vec<crossbeam_channel::Receiver<L::Raw>>) where
     L: Listener<C>,
-    C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+    C: Channel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>,
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
 
     requires
         server_ids@.contains(my_server_id),
@@ -498,7 +500,7 @@ pub fn create_server<L, C, ML, RL>(
 {
     let tracked state_inv;
     proof {
-        let tracked (s, v) = invariants::get_system_state::<ML, RL>(server_ids@);
+        let tracked (s, v) = invariants::get_system_state::<N, ML, RL>(server_ids@);
         state_inv = s;
     }
     let state_inv = Tracked(state_inv);

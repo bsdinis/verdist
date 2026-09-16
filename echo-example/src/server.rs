@@ -85,6 +85,23 @@ fn main() {
             }
         }
         cli::NetworkType::IoUringUdp => {
+            let listener = verdist::network::udp_muxed::MuxedListener::listen_io_uring_reuseport(
+                args.server_addr,
+                args.server_id,
+                args.num_router_threads,
+            )
+            .expect("failed to create listener");
+            if use_epoll {
+                echo_example::server::run_server_epoll_udp_muxed(
+                    args.server_id,
+                    listener,
+                    num_threads,
+                );
+            } else {
+                echo_example::server::run_server(args.server_id, listener, num_threads);
+            }
+        }
+        cli::NetworkType::IoUringUdpLegacy => {
             let listener = verdist::network::io_uring_udp::IoUringUdpListener::listen(
                 args.server_addr,
                 args.server_id,

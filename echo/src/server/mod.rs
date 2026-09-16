@@ -133,13 +133,14 @@ impl Service for EchoService {
 
 pub type EchoServer<L, C> = Server<EchoService, L, C>;
 
-pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> (
-    EchoServer<L, C>,
-    Vec<crossbeam_channel::Receiver<L::Raw>>,
-) where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
-    requires
-        listener.spec_id() == server_id,
-        num_threads > 0,
+/// Builds a fresh `EchoService`, establishing its channel invariant from the system-wide state
+/// predicate exactly like `create_server` does -- factored out so callers that don't want a
+/// `verdist::service::Server` at all (e.g. `verdist::network::udp_ephemeral`'s per-message driver,
+/// which calls `Service::handle` directly with no persistent `Listener`/`Channel`/shard machinery)
+/// can still get a correctly-invariant-carrying `EchoService`.
+pub fn create_service(server_id: u64) -> (r: EchoService)
+    ensures
+        r.spec_id() == server_id,
 {
     let tracked state_inv;
     proof {
@@ -148,7 +149,19 @@ pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> (
     #[allow(unused_variables)]
     let state_inv = Tracked(state_inv);
     let ghost channel_inv = ChannelInv::from_state_pred(state_inv@.constant());
-    let service = EchoService::new(server_id, Ghost(channel_inv));
+    EchoService::new(server_id, Ghost(channel_inv))
+}
+
+pub fn create_server<L, C>(server_id: u64, listener: L, num_threads: usize) -> (
+    EchoServer<L, C>,
+    Vec<crossbeam_channel::Receiver<L::Raw>>,
+) where L: Listener<C>, C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+    requires
+        listener.spec_id() == server_id,
+        num_threads > 0,
+{
+    let service = create_service(server_id);
+    let ghost channel_inv = service.channel_inv();
     Server::new(service, listener, Ghost(channel_inv), num_threads)
 }
 

@@ -70,7 +70,19 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            // Explicit turbofish needed: `MuxedConnector` implements `Connector` for both this
+            // (plain) and `io_uring_udp_muxed`'s channel type (echo-example already needed the
+            // same disambiguation once that second impl existed), so type inference alone is
+            // ambiguous even though abd-example doesn't wire up the io_uring variant itself.
+            abd_example::run_client::<
+                verdist::network::udp_muxed::MuxedServerChannel<
+                    abd::channel::ChannelInv,
+                    abd::proto::Response,
+                    abd::proto::Request,
+                >,
+                _,
+            >(args, &connectors)
+            .expect("run_client: error");
         }
         cli::NetworkType::UdpLegacy => {
             let connectors = args

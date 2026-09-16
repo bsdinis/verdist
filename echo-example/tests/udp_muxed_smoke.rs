@@ -19,10 +19,61 @@ use std::net::SocketAddr;
 use std::net::UdpSocket;
 use std::process::Child;
 use std::process::Command;
-use std::process::Output;
+use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
+
+/// Continuously drains one already-`Stdio::piped()` stream (stdout or stderr) into a shared
+/// buffer on a dedicated background thread, so the writing child process's pipe never fills up
+/// and blocks it -- unlike reading a piped stream only *after* the child exits (e.g.
+/// `Child::wait_with_output`), which deadlocks if the child writes more than one pipe buffer's
+/// worth (~64KiB on Linux) before its own exit: the child blocks on the next write with nobody
+/// reading, and the parent is waiting for the child to exit before it reads. This is exactly what
+/// `RUST_LOG=debug`'s per-poll-iteration tracing (`verdist::network::channel`'s "polling on
+/// channel", logged once per non-blocking `try_recv` attempt -- for an io_uring-backed channel
+/// that peeks the completion queue rather than blocking, that can be thousands of attempts within
+/// a few tens of milliseconds, easily tens of KiB of log text per op) can trigger well within a
+/// single small smoke test, independent of anything being actually slow or hung.
+struct DrainedPipe {
+    buf: Arc<Mutex<Vec<u8>>>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+fn drain_pipe<R: Read + Send + 'static>(pipe: R) -> DrainedPipe {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let buf_writer = Arc::clone(&buf);
+    let handle = std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => buf_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => return,
+            }
+        }
+    });
+    DrainedPipe { buf, handle }
+}
+
+impl DrainedPipe {
+    /// Joins the drain thread (blocking until it has observed EOF -- safe to call once the
+    /// writing process has actually exited, which every call site here already waited for) and
+    /// returns everything it read as a `String`.
+    fn join_and_get_string(self) -> String {
+        let _ = self.handle.join();
+        String::from_utf8_lossy(&self.buf.lock().unwrap()).into_owned()
+    }
+
+    /// Snapshot of what's been read so far, without joining -- used for the server, which is
+    /// still running (and being drained) when this is read.
+    fn snapshot_string(&self) -> String {
+        String::from_utf8_lossy(&self.buf.lock().unwrap()).into_owned()
+    }
+}
 
 /// Same rationale as `abd-example/tests/io_uring_network_smoke.rs`'s identical guard: a plain
 /// `Child` + `.kill()` on drop, so a failing `assert!`/`panic!`/timeout anywhere in a test can
@@ -59,11 +110,11 @@ fn wait_until_bound(addr: SocketAddr, timeout: Duration) -> bool {
     }
 }
 
-fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
+fn wait_with_timeout(mut child: Child, timeout: Duration) -> ExitStatus {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait().expect("failed to poll client process") {
-            Some(_status) => break,
+            Some(status) => return status,
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
@@ -74,9 +125,6 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
             }
         }
     }
-    child
-        .wait_with_output()
-        .expect("failed to collect client output")
 }
 
 /// Spawns one `echo_server` (udp_muxed, `num_router_threads` router sockets/threads) plus
@@ -108,12 +156,14 @@ fn run_smoke_test(
     if epoll {
         server_args.push("--epoll".to_string());
     }
-    let server = Command::new(env!("CARGO_BIN_EXE_echo_server"))
+    let mut server = Command::new(env!("CARGO_BIN_EXE_echo_server"))
         .args(&server_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn echo_server");
+    let server_stderr_pipe = drain_pipe(server.stderr.take().expect("server stderr was piped"));
+    let _server_stdout_pipe = drain_pipe(server.stdout.take().expect("server stdout was piped"));
     let mut server = ChildGuard {
         child: server,
         name: "echo_server",
@@ -123,9 +173,9 @@ fn run_smoke_test(
         panic!("echo_server never bound {addr} within 5s");
     }
 
-    let clients: Vec<Child> = (0..num_clients)
+    let clients: Vec<(Child, DrainedPipe, DrainedPipe)> = (0..num_clients)
         .map(|i| {
-            Command::new(env!("CARGO_BIN_EXE_echo_client"))
+            let mut child = Command::new(env!("CARGO_BIN_EXE_echo_client"))
                 .args([
                     "--n-ops",
                     &n_ops.to_string(),
@@ -146,32 +196,39 @@ fn run_smoke_test(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .unwrap_or_else(|e| panic!("failed to spawn echo_client {i}: {e}"))
+                .unwrap_or_else(|e| panic!("failed to spawn echo_client {i}: {e}"));
+            // Drain both pipes concurrently, from the moment each client is spawned -- see
+            // `drain_pipe`'s doc for why this can't wait until `wait_with_timeout` returns.
+            let stdout_pipe = drain_pipe(child.stdout.take().expect("client stdout was piped"));
+            let stderr_pipe = drain_pipe(child.stderr.take().expect("client stderr was piped"));
+            (child, stdout_pipe, stderr_pipe)
         })
         .collect();
 
-    let outputs: Vec<Output> = clients
+    let results: Vec<(ExitStatus, DrainedPipe, DrainedPipe)> = clients
         .into_iter()
-        .map(|c| wait_with_timeout(c, Duration::from_secs(10)))
+        .map(|(c, stdout_pipe, stderr_pipe)| {
+            (wait_with_timeout(c, Duration::from_secs(10)), stdout_pipe, stderr_pipe)
+        })
         .collect();
 
     if let Err(e) = server.child.kill() {
         eprintln!("note: echo_server already exited on its own before being killed: {e}");
     }
     let _ = server.child.wait();
-    let mut server_stderr = String::new();
-    if let Some(mut stderr) = server.child.stderr.take() {
-        let _ = stderr.read_to_string(&mut server_stderr);
-    }
+    // Give the drain thread a moment to observe EOF and flush the last chunk after the kill.
+    std::thread::sleep(Duration::from_millis(50));
+    let server_stderr = server_stderr_pipe.snapshot_string();
 
-    for (i, output) in outputs.iter().enumerate() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    for (i, (status, _stdout_pipe, stderr_pipe)) in results.into_iter().enumerate() {
+        // Each client already exited (`wait_with_timeout` above returned its status), so joining
+        // its drain threads here is guaranteed to complete promptly -- they hit EOF the moment
+        // the child's fds closed.
+        let stderr = stderr_pipe.join_and_get_string();
 
         assert!(
-            output.status.success(),
-            "echo_client {i} exited with {:?}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- server stderr (so far) ---\n{server_stderr}",
-            output.status,
+            status.success(),
+            "echo_client {i} exited with {status:?}\n--- stderr ---\n{stderr}\n--- server stderr (so far) ---\n{server_stderr}",
         );
         assert!(
             !stderr.contains("echo failed"),
@@ -213,4 +270,16 @@ fn udp_muxed_reuseport_concurrent_clients() {
 #[test]
 fn udp_muxed_epoll_concurrent_clients() {
     run_smoke_test("127.0.0.1:16782".parse().unwrap(), "udp", 2, true, 20, 100);
+}
+
+/// io_uring/`RecvMsg`-based router thread (`verdist::network::io_uring_udp_muxed`) -- same
+/// demux/implicit-accept correctness properties as plain `udp`, different receive mechanism.
+#[test]
+fn udp_muxed_io_uring_single_socket_concurrent_clients() {
+    run_smoke_test("127.0.0.1:16783".parse().unwrap(), "io_uring_udp", 1, false, 8, 20);
+}
+
+#[test]
+fn udp_muxed_io_uring_reuseport_concurrent_clients() {
+    run_smoke_test("127.0.0.1:16784".parse().unwrap(), "io_uring_udp", 4, false, 16, 20);
 }

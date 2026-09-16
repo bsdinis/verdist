@@ -36,11 +36,23 @@ pub enum NetworkType {
     #[value(name = "io_uring_tcp")]
     IoUringTcp,
 
-    /// Run with UDP connections over io_uring instead of blocking recv/send syscalls (see
-    /// `verdist::network::io_uring_udp`)
+    /// Run with UDP connections over io_uring instead of blocking recv/send syscalls. This is
+    /// `verdist::network::io_uring_udp_muxed`: the io_uring-backed counterpart of `Udp` (see its
+    /// doc) -- no rendezvous handshake, the server's router thread(s) demultiplex via
+    /// `RecvMsg` instead of a connected `Recv`. See `IoUringUdpLegacy` for the older,
+    /// handshake-based implementation this superseded.
     #[serde(rename = "io_uring_udp")]
     #[value(name = "io_uring_udp")]
     IoUringUdp,
+
+    /// The original UDP-over-io_uring implementation (`verdist::network::io_uring_udp`), kept for
+    /// reference/comparison. **Deprecated**: shares `UdpLegacy`'s handshake-based liveness bug (see
+    /// its doc), just duplicated onto an io_uring-backed per-connection socket instead of a
+    /// blocking one. Prefer plain `--network io_uring_udp` unless specifically benchmarking
+    /// against this.
+    #[serde(rename = "io_uring_udp_legacy")]
+    #[value(name = "io_uring_udp_legacy")]
+    IoUringUdpLegacy,
 }
 
 #[derive(Parser)]

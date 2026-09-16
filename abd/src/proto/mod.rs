@@ -1,5 +1,6 @@
 use vstd::prelude::*;
 
+mod byte_array;
 mod get;
 mod get_timestamp;
 mod request;

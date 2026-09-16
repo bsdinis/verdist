@@ -31,11 +31,11 @@ impl ChannelInv {
     }
 }
 
-pub open spec fn chan_request_inv(
+pub open spec fn chan_request_inv<const N: usize>(
     k: ChannelInv,
     client_id: u64,
     server_id: u64,
-    r: Request,
+    r: Request<N>,
 ) -> bool {
     &&& r.request_key() == (client_id, r.spec_tag())
     &&& r.request_id() == k.request_map_id
@@ -54,11 +54,11 @@ pub open spec fn chan_request_inv(
     }
 }
 
-pub open spec fn chan_response_inv(
+pub open spec fn chan_response_inv<const N: usize>(
     k: ChannelInv,
     client_id: u64,
     server_id: u64,
-    r: Response,
+    r: Response<N>,
 ) -> bool {
     &&& r.request_id() == k.request_map_id
     &&& r.server_id() == server_id
@@ -85,23 +85,23 @@ pub open spec fn chan_response_inv(
 }
 
 // Invariant on server
-impl ChannelInvariant<ChannelInv, (u64, u64), Request, Response> for ChannelInv {
-    open spec fn recv_inv(k: ChannelInv, id: (u64, u64), r: Request) -> bool {
+impl<const N: usize> ChannelInvariant<ChannelInv, (u64, u64), Request<N>, Response<N>> for ChannelInv {
+    open spec fn recv_inv(k: ChannelInv, id: (u64, u64), r: Request<N>) -> bool {
         chan_request_inv(k, id.1, id.0, r)
     }
 
-    open spec fn send_inv(k: ChannelInv, id: (u64, u64), s: Response) -> bool {
+    open spec fn send_inv(k: ChannelInv, id: (u64, u64), s: Response<N>) -> bool {
         chan_response_inv(k, id.1, id.0, s)
     }
 }
 
 // Invariant on client
-impl ChannelInvariant<ChannelInv, (u64, u64), Response, Request> for ChannelInv {
-    open spec fn recv_inv(k: ChannelInv, id: (u64, u64), r: Response) -> bool {
+impl<const N: usize> ChannelInvariant<ChannelInv, (u64, u64), Response<N>, Request<N>> for ChannelInv {
+    open spec fn recv_inv(k: ChannelInv, id: (u64, u64), r: Response<N>) -> bool {
         chan_response_inv(k, id.0, id.1, r)
     }
 
-    open spec fn send_inv(k: ChannelInv, id: (u64, u64), s: Request) -> bool {
+    open spec fn send_inv(k: ChannelInv, id: (u64, u64), s: Request<N>) -> bool {
         chan_request_inv(k, id.0, id.1, s)
     }
 }

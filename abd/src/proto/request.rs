@@ -16,19 +16,19 @@ use vstd::resource::Loc;
 
 verus! {
 
-pub struct Request {
+pub struct Request<const N: usize> {
     request_id: u64,
-    inner: RequestInner,
-    request: Tracked<RequestProof>,
+    inner: RequestInner<N>,
+    request: Tracked<RequestProof<N>>,
 }
 
-pub enum RequestInner {
+pub enum RequestInner<const N: usize> {
     Get(GetRequest),
     GetTimestamp(GetTimestampRequest),
-    Write(WriteRequest),
+    Write(WriteRequest<N>),
 }
 
-impl TaggedMessage for Request {
+impl<const N: usize> TaggedMessage for Request<N> {
     fn tag(&self) -> u64 {
         self.request_id
     }
@@ -38,7 +38,7 @@ impl TaggedMessage for Request {
     }
 }
 
-impl RequestInner {
+impl<const N: usize> RequestInner<N> {
     pub open spec fn req_type(self) -> ReqType {
         match self {
             RequestInner::Get(_) => ReqType::Get,
@@ -134,9 +134,9 @@ impl RequestInner {
     }
 
     pub fn new_write(
-        value: Option<u64>,
+        value: Option<[u8; N]>,
         timestamp: Timestamp,
-        commitment: Tracked<WriteCommitment>,
+        commitment: Tracked<WriteCommitment<N>>,
         servers: Tracked<ServerUniverseLb>,
     ) -> (r: Self)
         requires
@@ -168,7 +168,7 @@ impl RequestInner {
     }
 }
 
-impl Request {
+impl<const N: usize> Request<N> {
     pub closed spec fn request_id(self) -> Loc {
         self.request.id()
     }
@@ -177,7 +177,7 @@ impl Request {
         self.request@.key()
     }
 
-    pub closed spec fn request(self) -> RequestInner {
+    pub closed spec fn request(self) -> RequestInner<N> {
         self.request@@
     }
 
@@ -199,7 +199,7 @@ impl Request {
         self.inner->GetTimestamp_0
     }
 
-    pub closed spec fn write(self) -> WriteRequest
+    pub closed spec fn write(self) -> WriteRequest<N>
         recommends
             self.req_type() is Write,
     {
@@ -220,8 +220,8 @@ impl Request {
         #[allow(unused_variables)]
         client_id: u64,
         request_id: u64,
-        request_inner: RequestInner,
-        request_proof: Tracked<RequestProof>,
+        request_inner: RequestInner<N>,
+        request_proof: Tracked<RequestProof<N>>,
     ) -> (r: Self)
         requires
             request_proof@.key() == (client_id, request_id),
@@ -239,7 +239,7 @@ impl Request {
         Request { request_id, inner: request_inner, request: request_proof }
     }
 
-    pub fn destruct(self) -> (r: (u64, RequestInner, Tracked<RequestProof>))
+    pub fn destruct(self) -> (r: (u64, RequestInner<N>, Tracked<RequestProof<N>>))
         ensures
             r.0 == self.spec_tag(),
             r.2@@.spec_eq(r.1),
@@ -297,7 +297,7 @@ impl Request {
     }
 
     /// Create a request from the executable parts only, for deserialization purposes
-    fn axiom_forge(request_id: u64, inner: RequestInner) -> Self {
+    fn axiom_forge(request_id: u64, inner: RequestInner<N>) -> Self {
         proof {
             assume(false);
         }
@@ -306,7 +306,7 @@ impl Request {
     }
 }
 
-impl Clone for Request {
+impl<const N: usize> Clone for Request<N> {
     #[allow(unused_variables)]
     fn clone(&self) -> (r: Self)
         ensures
@@ -328,7 +328,7 @@ impl Clone for Request {
     }
 }
 
-impl Clone for RequestInner {
+impl<const N: usize> Clone for RequestInner<N> {
     #[allow(unused_variables)]
     fn clone(&self) -> (r: Self)
         ensures
@@ -344,7 +344,7 @@ impl Clone for RequestInner {
 }
 
 } // verus!
-impl std::fmt::Debug for RequestInner {
+impl<const N: usize> std::fmt::Debug for RequestInner<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RequestInner::Get(get) => f.debug_tuple("Get").field(&get).finish(),
@@ -356,7 +356,7 @@ impl std::fmt::Debug for RequestInner {
     }
 }
 
-impl std::fmt::Debug for Request {
+impl<const N: usize> std::fmt::Debug for Request<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Request")
             .field("request_id", &self.request_id)
@@ -372,7 +372,7 @@ mod serde_impls {
     use super::Request;
     use super::RequestInner;
 
-    impl serde::Serialize for Request {
+    impl<const N: usize> serde::Serialize for Request<N> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -384,7 +384,7 @@ mod serde_impls {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for Request {
+    impl<'de, const N: usize> serde::Deserialize<'de> for Request<N> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -426,10 +426,10 @@ mod serde_impls {
                 }
             }
 
-            struct StructVisitor;
+            struct StructVisitor<const N: usize>;
 
-            impl<'de> serde::de::Visitor<'de> for StructVisitor {
-                type Value = Request;
+            impl<'de, const N: usize> serde::de::Visitor<'de> for StructVisitor<N> {
+                type Value = Request<N>;
 
                 fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("struct Request")
@@ -476,11 +476,11 @@ mod serde_impls {
                     Ok(Request::axiom_forge(request_id, inner))
                 }
             }
-            deserializer.deserialize_struct("Request", FIELDS, StructVisitor)
+            deserializer.deserialize_struct("Request", FIELDS, StructVisitor::<N>)
         }
     }
 
-    impl serde::Serialize for RequestInner {
+    impl<const N: usize> serde::Serialize for RequestInner<N> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -502,7 +502,7 @@ mod serde_impls {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for RequestInner {
+    impl<'de, const N: usize> serde::Deserialize<'de> for RequestInner<N> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -584,10 +584,10 @@ mod serde_impls {
                 }
             }
 
-            struct EnumVisitor;
+            struct EnumVisitor<const N: usize>;
 
-            impl<'de> serde::de::Visitor<'de> for EnumVisitor {
-                type Value = RequestInner;
+            impl<'de, const N: usize> serde::de::Visitor<'de> for EnumVisitor<N> {
+                type Value = RequestInner<N>;
 
                 fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("enum RequestInner")
@@ -614,7 +614,7 @@ mod serde_impls {
                     }
                 }
             }
-            deserializer.deserialize_enum("RequestInner", VARIANTS, EnumVisitor)
+            deserializer.deserialize_enum("RequestInner", VARIANTS, EnumVisitor::<N>)
         }
     }
 }

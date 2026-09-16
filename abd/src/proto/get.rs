@@ -16,13 +16,13 @@ pub struct GetRequest {
 }
 
 #[allow(unused)]
-pub struct GetResponse {
-    value: Option<u64>,
+pub struct GetResponse<const N: usize> {
+    value: Option<[u8; N]>,
     timestamp: Timestamp,
     #[allow(unused)]
     lb: Tracked<MonotonicTimestampResource>,
     #[allow(unused)]
-    commitment: Tracked<WriteCommitment>,
+    commitment: Tracked<WriteCommitment<N>>,
     #[allow(unused)]
     server_token: Tracked<ServerToken>,
 }
@@ -177,7 +177,7 @@ impl GetRequest {
 }
 
 #[allow(unused)]
-impl GetResponse {
+impl<const N: usize> GetResponse<N> {
     #[verifier::type_invariant]
     pub closed spec fn inv(self) -> bool {
         &&& self.lb@@ is LowerBound
@@ -195,11 +195,11 @@ impl GetResponse {
         self.timestamp
     }
 
-    pub closed spec fn spec_value(self) -> Option<u64> {
+    pub closed spec fn spec_value(self) -> Option<[u8; N]> {
         self.value
     }
 
-    pub closed spec fn spec_commitment(self) -> WriteCommitment {
+    pub closed spec fn spec_commitment(self) -> WriteCommitment<N> {
         self.commitment@
     }
 
@@ -220,10 +220,10 @@ impl GetResponse {
     }
 
     pub fn new(
-        value: Option<u64>,
+        value: Option<[u8; N]>,
         timestamp: Timestamp,
         lb: Tracked<MonotonicTimestampResource>,
-        commitment: Tracked<WriteCommitment>,
+        commitment: Tracked<WriteCommitment<N>>,
         server_token: Tracked<ServerToken>,
     ) -> (r: Self)
         requires
@@ -254,7 +254,7 @@ impl GetResponse {
         self.timestamp
     }
 
-    pub fn value(&self) -> (value: &Option<u64>)
+    pub fn value(&self) -> (value: &Option<[u8; N]>)
         ensures
             *value == self.spec_value(),
         no_unwind
@@ -262,7 +262,7 @@ impl GetResponse {
         &self.value
     }
 
-    pub fn into_inner(self) -> (r: (Option<u64>, Timestamp))
+    pub fn into_inner(self) -> (r: (Option<[u8; N]>, Timestamp))
         ensures
             r.0 == self.spec_value(),
             r.1 == self.spec_timestamp(),
@@ -285,7 +285,7 @@ impl GetResponse {
         Tracked(lb)
     }
 
-    pub fn commitment(&self) -> (r: Tracked<WriteCommitment>)
+    pub fn commitment(&self) -> (r: Tracked<WriteCommitment<N>>)
         ensures
             r@.id() == self.spec_commitment().id(),
             r@.key() == self.spec_timestamp(),
@@ -379,7 +379,7 @@ impl GetResponse {
     }
 
     /// Create a GetResponse (to be used for deserialization)
-    fn axiom_forge(value: Option<u64>, timestamp: Timestamp) -> Self {
+    fn axiom_forge(value: Option<[u8; N]>, timestamp: Timestamp) -> Self {
         proof {
             assume(false);
         }
@@ -411,7 +411,7 @@ impl Clone for GetRequest {
     }
 }
 
-impl Clone for GetResponse {
+impl<const N: usize> Clone for GetResponse<N> {
     fn clone(&self) -> (r: Self)
         ensures
             self.spec_eq(r),
@@ -442,7 +442,7 @@ impl std::fmt::Debug for GetRequest {
     }
 }
 
-impl std::fmt::Debug for GetResponse {
+impl<const N: usize> std::fmt::Debug for GetResponse<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GetResponse")
             .field("value", &self.value)
@@ -452,6 +452,8 @@ impl std::fmt::Debug for GetResponse {
 }
 
 mod serde_impls {
+    use crate::proto::byte_array::OptArr;
+    use crate::proto::byte_array::OptArrSeed;
     use super::GetRequest;
     use super::GetResponse;
     use serde::ser::SerializeStruct;
@@ -499,19 +501,19 @@ mod serde_impls {
         }
     }
 
-    impl serde::Serialize for GetResponse {
+    impl<const N: usize> serde::Serialize for GetResponse<N> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             let mut state = serializer.serialize_struct("GetResponse", 2)?;
-            state.serialize_field("value", &self.value)?;
+            state.serialize_field("value", &OptArr(&self.value))?;
             state.serialize_field("timestamp", &self.timestamp)?;
             state.end()
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for GetResponse {
+    impl<'de, const N: usize> serde::Deserialize<'de> for GetResponse<N> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -553,10 +555,10 @@ mod serde_impls {
                 }
             }
 
-            struct StructVisitor;
+            struct StructVisitor<const N: usize>;
 
-            impl<'de> serde::de::Visitor<'de> for StructVisitor {
-                type Value = GetResponse;
+            impl<'de, const N: usize> serde::de::Visitor<'de> for StructVisitor<N> {
+                type Value = GetResponse<N>;
 
                 fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("struct GetResponse")
@@ -567,7 +569,7 @@ mod serde_impls {
                     V: serde::de::SeqAccess<'de>,
                 {
                     let value = seq
-                        .next_element()?
+                        .next_element_seed(OptArrSeed::<N>)?
                         .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                     let timestamp = seq
                         .next_element()?
@@ -587,7 +589,7 @@ mod serde_impls {
                                 if value.is_some() {
                                     return Err(serde::de::Error::duplicate_field("value"));
                                 }
-                                value = Some(map.next_value()?);
+                                value = Some(map.next_value_seed(OptArrSeed::<N>)?);
                             }
                             Field::Timestamp => {
                                 if timestamp.is_some() {
@@ -603,7 +605,7 @@ mod serde_impls {
                     Ok(GetResponse::axiom_forge(value, timestamp))
                 }
             }
-            deserializer.deserialize_struct("GetResponse", FIELDS, StructVisitor)
+            deserializer.deserialize_struct("GetResponse", FIELDS, StructVisitor::<N>)
         }
     }
 }

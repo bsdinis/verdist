@@ -16,20 +16,20 @@ use vstd::resource::Loc;
 
 verus! {
 
-pub struct Response {
+pub struct Response<const N: usize> {
     request_id: u64,
-    inner: ResponseInner,
+    inner: ResponseInner<N>,
     #[allow(unused)]
-    request: Tracked<RequestProof>,
+    request: Tracked<RequestProof<N>>,
 }
 
-pub enum ResponseInner {
-    Get(GetResponse),
+pub enum ResponseInner<const N: usize> {
+    Get(GetResponse<N>),
     GetTimestamp(GetTimestampResponse),
     Write(WriteResponse),
 }
 
-impl TaggedMessage for Response {
+impl<const N: usize> TaggedMessage for Response<N> {
     fn tag(&self) -> u64 {
         self.request_id
     }
@@ -39,8 +39,8 @@ impl TaggedMessage for Response {
     }
 }
 
-impl Response {
-    pub fn new(request_id: u64, inner: ResponseInner, request: Tracked<RequestProof>) -> (r: Self)
+impl<const N: usize> Response<N> {
+    pub fn new(request_id: u64, inner: ResponseInner<N>, request: Tracked<RequestProof<N>>) -> (r: Self)
         requires
             request@.key().1 == request_id,
             request@.req_type() is Get <==> inner is Get,
@@ -132,7 +132,7 @@ impl Response {
         self.request@.key()
     }
 
-    pub closed spec fn request(self) -> RequestInner {
+    pub closed spec fn request(self) -> RequestInner<N> {
         self.request@@
     }
 
@@ -144,7 +144,7 @@ impl Response {
         }
     }
 
-    pub closed spec fn get(self) -> GetResponse
+    pub closed spec fn get(self) -> GetResponse<N>
         recommends
             self.req_type() is Get,
     {
@@ -165,7 +165,7 @@ impl Response {
         self.inner->Write_0
     }
 
-    pub fn destruct_get(self) -> (r: GetResponse)
+    pub fn destruct_get(self) -> (r: GetResponse<N>)
         requires
             self.req_type() is Get,
         ensures
@@ -297,7 +297,7 @@ impl Response {
     pub fn agree_request(
         &self,
         #[allow(unused_variables)]
-        request_proof: &mut Tracked<RequestProof>,
+        request_proof: &mut Tracked<RequestProof<N>>,
     )
         requires
             self.request_id() == old(request_proof)@.id(),
@@ -315,7 +315,7 @@ impl Response {
     pub fn agree_request_opt(
         &self,
         #[allow(unused_variables)]
-        request_proof: &mut Tracked<Option<RequestProof>>,
+        request_proof: &mut Tracked<Option<RequestProof<N>>>,
     )
         requires
             old(request_proof)@ is Some,
@@ -348,7 +348,7 @@ impl Response {
     }
 
     /// Create a response from the executable parts only, for deserialization purposes
-    fn axiom_forge(request_id: u64, inner: ResponseInner) -> Self {
+    fn axiom_forge(request_id: u64, inner: ResponseInner<N>) -> Self {
         proof {
             assume(false);
         }
@@ -357,7 +357,7 @@ impl Response {
     }
 }
 
-impl ResponseInner {
+impl<const N: usize> ResponseInner<N> {
     pub open spec fn spec_eq(self, other: Self) -> bool {
         match (self, other) {
             (ResponseInner::Get(a), ResponseInner::Get(b)) => a.spec_eq(b),
@@ -423,7 +423,7 @@ impl ResponseInner {
     }
 }
 
-impl Clone for Response {
+impl<const N: usize> Clone for Response<N> {
     #[allow(unused_variables)]
     fn clone(&self) -> (r: Self)
         ensures
@@ -452,7 +452,7 @@ impl Clone for Response {
     }
 }
 
-impl Clone for ResponseInner {
+impl<const N: usize> Clone for ResponseInner<N> {
     #[allow(unused_variables)]
     fn clone(&self) -> (r: Self)
         ensures
@@ -467,7 +467,7 @@ impl Clone for ResponseInner {
 }
 
 } // verus!
-impl std::fmt::Debug for ResponseInner {
+impl<const N: usize> std::fmt::Debug for ResponseInner<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ResponseInner::Get(get) => f.debug_tuple("Get").field(&get).finish(),
@@ -479,7 +479,7 @@ impl std::fmt::Debug for ResponseInner {
     }
 }
 
-impl std::fmt::Debug for Response {
+impl<const N: usize> std::fmt::Debug for Response<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
             .field("request_id", &self.request_id)
@@ -495,7 +495,7 @@ mod serde_impls {
     use super::Response;
     use super::ResponseInner;
 
-    impl serde::Serialize for Response {
+    impl<const N: usize> serde::Serialize for Response<N> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -507,7 +507,7 @@ mod serde_impls {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for Response {
+    impl<'de, const N: usize> serde::Deserialize<'de> for Response<N> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -549,10 +549,10 @@ mod serde_impls {
                 }
             }
 
-            struct StructVisitor;
+            struct StructVisitor<const N: usize>;
 
-            impl<'de> serde::de::Visitor<'de> for StructVisitor {
-                type Value = Response;
+            impl<'de, const N: usize> serde::de::Visitor<'de> for StructVisitor<N> {
+                type Value = Response<N>;
 
                 fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("struct Response")
@@ -599,11 +599,11 @@ mod serde_impls {
                     Ok(Response::axiom_forge(request_id, inner))
                 }
             }
-            deserializer.deserialize_struct("Response", FIELDS, StructVisitor)
+            deserializer.deserialize_struct("Response", FIELDS, StructVisitor::<N>)
         }
     }
 
-    impl serde::Serialize for ResponseInner {
+    impl<const N: usize> serde::Serialize for ResponseInner<N> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -625,7 +625,7 @@ mod serde_impls {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for ResponseInner {
+    impl<'de, const N: usize> serde::Deserialize<'de> for ResponseInner<N> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -707,10 +707,10 @@ mod serde_impls {
                 }
             }
 
-            struct EnumVisitor;
+            struct EnumVisitor<const N: usize>;
 
-            impl<'de> serde::de::Visitor<'de> for EnumVisitor {
-                type Value = ResponseInner;
+            impl<'de, const N: usize> serde::de::Visitor<'de> for EnumVisitor<N> {
+                type Value = ResponseInner<N>;
 
                 fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("enum ResponseInner")
@@ -737,7 +737,7 @@ mod serde_impls {
                     }
                 }
             }
-            deserializer.deserialize_enum("ResponseInner", VARIANTS, EnumVisitor)
+            deserializer.deserialize_enum("ResponseInner", VARIANTS, EnumVisitor::<N>)
         }
     }
 }

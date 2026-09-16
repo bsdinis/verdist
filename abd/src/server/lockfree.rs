@@ -99,25 +99,67 @@ pub struct LockfreeIds {
 /// expected size` compile error, not a silently-accepted assumption. (Verified empirically before
 /// writing this: a deliberately-wrong `global size_of` value fails `cargo verus verify -p abd`
 /// with exactly that error, without needing `--compile`.) The value is exec fields only --
-/// `value: Option<u64>` (16 bytes) + `timestamp: Timestamp` (24 bytes, 3x u64) + `seq: u64` (8
-/// bytes) = 48 bytes total, align 8; the three `Tracked<_>` fields are zero-sized regardless of
-/// their type parameter (`PhantomData`'s auto-trait/layout behavior).
+/// `value: Option<[u8; N]>` (`N + 1` bytes, no niche available for a byte array so `Option` adds
+/// a plain discriminant byte) + `timestamp: Timestamp` (24 bytes, 3x u64, padded up to `value`'s
+/// 8-byte-aligned boundary) + `seq: u64` (8 bytes) -- for `N == 4096` (this crate's current fixed
+/// register-value size) that is 4136 bytes total, align 8; measured empirically (`rustc`, not
+/// reasoned about) the same way the original `Option<u64>`-sized 48/8 fact was, since `Option`'s
+/// layout for a byte-array payload is not something to guess at. The three `Tracked<_>` fields are
+/// zero-sized regardless of their type parameter (`PhantomData`'s auto-trait/layout behavior).
 #[repr(C)]
-pub struct RegisterSnapshot {
-    pub value: Option<u64>,
+#[verifier::reject_recursive_types(N)]
+pub struct RegisterSnapshot<const N: usize> {
+    pub value: Option<[u8; N]>,
     pub timestamp: Timestamp,
     pub seq: u64,
     /// `LowerBound{timestamp}` -- a duplicate peeled off the authority's half at publish time.
     pub lb: Tracked<MonotonicTimestampResource>,
     /// `key == timestamp, value == value` -- this write's commitment.
-    pub commitment: Tracked<WriteCommitment>,
+    pub commitment: Tracked<WriteCommitment<N>>,
     /// `key == seq, value == timestamp` -- this snapshot's entry in `pub_seq`'s ledger.
     pub ledger_frag: Tracked<GhostPersistentPointsTo<u64, Timestamp>>,
 }
 
-global layout RegisterSnapshot is size == 48, align == 8;
+global layout RegisterSnapshot<4096> is size == 4136, align == 8;
 
-pub open spec fn snapshot_inv(ids: LockfreeIds, s: RegisterSnapshot) -> bool {
+/// `size_of::<RegisterSnapshot<N>>() != 0` for every `N`: true by inspection (the struct always
+/// carries a `timestamp: Timestamp` field of fixed nonzero size, regardless of `N` -- see the
+/// struct's own doc comment above for the full layout accounting), but not something Verus can
+/// derive on its own: `size_of` is `uninterp` (`vstd::layout`), and `global layout` facts (the
+/// mechanism used just above for `RegisterSnapshot<4096>`'s exact size/align) only apply to a
+/// fully concrete type, not a still-generic `RegisterSnapshot<N>` -- confirmed against
+/// `rust_to_vir_global.rs`'s `process_const_early`, which rejects any `global size_of`/`layout`
+/// declaration whose type still has generic params. There is also no compositional "a struct
+/// with a nonzero-size field is itself nonzero-size" lemma in `vstd::layout` to fall back on.
+///
+/// FLAGGED per this repo's rule on axioms/`external_body` (`CLAUDE.md`): this is a real, if
+/// narrow, trust addition -- an `external_body` proof function whose `ensures` is trusted, not
+/// checked, by Verus. It is not asserting something false (the fact IS true for every `N`, by
+/// direct inspection of the struct's own fields), but it IS new trust this file did not
+/// previously require, added specifically to keep the lock-free backend generic over the
+/// register's value size. The axiom-free alternative -- pinning `RegisterSnapshot`/
+/// `EpochMonotonicRegister` to one concrete `N` and splitting `create_server` into a fully
+/// generic (`Locked`-only) path plus a separate, monomorphic (`Lockfree`-capable) one -- was
+/// prototyped and rejected for this pass: it forces `RegisterStore::read`/`read_timestamp`/
+/// `write` to return `GetResponse<N>`/`WriteResponse` etc. in the `Locked` arm while the
+/// `Lockfree` arm can only ever produce `GetResponse<4096>` -- a genuine type mismatch no trait
+/// bound can bridge, requiring `create_server`/`RegisterService`/`RegisterStore` (and their
+/// `abd-example`/`abd-bench` callers) to split into separate generic/monomorphic entry points --
+/// a materially larger, riskier change to already-verified proof code than this one lemma.
+#[verifier::external_body]
+pub proof fn lemma_register_snapshot_size_nonzero<const N: usize>()
+    ensures
+        vstd::layout::size_of::<RegisterSnapshot<N>>() > 0,
+        // `core::mem::size_of::<T>()` used in spec position resolves to `size_of_as_usize::<T>()`
+        // (`vstd::layout.rs`), whose own `recommends` is exactly this recast-equality -- every
+        // real type's size fits in a `usize` on any real platform, but that isn't automatic for
+        // an arbitrary `uninterp size_of::<V>() -> nat` without a caller-established fact.
+        vstd::layout::size_of::<RegisterSnapshot<N>>() as usize as int
+            == vstd::layout::size_of::<RegisterSnapshot<N>>(),
+{
+}
+
+pub open spec fn snapshot_inv<const N: usize>(ids: LockfreeIds, s: RegisterSnapshot<N>) -> bool {
     &&& s.lb@@ is LowerBound
     &&& s.lb@@.timestamp() == s.timestamp
     &&& s.lb@.loc() == ids.resource_loc
@@ -133,8 +175,8 @@ pub open spec fn snapshot_inv(ids: LockfreeIds, s: RegisterSnapshot) -> bool {
 /// module docs): every value ever published through `data` satisfies `snapshot_inv` against
 /// *this* register's `ids`. The first five clauses of `snapshot_inv` are exactly `GetResponse::inv`
 /// (`proto/get.rs`), so `GetResponse::new`'s `requires` discharge straight off a pinned snapshot.
-pub open spec fn snapshot_content(ids: LockfreeIds) -> spec_fn(RegisterSnapshot) -> bool {
-    |s: RegisterSnapshot| snapshot_inv(ids, s)
+pub open spec fn snapshot_content<const N: usize>(ids: LockfreeIds) -> spec_fn(RegisterSnapshot<N>) -> bool {
+    |s: RegisterSnapshot<N>| snapshot_inv(ids, s)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -183,16 +225,17 @@ impl AtomicInvariantPredicate<(), bool, ()> for GateTrivialPred {
 /// any guard -- `observe` never returns while still holding a pin (see its own doc comment).
 /// Private carrier, not part of the public protocol.
 #[allow(dead_code)]
-struct Observed {
-    value: Option<u64>,
+#[verifier::reject_recursive_types(N)]
+struct Observed<const N: usize> {
+    value: Option<[u8; N]>,
     timestamp: Timestamp,
     seq: u64,
     lb: Tracked<MonotonicTimestampResource>,
-    commitment: Tracked<WriteCommitment>,
+    commitment: Tracked<WriteCommitment<N>>,
     ledger_frag: Tracked<GhostPersistentPointsTo<u64, Timestamp>>,
 }
 
-impl Observed {
+impl<const N: usize> Observed<N> {
     #[allow(dead_code)]
     spec fn inv(self, ids: LockfreeIds) -> bool {
         &&& self.lb@@ is LowerBound
@@ -211,9 +254,10 @@ impl Observed {
 // 5.3: the register
 // ---------------------------------------------------------------------------------------------
 #[allow(dead_code)]
-pub struct EpochMonotonicRegister<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub struct EpochMonotonicRegister<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     ids: Ghost<LockfreeIds>,
     // Plain exec copy of `ids@.id`, tied back to it by `inv()` below -- needed because `write`
@@ -222,7 +266,7 @@ pub struct EpochMonotonicRegister<ML, RL> where
     // that `read`/`read_timestamp` get away with). Mirrors `MonotonicRegisterInner`'s own `id:
     // u64` field + `id()` spec fn split (`register.rs`).
     id: u64,
-    data: EpochAtomicPtr<RegisterSnapshot>,
+    data: EpochAtomicPtr<RegisterSnapshot<N>>,
     // `EpochAtomicPtr::num_readers` is a `closed spec fn` (`vlib/src/reclaim/atomic_ptr.rs`) --
     // there is no exec-callable way to ask `data` how many reader slots it has. `read` /
     // `read_timestamp` need an actual runtime `usize` to reduce `shard_idx` into range (design
@@ -232,12 +276,12 @@ pub struct EpochMonotonicRegister<ML, RL> where
     pub_seq: AtomicU64<LockfreeIds, PubState, PubPred>,
     gate: AtomicBool<(), (), GateTrivialPred>,
     server_token: Tracked<ServerToken>,
-    state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+    state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
 }
 
-impl<ML, RL> EpochMonotonicRegister<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> EpochMonotonicRegister<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     #[verifier::type_invariant]
     closed spec fn inv(self) -> bool {
@@ -283,7 +327,7 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
 
     pub fn new(
         server_id: u64,
-        state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+        state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
         num_readers: usize,
         num_slots: usize,
     ) -> (r: Self)
@@ -390,7 +434,10 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
         };
         assert(snapshot_inv(ids, initial_snapshot));
 
-        let data = EpochAtomicPtr::<RegisterSnapshot>::new(
+        proof {
+            lemma_register_snapshot_size_nonzero::<N>();
+        }
+        let data = EpochAtomicPtr::<RegisterSnapshot<N>>::new(
             initial_snapshot,
             num_slots,
             num_readers,
@@ -419,7 +466,7 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
     /// `EpochGuard` across the `pub_seq` load (`validate`) or a publish (`write`), matching design
     /// doc section 5.4's "never hold a guard across the CAS or the publish".
     #[allow(dead_code)]
-    fn observe(&self, ridx: usize) -> (r: Observed)
+    fn observe(&self, ridx: usize) -> (r: Observed<N>)
         requires
             self.inv(),
             ridx < self.data.num_readers(),
@@ -527,7 +574,7 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
     // stream of publishes landing exactly between this reader's `observe` and its `pub_seq`
     // load, never a safety concern.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn read(&self, shard_idx: usize, mut req: GetRequest) -> (r: GetResponse)
+    pub fn read(&self, shard_idx: usize, mut req: GetRequest) -> (r: GetResponse<N>)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),
@@ -577,7 +624,7 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
         // the loop's isolation boundary at all. `resp_opt` itself carries no proof weight beyond
         // "was actually assigned"; all its content comes from the `ensures` clause.
         #[allow(unused_assignments)]
-        let mut resp_opt: Option<GetResponse> = None;
+        let mut resp_opt: Option<GetResponse<N>> = None;
         loop
             invariant
                 ridx < self.data.num_readers(),
@@ -756,7 +803,7 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
     // forever, and the retry loop only fails to terminate under a sustained stream of publishes
     // landing exactly between this writer's `observe` and its CAS.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn write(&self, shard_idx: usize, req: WriteRequest) -> (r: WriteResponse)
+    pub fn write(&self, shard_idx: usize, req: WriteRequest<N>) -> (r: WriteResponse)
         requires
             req.servers().locs().contains_key(self.id()),
             req.servers().locs()[self.id()] == self.resource_loc(),
@@ -1009,6 +1056,9 @@ impl<ML, RL> EpochMonotonicRegister<ML, RL> where
                         ledger_frag: Tracked(frag),
                     };
                     assert(snapshot_inv(self.ids@, snap));
+                    proof {
+                        lemma_register_snapshot_size_nonzero::<N>();
+                    }
                     // Publish only after the invariant above has closed -- `EpochAtomicPtr::write`
                     // opens namespace-0 invariants itself, and no `EpochGuard` is held here (see
                     // `observe`'s doc comment: it always `unpin()`s before returning).

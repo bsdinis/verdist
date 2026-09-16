@@ -18,28 +18,30 @@ use vstd::resource::Loc;
 verus! {
 
 #[allow(dead_code)]
-pub struct CompletedWrite<ML: MutLinearizer<RegisterWrite>> {
+#[verifier::reject_recursive_types(N)]
+pub struct CompletedWrite<const N: usize, ML: MutLinearizer<RegisterWrite<N>>> {
     completion: ML::Completion,
-    op: RegisterWrite,
-    commitment: WriteCommitment,
+    op: RegisterWrite<N>,
+    commitment: WriteCommitment<N>,
     ghost lin: ML,
     ghost timestamp: Timestamp,
 }
 
 #[allow(dead_code)]
-pub struct CompletedRead<RL: ReadLinearizer<RegisterRead>> {
+#[verifier::reject_recursive_types(N)]
+pub struct CompletedRead<const N: usize, RL: ReadLinearizer<RegisterRead<N>>> {
     completion: RL::Completion,
-    op: RegisterRead,
+    op: RegisterRead<N>,
     ghost lin: RL,
-    ghost value: Option<u64>,
+    ghost value: Option<[u8; N]>,
     ghost timestamp: Timestamp,
 }
 
-impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
+impl<const N: usize, ML: MutLinearizer<RegisterWrite<N>>> CompletedWrite<N, ML> {
     pub proof fn new(
         tracked completion: ML::Completion,
-        tracked op: RegisterWrite,
-        tracked commitment: WriteCommitment,
+        tracked op: RegisterWrite<N>,
+        tracked commitment: WriteCommitment<N>,
         lin: ML,
         timestamp: Timestamp,
     ) -> (tracked r: Self)
@@ -72,7 +74,7 @@ impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
         self.completion
     }
 
-    pub closed spec fn op(self) -> RegisterWrite {
+    pub closed spec fn op(self) -> RegisterWrite<N> {
         self.op
     }
 
@@ -80,11 +82,11 @@ impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
         self.timestamp
     }
 
-    pub open spec fn value(self) -> Option<u64> {
+    pub open spec fn value(self) -> Option<[u8; N]> {
         self.op().new_value
     }
 
-    pub closed spec fn commitment(self) -> WriteCommitment {
+    pub closed spec fn commitment(self) -> WriteCommitment<N> {
         self.commitment
     }
 
@@ -96,7 +98,7 @@ impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
         self.commitment().id()
     }
 
-    pub proof fn duplicate_commitment(tracked &mut self) -> (tracked r: WriteCommitment)
+    pub proof fn duplicate_commitment(tracked &mut self) -> (tracked r: WriteCommitment<N>)
         ensures
             final(self).timestamp() == old(self).timestamp(),
             final(self).value() == old(self).value(),
@@ -113,7 +115,7 @@ impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
         self.commitment.duplicate()
     }
 
-    pub proof fn maybe(tracked self) -> (tracked r: MaybeWriteLinearized<ML, ML::Completion>)
+    pub proof fn maybe(tracked self) -> (tracked r: MaybeWriteLinearized<N, ML, ML::Completion>)
         ensures
             r.inv(),
             r == (MaybeWriteLinearized::Completion {
@@ -142,12 +144,12 @@ impl<ML: MutLinearizer<RegisterWrite>> CompletedWrite<ML> {
     }
 }
 
-impl<RL: ReadLinearizer<RegisterRead>> CompletedRead<RL> {
+impl<const N: usize, RL: ReadLinearizer<RegisterRead<N>>> CompletedRead<N, RL> {
     pub proof fn new(
         tracked completion: RL::Completion,
-        tracked op: RegisterRead,
+        tracked op: RegisterRead<N>,
         lin: RL,
-        value: Option<u64>,
+        value: Option<[u8; N]>,
         timestamp: Timestamp,
     ) -> (tracked r: Self)
         requires
@@ -175,7 +177,7 @@ impl<RL: ReadLinearizer<RegisterRead>> CompletedRead<RL> {
         self.completion
     }
 
-    pub closed spec fn op(self) -> RegisterRead {
+    pub closed spec fn op(self) -> RegisterRead<N> {
         self.op
     }
 
@@ -183,7 +185,7 @@ impl<RL: ReadLinearizer<RegisterRead>> CompletedRead<RL> {
         self.timestamp
     }
 
-    pub closed spec fn value(self) -> Option<u64> {
+    pub closed spec fn value(self) -> Option<[u8; N]> {
         self.value
     }
 
@@ -191,10 +193,10 @@ impl<RL: ReadLinearizer<RegisterRead>> CompletedRead<RL> {
         self.op().id@
     }
 
-    pub proof fn maybe(tracked self) -> (tracked r: MaybeReadLinearized<RL, RL::Completion>)
+    pub proof fn maybe(tracked self) -> (tracked r: MaybeReadLinearized<N, RL, RL::Completion>)
         ensures
             r.inv(),
-            r == (MaybeReadLinearized::<RL, RL::Completion>::Completion {
+            r == (MaybeReadLinearized::<N, RL, RL::Completion>::Completion {
                 completion: self.completion(),
                 op: self.op(),
                 lin: self.lin(),

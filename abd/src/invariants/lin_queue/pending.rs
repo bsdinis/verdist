@@ -24,12 +24,12 @@ use vstd::resource::Loc;
 verus! {
 
 #[allow(dead_code)]
-pub enum WriteStatus {
-    Allocated { allocation: WriteAllocation },
-    Committed { commitment: WriteCommitment },
+pub enum WriteStatus<const N: usize> {
+    Allocated { allocation: WriteAllocation<N> },
+    Committed { commitment: WriteCommitment<N> },
 }
 
-impl WriteStatus {
+impl<const N: usize> WriteStatus<N> {
     pub open spec fn id(self) -> Loc {
         match self {
             WriteStatus::Allocated { allocation } => allocation.id(),
@@ -44,14 +44,14 @@ impl WriteStatus {
         }
     }
 
-    pub open spec fn value(self) -> Option<u64> {
+    pub open spec fn value(self) -> Option<[u8; N]> {
         match self {
             WriteStatus::Allocated { allocation } => allocation.value(),
             WriteStatus::Committed { commitment } => commitment.value(),
         }
     }
 
-    proof fn allocated(tracked allocation: WriteAllocation) -> (tracked r: WriteStatus)
+    proof fn allocated(tracked allocation: WriteAllocation<N>) -> (tracked r: WriteStatus<N>)
         ensures
             r is Allocated,
             r->allocation == allocation,
@@ -77,7 +77,7 @@ impl WriteStatus {
         WriteStatus::Committed { commitment }
     }
 
-    proof fn duplicate(tracked self) -> (tracked r: (Self, WriteCommitment))
+    proof fn duplicate(tracked self) -> (tracked r: (Self, WriteCommitment<N>))
         requires
             self is Committed,
         ensures
@@ -99,7 +99,7 @@ impl WriteStatus {
         }
     }
 
-    proof fn tracked_destruct_commitment(tracked self) -> (tracked r: WriteCommitment)
+    proof fn tracked_destruct_commitment(tracked self) -> (tracked r: WriteCommitment<N>)
         requires
             self is Committed,
         ensures
@@ -112,7 +112,7 @@ impl WriteStatus {
         }
     }
 
-    proof fn tracked_destruct_allocation(tracked self) -> (tracked r: WriteAllocation)
+    proof fn tracked_destruct_allocation(tracked self) -> (tracked r: WriteAllocation<N>)
         requires
             self is Allocated,
         ensures
@@ -127,25 +127,27 @@ impl WriteStatus {
 }
 
 #[allow(dead_code)]
-pub struct PendingWrite<ML: MutLinearizer<RegisterWrite>> {
+#[verifier::reject_recursive_types(N)]
+pub struct PendingWrite<const N: usize, ML: MutLinearizer<RegisterWrite<N>>> {
     lin: ML,
-    op: RegisterWrite,
-    write_status: WriteStatus,
+    op: RegisterWrite<N>,
+    write_status: WriteStatus<N>,
     ghost timestamp: Timestamp,
 }
 
 #[allow(dead_code)]
-pub struct PendingRead<RL: ReadLinearizer<RegisterRead>> {
+#[verifier::reject_recursive_types(N)]
+pub struct PendingRead<const N: usize, RL: ReadLinearizer<RegisterRead<N>>> {
     lin: RL,
-    op: RegisterRead,
-    ghost value: Option<u64>,
+    op: RegisterRead<N>,
+    ghost value: Option<[u8; N]>,
 }
 
-impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
+impl<const N: usize, ML: MutLinearizer<RegisterWrite<N>>> PendingWrite<N, ML> {
     pub proof fn new(
         tracked lin: ML,
-        tracked op: RegisterWrite,
-        tracked allocation: WriteAllocation,
+        tracked op: RegisterWrite<N>,
+        tracked allocation: WriteAllocation<N>,
         timestamp: Timestamp,
     ) -> (tracked result: Self)
         requires
@@ -187,7 +189,7 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
         self.lin
     }
 
-    pub closed spec fn op(self) -> RegisterWrite {
+    pub closed spec fn op(self) -> RegisterWrite<N> {
         self.op
     }
 
@@ -195,11 +197,11 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
         self.timestamp
     }
 
-    pub open spec fn value(self) -> Option<u64> {
+    pub open spec fn value(self) -> Option<[u8; N]> {
         self.op().new_value
     }
 
-    pub closed spec fn write_status(self) -> WriteStatus {
+    pub closed spec fn write_status(self) -> WriteStatus<N> {
         self.write_status
     }
 
@@ -215,7 +217,7 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
         self.lin().namespaces()
     }
 
-    pub proof fn commit(tracked self) -> (tracked r: (Self, WriteCommitment))
+    pub proof fn commit(tracked self) -> (tracked r: (Self, WriteCommitment<N>))
         ensures
             r.0.lin() == self.lin(),
             r.0.op() == self.op(),
@@ -235,9 +237,9 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
 
     pub proof fn apply_linearizer(
         tracked self,
-        tracked register: &mut GhostVarAuth<Option<u64>>,
+        tracked register: &mut GhostVarAuth<Option<[u8; N]>>,
         timestamp: Timestamp,
-    ) -> (tracked r: CompletedWrite<ML>)
+    ) -> (tracked r: CompletedWrite<N, ML>)
         requires
             self.write_status() is Committed,
             self.register_id() == old(register).id(),
@@ -265,11 +267,11 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
     }
 
     pub proof fn maybe(tracked self) -> (tracked r: (
-        MaybeWriteLinearized<ML, ML::Completion>,
-        Option<WriteAllocation>,
+        MaybeWriteLinearized<N, ML, ML::Completion>,
+        Option<WriteAllocation<N>>,
     ))
         ensures
-            r.0 == (MaybeWriteLinearized::<ML, ML::Completion>::Linearizer {
+            r.0 == (MaybeWriteLinearized::<N, ML, ML::Completion>::Linearizer {
                 lin: self.lin(),
                 op: self.op(),
                 timestamp: self.timestamp(),
@@ -300,11 +302,11 @@ impl<ML: MutLinearizer<RegisterWrite>> PendingWrite<ML> {
     }
 }
 
-impl<RL: ReadLinearizer<RegisterRead>> PendingRead<RL> {
+impl<const N: usize, RL: ReadLinearizer<RegisterRead<N>>> PendingRead<N, RL> {
     pub proof fn new(
         tracked lin: RL,
-        tracked op: RegisterRead,
-        value: Option<u64>,
+        tracked op: RegisterRead<N>,
+        value: Option<[u8; N]>,
     ) -> (tracked result: Self)
         requires
             lin.namespaces().finite(),
@@ -335,11 +337,11 @@ impl<RL: ReadLinearizer<RegisterRead>> PendingRead<RL> {
         self.lin
     }
 
-    pub closed spec fn op(self) -> RegisterRead {
+    pub closed spec fn op(self) -> RegisterRead<N> {
         self.op
     }
 
-    pub closed spec fn value(self) -> Option<u64> {
+    pub closed spec fn value(self) -> Option<[u8; N]> {
         self.value
     }
 
@@ -353,9 +355,9 @@ impl<RL: ReadLinearizer<RegisterRead>> PendingRead<RL> {
 
     pub proof fn apply_linearizer(
         tracked self,
-        tracked register: &GhostVarAuth<Option<u64>>,
+        tracked register: &GhostVarAuth<Option<[u8; N]>>,
         timestamp: Timestamp,
-    ) -> (tracked r: CompletedRead<RL>)
+    ) -> (tracked r: CompletedRead<N, RL>)
         requires
             self.register_id() == register.id(),
             self.value() == register@,
@@ -372,10 +374,10 @@ impl<RL: ReadLinearizer<RegisterRead>> PendingRead<RL> {
         CompletedRead::new(completion, self.op, lin_copy, self.value, timestamp)
     }
 
-    pub proof fn maybe(tracked self) -> (tracked r: MaybeReadLinearized<RL, RL::Completion>)
+    pub proof fn maybe(tracked self) -> (tracked r: MaybeReadLinearized<N, RL, RL::Completion>)
         ensures
             r.inv(),
-            r == (MaybeReadLinearized::<RL, RL::Completion>::Linearizer {
+            r == (MaybeReadLinearized::<N, RL, RL::Completion>::Linearizer {
                 lin: self.lin(),
                 op: self.op(),
                 value: self.value(),

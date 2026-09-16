@@ -10,32 +10,32 @@ use vstd::resource::ghost_var::GhostVarAuth;
 
 verus! {
 
-pub enum MaybeWriteLinearized<ML, MC> {
-    Linearizer { lin: ML, ghost op: RegisterWrite, ghost timestamp: Timestamp },
+pub enum MaybeWriteLinearized<const N: usize, ML, MC> {
+    Linearizer { lin: ML, ghost op: RegisterWrite<N>, ghost timestamp: Timestamp },
     Completion {
         completion: MC,
-        ghost op: RegisterWrite,
+        ghost op: RegisterWrite<N>,
         ghost timestamp: Timestamp,
         ghost lin: ML,
     },
 }
 
-pub enum MaybeReadLinearized<RL, RC> {
-    Linearizer { lin: RL, ghost op: RegisterRead, ghost value: Option<u64> },
-    Completion { completion: RC, ghost op: RegisterRead, ghost value: Option<u64>, ghost lin: RL },
+pub enum MaybeReadLinearized<const N: usize, RL, RC> {
+    Linearizer { lin: RL, ghost op: RegisterRead<N>, ghost value: Option<[u8; N]> },
+    Completion { completion: RC, ghost op: RegisterRead<N>, ghost value: Option<[u8; N]>, ghost lin: RL },
 }
 
-impl<ML: MutLinearizer<RegisterWrite>> MaybeWriteLinearized<ML, ML::Completion> {
+impl<const N: usize, ML: MutLinearizer<RegisterWrite<N>>> MaybeWriteLinearized<N, ML, ML::Completion> {
     pub proof fn linearizer(
         tracked lin: ML,
-        op: RegisterWrite,
+        op: RegisterWrite<N>,
         timestamp: Timestamp,
     ) -> (tracked result: Self)
         requires
             lin.namespaces().finite(),
             lin.pre(op),
         ensures
-            result == (MaybeWriteLinearized::<ML, ML::Completion>::Linearizer {
+            result == (MaybeWriteLinearized::<N, ML, ML::Completion>::Linearizer {
                 lin,
                 op,
                 timestamp,
@@ -58,7 +58,7 @@ impl<ML: MutLinearizer<RegisterWrite>> MaybeWriteLinearized<ML, ML::Completion> 
         }
     }
 
-    pub open spec fn op(self) -> RegisterWrite {
+    pub open spec fn op(self) -> RegisterWrite<N> {
         match self {
             MaybeWriteLinearized::Linearizer { op, .. } => op,
             MaybeWriteLinearized::Completion { op, .. } => op,
@@ -93,17 +93,17 @@ impl<ML: MutLinearizer<RegisterWrite>> MaybeWriteLinearized<ML, ML::Completion> 
     }
 }
 
-impl<RL: ReadLinearizer<RegisterRead>> MaybeReadLinearized<RL, RL::Completion> {
+impl<const N: usize, RL: ReadLinearizer<RegisterRead<N>>> MaybeReadLinearized<N, RL, RL::Completion> {
     pub proof fn linearizer(
         tracked lin: RL,
-        op: RegisterRead,
-        value: Option<u64>,
+        op: RegisterRead<N>,
+        value: Option<[u8; N]>,
     ) -> (tracked result: Self)
         requires
             lin.namespaces().finite(),
             lin.pre(op),
         ensures
-            result == (MaybeReadLinearized::<RL, RL::Completion>::Linearizer { lin, op, value }),
+            result == (MaybeReadLinearized::<N, RL, RL::Completion>::Linearizer { lin, op, value }),
             result.inv(),
     {
         MaybeReadLinearized::Linearizer { lin, op, value }
@@ -126,14 +126,14 @@ impl<RL: ReadLinearizer<RegisterRead>> MaybeReadLinearized<RL, RL::Completion> {
         }
     }
 
-    pub open spec fn op(self) -> RegisterRead {
+    pub open spec fn op(self) -> RegisterRead<N> {
         match self {
             MaybeReadLinearized::Linearizer { op, .. } => op,
             MaybeReadLinearized::Completion { op, .. } => op,
         }
     }
 
-    pub open spec fn value(self) -> Option<u64> {
+    pub open spec fn value(self) -> Option<[u8; N]> {
         match self {
             MaybeReadLinearized::Linearizer { value, .. } => value,
             MaybeReadLinearized::Completion { value, .. } => value,

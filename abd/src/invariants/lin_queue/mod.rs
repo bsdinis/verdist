@@ -93,26 +93,27 @@ impl<ML, RL> InsertError<ML, RL> {
 }
 
 #[allow(dead_code)]
-pub struct LinearizationQueue<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub struct LinearizationQueue<const N: usize, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     // commitment to values
-    committed_to: GhostPersistentSubmap<Timestamp, Option<u64>>,
+    committed_to: GhostPersistentSubmap<Timestamp, Option<[u8; N]>>,
     // completed operations
-    completed_writes: Map<Timestamp, CompletedWrite<ML>>,
+    completed_writes: Map<Timestamp, CompletedWrite<N, ML>>,
     // completed operations
-    completed_reads: Map<(Option<u64>, nat), CompletedRead<RL>>,
+    completed_reads: Map<(Option<[u8; N]>, nat), CompletedRead<N, RL>>,
     // pending operations
-    pending_writes: Map<Timestamp, PendingWrite<ML>>,
+    pending_writes: Map<Timestamp, PendingWrite<N, ML>>,
     // completed operations
-    pending_reads: Map<(Option<u64>, nat), PendingRead<RL>>,
+    pending_reads: Map<(Option<[u8; N]>, nat), PendingRead<N, RL>>,
     // Why we need a token maps in addition to the completed + pending operations
     //
     // The values in the completed + pending are possibly all changed with apply_linearizer
     // This would require all Tokens to be passed, which is impossible
-    write_token_map: GhostMapAuth<Timestamp, WriteTokenVal<ML>>,
-    read_token_map: GhostMapAuth<(Option<u64>, nat), ReadTokenVal<RL>>,
+    write_token_map: GhostMapAuth<Timestamp, WriteTokenVal<N, ML>>,
+    read_token_map: GhostMapAuth<(Option<[u8; N]>, nat), ReadTokenVal<N, RL>>,
     // counter for next read op
     next_read_op: nat,
     // everything up to the watermark is guaranteed to be applied
@@ -121,19 +122,21 @@ pub struct LinearizationQueue<ML, RL> where
     ghost register_id: Loc,
 }
 
-pub type LinWriteToken<ML> = GhostPointsTo<Timestamp, WriteTokenVal<ML>>;
+pub type LinWriteToken<const N: usize, ML> = GhostPointsTo<Timestamp, WriteTokenVal<N, ML>>;
 
-pub type LinReadToken<RL> = GhostPointsTo<(Option<u64>, nat), ReadTokenVal<RL>>;
+pub type LinReadToken<const N: usize, RL> = GhostPointsTo<(Option<[u8; N]>, nat), ReadTokenVal<N, RL>>;
 
-pub struct ReadTokenVal<RL> {
+#[verifier::reject_recursive_types(N)]
+pub struct ReadTokenVal<const N: usize, RL> {
     pub ghost lin: RL,
-    pub ghost op: RegisterRead,
+    pub ghost op: RegisterRead<N>,
     pub tracked min_ts: MonotonicTimestampResource,
 }
 
-pub struct WriteTokenVal<ML> {
+#[verifier::reject_recursive_types(N)]
+pub struct WriteTokenVal<const N: usize, ML> {
     pub ghost lin: ML,
-    pub ghost op: RegisterWrite,
+    pub ghost op: RegisterWrite<N>,
     pub ghost committed: bool,
 }
 
@@ -146,9 +149,9 @@ pub struct LinQueueIds {
 }
 
 // Specs
-impl<ML, RL> LinearizationQueue<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> LinearizationQueue<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     // basic invariant
     // - always true, asserts facts that are always true
@@ -206,7 +209,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 
     pub closed spec fn read_tok_inv(&self) -> bool {
-        forall|key: (Option<u64>, nat)| #[trigger]
+        forall|key: (Option<[u8; N]>, nat)| #[trigger]
             self.read_token_map@.contains_key(key) ==> {
                 let tok = self.read_token_map@[key];
                 &&& key.1 < self.next_read_op
@@ -217,7 +220,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 
     pub closed spec fn read_completed_inv(&self) -> bool {
-        forall|key: (Option<u64>, nat)| #[trigger]
+        forall|key: (Option<[u8; N]>, nat)| #[trigger]
             self.completed_reads.contains_key(key) ==> {
                 let comp = self.completed_reads[key];
                 let token = self.read_token_map@[key];
@@ -254,7 +257,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         &&& self.read_dom_composition()
         &&& self.read_tok_inv()
         &&& self.read_completed_inv()
-        &&& forall|key: (Option<u64>, nat)| #[trigger]
+        &&& forall|key: (Option<[u8; N]>, nat)| #[trigger]
             self.pending_reads.contains_key(key) ==> {
                 let pending = self.pending_reads[key];
                 let token = self.read_token_map@[key];
@@ -316,7 +319,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         self.watermark@.timestamp()
     }
 
-    pub closed spec fn current_value(self) -> Option<u64>
+    pub closed spec fn current_value(self) -> Option<[u8; N]>
         recommends
             self.basic_inv(),
     {
@@ -330,49 +333,49 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         self.committed_values().dom().union(self.pending_writes().dom())
     }
 
-    pub closed spec fn committed_values(self) -> Map<Timestamp, Option<u64>>
+    pub closed spec fn committed_values(self) -> Map<Timestamp, Option<[u8; N]>>
         recommends
             self.inv(),
     {
         self.committed_to@
     }
 
-    pub closed spec fn outstanding_writes(self) -> Map<Timestamp, WriteTokenVal<ML>>
+    pub closed spec fn outstanding_writes(self) -> Map<Timestamp, WriteTokenVal<N, ML>>
         recommends
             self.inv(),
     {
         self.write_token_map@
     }
 
-    pub closed spec fn outstanding_reads(self) -> Map<(Option<u64>, nat), ReadTokenVal<RL>>
+    pub closed spec fn outstanding_reads(self) -> Map<(Option<[u8; N]>, nat), ReadTokenVal<N, RL>>
         recommends
             self.inv(),
     {
         self.read_token_map@
     }
 
-    pub closed spec fn pending_writes(self) -> Map<Timestamp, PendingWrite<ML>>
+    pub closed spec fn pending_writes(self) -> Map<Timestamp, PendingWrite<N, ML>>
         recommends
             self.inv(),
     {
         self.pending_writes
     }
 
-    pub closed spec fn completed_writes(self) -> Map<Timestamp, CompletedWrite<ML>>
+    pub closed spec fn completed_writes(self) -> Map<Timestamp, CompletedWrite<N, ML>>
         recommends
             self.inv(),
     {
         self.completed_writes
     }
 
-    pub closed spec fn pending_reads(self) -> Map<(Option<u64>, nat), PendingRead<RL>>
+    pub closed spec fn pending_reads(self) -> Map<(Option<[u8; N]>, nat), PendingRead<N, RL>>
         recommends
             self.inv(),
     {
         self.pending_reads
     }
 
-    pub closed spec fn completed_reads(self) -> Map<(Option<u64>, nat), CompletedRead<RL>>
+    pub closed spec fn completed_reads(self) -> Map<(Option<[u8; N]>, nat), CompletedRead<N, RL>>
         recommends
             self.inv(),
     {
@@ -394,7 +397,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 
     /// Show that if we have a write token for a key, then it exists
-    pub proof fn lemma_write_token(tracked &self, tracked token: &LinWriteToken<ML>)
+    pub proof fn lemma_write_token(tracked &self, tracked token: &LinWriteToken<N, ML>)
         requires
             self.inv(),
             token.id() == self.write_token_id(),
@@ -409,7 +412,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 
     /// Show that if we have a read token for a key, then it exists
-    pub proof fn lemma_read_token(tracked &self, tracked token: &LinReadToken<RL>)
+    pub proof fn lemma_read_token(tracked &self, tracked token: &LinReadToken<N, RL>)
         requires
             self.inv(),
             token.id() == self.read_token_id(),
@@ -426,7 +429,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     /// Get the tracked submap that corresponds to the committed_values
     pub proof fn tracked_committed_values(tracked &self) -> (tracked r: &GhostPersistentSubmap<
         Timestamp,
-        Option<u64>,
+        Option<[u8; N]>,
     >)
         requires
             self.inv(),
@@ -449,22 +452,22 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 }
 
-impl<ML, RL> LinearizationQueue<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> LinearizationQueue<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    pub proof fn new(register_id: Loc, tracked zero_commitment: WriteCommitment) -> (tracked result:
+    pub proof fn new(register_id: Loc, tracked zero_commitment: WriteCommitment<N>) -> (tracked result:
         Self)
         requires
             zero_commitment.key() == Timestamp::spec_default(),
-            zero_commitment.value() == None::<u64>,
+            zero_commitment.value() == None::<[u8; N]>,
         ensures
             result.inv(),
             result.register_id() == register_id,
             result.committed_to_id() == zero_commitment.id(),
             result.watermark() == Timestamp::spec_default(),
-            result.committed_values() == map![Timestamp::spec_default() => None::<u64>],
-            result.current_value() == None::<u64>,
+            result.committed_values() == map![Timestamp::spec_default() => None::<[u8; N]>],
+            result.current_value() == None::<[u8; N]>,
             result.outstanding_reads().is_empty(),
             result.outstanding_writes().is_empty(),
             result.pending_reads().is_empty(),
@@ -499,10 +502,10 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     pub proof fn insert_write_linearizer(
         tracked &mut self,
         tracked lin: ML,
-        tracked op: RegisterWrite,
+        tracked op: RegisterWrite<N>,
         timestamp: Timestamp,
-        tracked allocation_opt: Option<WriteAllocation>,
-    ) -> (tracked r: Result<LinWriteToken<ML>, InsertError<ML, RL>>)
+        tracked allocation_opt: Option<WriteAllocation<N>>,
+    ) -> (tracked r: Result<LinWriteToken<N, ML>, InsertError<ML, RL>>)
         requires
             old(self).inv(),
             lin.pre(op),
@@ -581,10 +584,10 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     pub proof fn insert_read_linearizer(
         tracked &mut self,
         tracked lin: RL,
-        tracked op: RegisterRead,
-        value: Option<u64>,
-        tracked register: &GhostVarAuth<Option<u64>>,
-    ) -> (tracked token: LinReadToken<RL>)
+        tracked op: RegisterRead<N>,
+        value: Option<[u8; N]>,
+        tracked register: &GhostVarAuth<Option<[u8; N]>>,
+    ) -> (tracked token: LinReadToken<N, RL>)
         requires
             old(self).inv(),
             lin.pre(op),
@@ -649,8 +652,8 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
 
     pub proof fn commit_value(
         tracked &mut self,
-        tracked write_token: &mut LinWriteToken<ML>,
-    ) -> (tracked r: WriteCommitment)
+        tracked write_token: &mut LinWriteToken<N, ML>,
+    ) -> (tracked r: WriteCommitment<N>)
         requires
             old(self).inv(),
             old(write_token).id() == old(self).write_token_id(),
@@ -718,32 +721,32 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         self.pending_writes.dom().lemma_len_filter(|ts: Timestamp| ts <= max_timestamp);
     }
 
-    pub open spec fn pending_reads_with_value(self, value: Option<u64>) -> (r: Set<
-        (Option<u64>, nat),
+    pub open spec fn pending_reads_with_value(self, value: Option<[u8; N]>) -> (r: Set<
+        (Option<[u8; N]>, nat),
     >)
         recommends
             self.inv() || self.current_value() == value,
     {
-        self.pending_reads().dom().filter(|k: (Option<u64>, nat)| k.0 == value)
+        self.pending_reads().dom().filter(|k: (Option<[u8; N]>, nat)| k.0 == value)
     }
 
-    proof fn lemma_pending_reads(self, value: Option<u64>)
+    proof fn lemma_pending_reads(self, value: Option<[u8; N]>)
         requires
             self.inv() || self.current_value() == value,
         ensures
             self.pending_reads_with_value(value) <= self.pending_reads.dom(),
             self.pending_reads_with_value(value).len() <= self.pending_reads.dom().len(),
-            forall|x: (Option<u64>, nat)| #[trigger]
+            forall|x: (Option<[u8; N]>, nat)| #[trigger]
                 self.pending_reads_with_value(value).contains(x) ==> x.0 == value,
     {
-        self.pending_reads.dom().lemma_len_filter(|k: (Option<u64>, nat)| k.0 == value);
+        self.pending_reads.dom().lemma_len_filter(|k: (Option<[u8; N]>, nat)| k.0 == value);
         lemma_len_subset(self.pending_reads_with_value(value), self.pending_reads.dom());
     }
 
     /// Applies the linearizer for all operations prophecized to <= timestamp
     pub proof fn apply_linearizers_up_to(
         tracked &mut self,
-        tracked register: &mut GhostVarAuth<Option<u64>>,
+        tracked register: &mut GhostVarAuth<Option<[u8; N]>>,
         max_timestamp: Timestamp,
     ) -> (tracked r: MonotonicTimestampResource)
         requires
@@ -837,8 +840,8 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
 
     proof fn apply_read_linearizers_at_value(
         tracked &mut self,
-        tracked register: &GhostVarAuth<Option<u64>>,
-        value: Option<u64>,
+        tracked register: &GhostVarAuth<Option<[u8; N]>>,
+        value: Option<[u8; N]>,
     )
         requires
             register.id() == old(self).register_id,
@@ -870,7 +873,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         let pending_reads = self.pending_reads_with_value(value);
         self.lemma_pending_reads(value);
         if pending_reads.len() == 0 {
-            assert forall|key: (Option<u64>, nat)| #[trigger]
+            assert forall|key: (Option<[u8; N]>, nat)| #[trigger]
                 self.pending_reads.contains_key(key) implies {
                 let pending = self.pending_reads[key];
                 let token = self.read_token_map@[key];
@@ -900,7 +903,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
         }
         assert(!pending_reads.is_empty());
 
-        let next_key = choose|k: (Option<u64>, nat)| pending_reads.contains(k);
+        let next_key = choose|k: (Option<[u8; N]>, nat)| pending_reads.contains(k);
 
         // take linearizer, apply, move watermark, place in completed
         let tracked pending = self.pending_reads.tracked_remove(next_key);
@@ -923,7 +926,7 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     /// Return the completion of the write at timestamp - removing it from the sequence
     pub proof fn extract_write_completion(
         tracked &mut self,
-        tracked token: LinWriteToken<ML>,
+        tracked token: LinWriteToken<N, ML>,
         tracked resource: MonotonicTimestampResource,
     ) -> (tracked r: ML::Completion)
         requires
@@ -963,10 +966,10 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     /// Return the completion of a read at the timestamp - removing it from the sequence
     pub proof fn extract_read_completion(
         tracked &mut self,
-        tracked token: LinReadToken<RL>,
+        tracked token: LinReadToken<N, RL>,
         exec_timestamp: Timestamp,
         tracked resource: MonotonicTimestampResource,
-        tracked mut commitment: WriteCommitment,
+        tracked mut commitment: WriteCommitment<N>,
     ) -> (tracked r: RL::Completion)
         requires
             old(self).inv(),
@@ -1011,8 +1014,8 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     /// Remove the linearizer/completion from the queue (for error cases)
     pub proof fn remove_write_lin(
         tracked &mut self,
-        tracked token: LinWriteToken<ML>,
-    ) -> (tracked r: (MaybeWriteLinearized<ML, ML::Completion>, Option<WriteAllocation>))
+        tracked token: LinWriteToken<N, ML>,
+    ) -> (tracked r: (MaybeWriteLinearized<N, ML, ML::Completion>, Option<WriteAllocation<N>>))
         requires
             old(self).inv(),
             token.id() == old(self).write_token_id(),
@@ -1066,8 +1069,8 @@ impl<ML, RL> LinearizationQueue<ML, RL> where
     }
 
     /// Remove the linearizer/completion from the queue (for error cases)
-    pub proof fn remove_read_lin(tracked &mut self, tracked token: LinReadToken<RL>) -> (tracked r:
-        MaybeReadLinearized<RL, RL::Completion>)
+    pub proof fn remove_read_lin(tracked &mut self, tracked token: LinReadToken<N, RL>) -> (tracked r:
+        MaybeReadLinearized<N, RL, RL::Completion>)
         requires
             old(self).inv(),
             token.id() == old(self).read_token_id(),

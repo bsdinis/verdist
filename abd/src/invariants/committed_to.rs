@@ -17,18 +17,19 @@ use vstd::prelude::*;
 
 verus! {
 
-pub type WriteCommitment = GhostPersistentPointsTo<Timestamp, Option<u64>>;
+pub type WriteCommitment<const N: usize> = GhostPersistentPointsTo<Timestamp, Option<[u8; N]>>;
 
-pub type WriteAllocation = GhostPointsTo<Timestamp, Option<u64>>;
+pub type WriteAllocation<const N: usize> = GhostPointsTo<Timestamp, Option<[u8; N]>>;
 
-pub type CommitmentAuthMap = GhostMapAuth<Timestamp, Option<u64>>;
+pub type CommitmentAuthMap<const N: usize> = GhostMapAuth<Timestamp, Option<[u8; N]>>;
 
 pub type ClientCtrToken = GhostPointsTo<u64, (u64, int)>;
 
 #[allow(dead_code)]
-pub tracked struct Commitments {
-    commitment_auth: GhostMapAuth<Timestamp, Option<u64>>,
-    zero_commitment: WriteCommitment,
+#[verifier::reject_recursive_types(N)]
+pub tracked struct Commitments<const N: usize> {
+    commitment_auth: GhostMapAuth<Timestamp, Option<[u8; N]>>,
+    zero_commitment: WriteCommitment<N>,
     client_ctr_auth: GhostMapAuth<u64, (u64, int)>,
     client_perm: Map<u64, PermissionU64>,
     zero_client: ClientCtrToken,
@@ -40,13 +41,13 @@ pub struct CommitmentIds {
     pub client_ctr_id: Loc,
 }
 
-impl Commitments {
+impl<const N: usize> Commitments<N> {
     #[verifier::type_invariant]
     pub closed spec fn inv(self) -> bool {
         &&& self.commitment_auth@.contains_pair(Timestamp::spec_default(), None)
         &&& self.zero_commitment.id() == self.commitment_auth.id()
         &&& self.zero_commitment.key() == Timestamp::spec_default()
-        &&& self.zero_commitment.value() == None::<u64>
+        &&& self.zero_commitment.value() == None::<[u8; N]>
         &&& *self.missing_perm is None ==> { self.client_ctr_auth@.dom() == self.client_perm.dom() }
         &&& *self.missing_perm is Some ==> {
             let missing_client = self.missing_perm->Some_0.0;
@@ -96,7 +97,7 @@ impl Commitments {
         self.client_ctr_auth.id()
     }
 
-    pub closed spec fn allocated(self) -> Map<Timestamp, Option<u64>> {
+    pub closed spec fn allocated(self) -> Map<Timestamp, Option<[u8; N]>> {
         self.commitment_auth.view()
     }
 
@@ -108,12 +109,12 @@ impl Commitments {
         self.client_perm
     }
 
-    pub proof fn new(tracked zero_perm: PermissionU64) -> (tracked r: Commitments)
+    pub proof fn new(tracked zero_perm: PermissionU64) -> (tracked r: Commitments<N>)
         requires
             zero_perm.value() == 1,
         ensures
             r.is_full(),
-            r.allocated() == map![Timestamp::spec_default() => None::<u64>],
+            r.allocated() == map![Timestamp::spec_default() => None::<[u8; N]>],
             r.client_map() == map![0u64 => (1u64, zero_perm.id())],
             r.client_perm() == map![0u64 => zero_perm],
     {
@@ -132,7 +133,7 @@ impl Commitments {
         let tracked mut client_perm = Map::tracked_empty();
         client_perm.tracked_insert(0u64, zero_perm);
 
-        let tracked commitments = Commitments {
+        let tracked commitments = Commitments::<N> {
             commitment_auth,
             zero_commitment: zero_commitment.persist(),
             client_ctr_auth,
@@ -143,11 +144,11 @@ impl Commitments {
         commitments
     }
 
-    pub proof fn zero_commitment(tracked &self) -> (tracked r: WriteCommitment)
+    pub proof fn zero_commitment(tracked &self) -> (tracked r: WriteCommitment<N>)
         ensures
             r.id() == self.commitment_id(),
             r.key() == Timestamp::spec_default(),
-            r.value() == None::<u64>,
+            r.value() == None::<[u8; N]>,
     {
         use_type_invariant(self);
         self.zero_commitment.duplicate()
@@ -279,9 +280,9 @@ impl Commitments {
         tracked &mut self,
         tracked client_token: &mut ClientCtrToken,
         timestamp: Timestamp,
-        value: Option<u64>,
+        value: Option<[u8; N]>,
         tracked client_perm: PermissionU64,
-    ) -> (tracked r: WriteAllocation)
+    ) -> (tracked r: WriteAllocation<N>)
         requires
             !old(self).is_full(),
             old(client_token).id() == old(self).client_map_id(),
@@ -330,13 +331,13 @@ impl Commitments {
         tracked perm_map: &mut Map<u64, PermissionU64>,
         tracked ctr_auth: &mut GhostMapAuth<u64, (u64, int)>,
         tracked missing_perm: &mut Ghost<Option<(u64, int)>>,
-        tracked commitment_auth: &mut GhostMapAuth<Timestamp, Option<u64>>,
+        tracked commitment_auth: &mut GhostMapAuth<Timestamp, Option<[u8; N]>>,
         tracked zero_client: &ClientCtrToken,
         tracked client_token: &mut ClientCtrToken,
         timestamp: Timestamp,
-        value: Option<u64>,
+        value: Option<[u8; N]>,
         tracked client_perm: PermissionU64,
-    ) -> (tracked r: WriteAllocation)
+    ) -> (tracked r: WriteAllocation<N>)
         requires
             *old(missing_perm) == Some((old(client_token).key(), client_perm.id())),
             old(client_token).id() == old(ctr_auth).id(),
@@ -449,7 +450,7 @@ impl Commitments {
         tracked perm_map: &mut Map<u64, PermissionU64>,
         tracked ctr_auth: &mut GhostMapAuth<u64, (u64, int)>,
         tracked missing_perm: &mut Ghost<Option<(u64, int)>>,
-        tracked commitment_auth: &mut GhostMapAuth<Timestamp, Option<u64>>,
+        tracked commitment_auth: &mut GhostMapAuth<Timestamp, Option<[u8; N]>>,
         tracked zero_client: &ClientCtrToken,
         tracked client_token: &mut ClientCtrToken,
         tracked client_perm: PermissionU64,
@@ -499,7 +500,7 @@ impl Commitments {
         *missing_perm = Ghost(None);
     }
 
-    pub proof fn agree_commitment(tracked &self, tracked commitment: &WriteCommitment)
+    pub proof fn agree_commitment(tracked &self, tracked commitment: &WriteCommitment<N>)
         requires
             self.is_full(),
             commitment.id() == self.commitment_id(),
@@ -512,7 +513,7 @@ impl Commitments {
 
     pub proof fn agree_commitment_submap(
         tracked &self,
-        tracked commitments: &GhostPersistentSubmap<Timestamp, Option<u64>>,
+        tracked commitments: &GhostPersistentSubmap<Timestamp, Option<[u8; N]>>,
     )
         requires
             self.is_full(),
@@ -524,7 +525,7 @@ impl Commitments {
         commitments.agree(&self.commitment_auth);
     }
 
-    pub proof fn agree_allocation(tracked &self, tracked allocation: &WriteAllocation)
+    pub proof fn agree_allocation(tracked &self, tracked allocation: &WriteAllocation<N>)
         requires
             self.is_full(),
             allocation.id() == self.commitment_id(),
@@ -537,7 +538,7 @@ impl Commitments {
 
     pub proof fn remove_allocation(
         tracked &mut self,
-        tracked allocation: WriteAllocation,
+        tracked allocation: WriteAllocation<N>,
         tracked client_ctr_token: &ClientCtrToken,
     )
         requires

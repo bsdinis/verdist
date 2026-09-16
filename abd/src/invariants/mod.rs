@@ -66,18 +66,19 @@ pub struct StatePredicate {
     pub server_tokens_id: Loc,
 }
 
-pub struct State<ML, RL> where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead> {
-    pub tracked register: GhostVarAuth<Option<u64>>,
-    pub tracked linearization_queue: LinearizationQueue<ML, RL>,
+#[verifier::reject_recursive_types(N)]
+pub struct State<const N: usize, ML, RL> where ML: MutLinearizer<RegisterWrite<N>>, RL: ReadLinearizer<RegisterRead<N>> {
+    pub tracked register: GhostVarAuth<Option<[u8; N]>>,
+    pub tracked linearization_queue: LinearizationQueue<N, ML, RL>,
     pub tracked servers: ServerUniverseAuth,
     pub tracked server_tokens: GhostMonotonicMap<u64, Loc>,
-    pub tracked commitments: Commitments,
-    pub tracked request_map: RequestMap,
+    pub tracked commitments: Commitments<N>,
+    pub tracked request_map: RequestMap<N>,
 }
 
-impl<ML, RL> State<ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> State<N, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pub open spec fn unclaimed_servers(self) -> Set<u64> {
         self.servers.dom().difference(self.server_tokens@.dom())
@@ -124,10 +125,10 @@ impl<ML, RL> State<ML, RL> where
 /// Re-establishes `state.inv()` itself: callers only need to open the state invariant, call this,
 /// and use the returned triple -- no bookkeeping of their own is required to close the invariant
 /// back up.
-pub proof fn claim_server<ML, RL>(tracked state: &mut State<ML, RL>, server_id: u64) -> (tracked r:
-    (MonotonicTimestampResource, ServerToken, WriteCommitment)) where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+pub proof fn claim_server<const N: usize, ML, RL>(tracked state: &mut State<N, ML, RL>, server_id: u64) -> (tracked r:
+    (MonotonicTimestampResource, ServerToken, WriteCommitment<N>)) where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
 
     requires
         old(state).inv(),
@@ -151,7 +152,7 @@ pub proof fn claim_server<ML, RL>(tracked state: &mut State<ML, RL>, server_id: 
         // r.2 = a duplicate of the zero commitment
         r.2.id() == final(state).commitments.commitment_id(),
         r.2.key() == Timestamp::spec_default(),
-        r.2.value() == None::<u64>,
+        r.2.value() == None::<[u8; N]>,
 {
     let tracked zero_commitment = state.commitments.zero_commitment();
 
@@ -206,11 +207,11 @@ pub proof fn claim_server<ML, RL>(tracked state: &mut State<ML, RL>, server_id: 
     (resource, server_token, zero_commitment)
 }
 
-impl<ML, RL> InvariantPredicate<StatePredicate, State<ML, RL>> for StatePredicate where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, ML, RL> InvariantPredicate<StatePredicate, State<N, ML, RL>> for StatePredicate where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    open spec fn inv(p: StatePredicate, state: State<ML, RL>) -> bool {
+    open spec fn inv(p: StatePredicate, state: State<N, ML, RL>) -> bool {
         &&& p.register_id == state.register.id()
         &&& p.lin_queue_ids == state.linearization_queue.ids()
         &&& p.server_locs == state.servers.locs()
@@ -221,24 +222,24 @@ impl<ML, RL> InvariantPredicate<StatePredicate, State<ML, RL>> for StatePredicat
     }
 }
 
-pub type StateInvariant<ML, RL> = AtomicInvariant<StatePredicate, State<ML, RL>, StatePredicate>;
+pub type StateInvariant<const N: usize, ML, RL> = AtomicInvariant<StatePredicate, State<N, ML, RL>, StatePredicate>;
 
-pub type RegisterView = GhostVar<Option<u64>>;
+pub type RegisterView<const N: usize> = GhostVar<Option<[u8; N]>>;
 
-pub proof fn initialize_system_state<ML, RL>(tracked zero_perm: PermissionU64) -> (tracked r: (
-    Arc<StateInvariant<ML, RL>>,
-    RegisterView,
-)) where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead>
+pub proof fn initialize_system_state<const N: usize, ML, RL>(tracked zero_perm: PermissionU64) -> (tracked r: (
+    Arc<StateInvariant<N, ML, RL>>,
+    RegisterView<N>,
+)) where ML: MutLinearizer<RegisterWrite<N>>, RL: ReadLinearizer<RegisterRead<N>>
     requires
         zero_perm.value() == 1,
     ensures
         r.0.namespace() == state_inv_id(),
         r.0.constant().register_id == r.1.id(),
 {
-    let tracked (register, view) = GhostVarAuth::<Option<u64>>::new(None);
+    let tracked (register, view) = GhostVarAuth::<Option<[u8; N]>>::new(None);
     let tracked servers = ServerUniverseAuth::dummy();
-    let tracked commitments = Commitments::new(zero_perm);
-    let tracked request_map = RequestMap::new();
+    let tracked commitments = Commitments::<N>::new(zero_perm);
+    let tracked request_map = RequestMap::<N>::new();
     let tracked zero_commitment = commitments.zero_commitment();
     let tracked mut linearization_queue = LinearizationQueue::new(register.id(), zero_commitment);
     let tracked server_tokens = GhostMonotonicMap::empty();
@@ -279,10 +280,10 @@ pub proof fn initialize_system_state<ML, RL>(tracked zero_perm: PermissionU64) -
     (Arc::new(state_inv), view)
 }
 
-pub axiom fn get_system_state<ML, RL>(server_ids: Set<u64>) -> (tracked r: (
-    Arc<StateInvariant<ML, RL>>,
-    RegisterView,
-)) where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead>
+pub axiom fn get_system_state<const N: usize, ML, RL>(server_ids: Set<u64>) -> (tracked r: (
+    Arc<StateInvariant<N, ML, RL>>,
+    RegisterView<N>,
+)) where ML: MutLinearizer<RegisterWrite<N>>, RL: ReadLinearizer<RegisterRead<N>>
     ensures
         r.0.namespace() == state_inv_id(),
         r.0.constant().register_id == r.1.id(),

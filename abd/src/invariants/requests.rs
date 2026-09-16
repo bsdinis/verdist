@@ -27,20 +27,20 @@ verus! {
 
 /// Proof of a particular request being issued by some client
 /// The key is (client_id, request_id)
-pub tracked struct RequestProof {
+pub tracked struct RequestProof<const N: usize> {
     #[allow(unused)]
-    tracked r: GhostPersistentPointsTo<(u64, u64), RequestInner>,
+    tracked r: GhostPersistentPointsTo<(u64, u64), RequestInner<N>>,
     #[allow(unused)]
-    tracked inner: RequestInner,
+    tracked inner: RequestInner<N>,
 }
 
-impl RequestProof {
+impl<const N: usize> RequestProof<N> {
     #[verifier::type_invariant]
     pub closed spec fn inv(self) -> bool {
         self.r.value().spec_eq(self.inner)
     }
 
-    pub closed spec fn view(self) -> RequestInner {
+    pub closed spec fn view(self) -> RequestInner<N> {
         self.r.value()
     }
 
@@ -70,7 +70,7 @@ impl RequestProof {
         self@->GetTimestamp_0
     }
 
-    pub open spec fn write(self) -> WriteRequest
+    pub open spec fn write(self) -> WriteRequest<N>
         recommends
             self.req_type() is Write,
     {
@@ -89,12 +89,12 @@ impl RequestProof {
         assert(r.value().spec_eq(self.inner));
         let tracked inner = self.inner.duplicate();
         assert(self.inner.spec_eq(inner));
-        RequestInner::spec_eq_trans(r.value(), self.inner, inner);
+        RequestInner::<N>::spec_eq_trans(r.value(), self.inner, inner);
         assert(r.value().spec_eq(inner));
-        RequestProof { r, inner }
+        RequestProof::<N> { r, inner }
     }
 
-    pub proof fn agree(tracked &self, tracked auth: &RequestMapAuth)
+    pub proof fn agree(tracked &self, tracked auth: &RequestMapAuth<N>)
         requires
             self.id() == auth.id(),
         ensures
@@ -127,7 +127,7 @@ impl RequestProof {
         ensures
             #[trigger] a.spec_eq(a),
     {
-        RequestInner::spec_eq_refl(a.r.value());
+        RequestInner::<N>::spec_eq_refl(a.r.value());
     }
 
     pub broadcast proof fn spec_eq_symm(a: Self, b: Self)
@@ -138,7 +138,7 @@ impl RequestProof {
         ensures
             b.spec_eq(a),
     {
-        RequestInner::spec_eq_symm(a.r.value(), b.r.value());
+        RequestInner::<N>::spec_eq_symm(a.r.value(), b.r.value());
     }
 
     pub broadcast proof fn spec_eq_trans(a: Self, b: Self, c: Self)
@@ -151,11 +151,11 @@ impl RequestProof {
         ensures
             a.spec_eq(c),
     {
-        RequestInner::spec_eq_trans(a.r.value(), b.r.value(), c.r.value());
+        RequestInner::<N>::spec_eq_trans(a.r.value(), b.r.value(), c.r.value());
     }
 }
 
-pub type RequestMapAuth = GhostMapAuth<(u64, u64), RequestInner>;
+pub type RequestMapAuth<const N: usize> = GhostMapAuth<(u64, u64), RequestInner<N>>;
 
 pub type RequestCtrToken = GhostPointsTo<u64, (u64, int)>;
 
@@ -167,9 +167,10 @@ pub type RequestCtrToken = GhostPointsTo<u64, (u64, int)>;
 ///     - [`RequestMap::take_permission`] to extract the permission to update an AtomicU64
 ///     - [`RequestMap::issue_request_proof`] to create the request proof, returning the permission
 #[allow(unused)]
-pub struct RequestMap {
+#[verifier::reject_recursive_types(N)]
+pub struct RequestMap<const N: usize> {
     /// Map of (client_id, request_id) to the request
-    request_auth: RequestMapAuth,
+    request_auth: RequestMapAuth<N>,
     /// Per client permission, a map from client_id to max seen request_id and id of the permission
     request_ctr_auth: GhostMapAuth<u64, (u64, int)>,
     /// Map from client_id to permission id for the generator request_id (a AtomicU64)
@@ -197,8 +198,8 @@ spec fn ctr_perm_agree(
         }
 }
 
-spec fn request_auth_inv(
-    request_auth: RequestMapAuth,
+spec fn request_auth_inv<const N: usize>(
+    request_auth: RequestMapAuth<N>,
     request_ctr_auth: GhostMapAuth<u64, (u64, int)>,
 ) -> bool {
     forall|cid_rid: (u64, u64)| #[trigger]
@@ -208,7 +209,7 @@ spec fn request_auth_inv(
         }
 }
 
-impl RequestMap {
+impl<const N: usize> RequestMap<N> {
     #[verifier::type_invariant]
     pub closed spec fn inv(self) -> bool {
         &&& *self.missing_perm is None ==> { self.request_ctr_auth@.dom() == self.request_perm.dom()
@@ -247,7 +248,7 @@ impl RequestMap {
         self.request_ctr_auth.id()
     }
 
-    pub closed spec fn issued(self) -> Map<(u64, u64), RequestInner> {
+    pub closed spec fn issued(self) -> Map<(u64, u64), RequestInner<N>> {
         self.request_auth.view()
     }
 
@@ -259,7 +260,7 @@ impl RequestMap {
         self.request_perm
     }
 
-    pub proof fn new() -> (tracked r: RequestMap)
+    pub proof fn new() -> (tracked r: RequestMap<N>)
         ensures
             r.is_full(),
             r.issued().is_empty(),
@@ -391,9 +392,9 @@ impl RequestMap {
         tracked &mut self,
         tracked client_token: &mut RequestCtrToken,
         request_id: u64,
-        tracked request: RequestInner,
+        tracked request: RequestInner<N>,
         tracked client_perm: PermissionU64,
-    ) -> (tracked r: RequestProof)
+    ) -> (tracked r: RequestProof<N>)
         requires
             !old(self).is_full(),
             old(client_token).id() == old(self).request_ctr_map_id(),
@@ -438,7 +439,7 @@ impl RequestMap {
             request,
             client_perm,
         );
-        RequestInner::spec_eq_refl(proof@);
+        RequestInner::<N>::spec_eq_refl(proof@);
         proof
     }
 
@@ -446,12 +447,12 @@ impl RequestMap {
         tracked perm_map: &mut Map<u64, PermissionU64>,
         tracked ctr_auth: &mut GhostMapAuth<u64, (u64, int)>,
         tracked missing_perm: &mut Ghost<Option<(u64, int)>>,
-        tracked request_auth: &mut RequestMapAuth,
+        tracked request_auth: &mut RequestMapAuth<N>,
         tracked client_token: &mut RequestCtrToken,
         request_id: u64,
-        tracked request: RequestInner,
+        tracked request: RequestInner<N>,
         tracked request_perm: PermissionU64,
-    ) -> (tracked r: RequestProof)
+    ) -> (tracked r: RequestProof<N>)
         requires
             *old(missing_perm) == Some((old(client_token).key(), request_perm.id())),
             old(client_token).id() == old(ctr_auth).id(),
@@ -495,13 +496,13 @@ impl RequestMap {
         perm_map.tracked_insert(client_token.key(), request_perm);
         *missing_perm = Ghost(None);
         let ghost req = request;
-        RequestInner::spec_eq_refl(req);
+        RequestInner::<N>::spec_eq_refl(req);
         assert(req.spec_eq(request));
         let tracked r = request_auth.insert((client_token.key(), request_id), req).persist();
-        RequestProof { r, inner: request }
+        RequestProof::<N> { r, inner: request }
     }
 
-    pub proof fn agree_proof(tracked &self, tracked proof: &RequestProof)
+    pub proof fn agree_proof(tracked &self, tracked proof: &RequestProof<N>)
         requires
             proof.id() == self.request_map_id(),
         ensures

@@ -13,20 +13,24 @@ pub trait RegisterError<L, Op> {
     spec fn err_ensures(self, op: Op, lin: L) -> bool;
 }
 
-pub type ReadReturn<Timestamp, Completion> = (Option<u64>, Timestamp, Tracked<Completion>);
+pub type ReadReturn<const N: usize, Timestamp, Completion> = (
+    Option<[u8; N]>,
+    Timestamp,
+    Tracked<Completion>,
+);
 
 // NOTE: LIMITATION
 // - The MutLinearizer should be specified in the method
 // - Type problem: the linearization queue is parametrized by the linearizer type
 // - Polymorphism is hard
 #[allow(dead_code)]
-pub trait LinRegisterClient<C, ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+pub trait LinRegisterClient<const N: usize, C, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    type ReadErr: RegisterError<RL, RegisterRead>;
+    type ReadErr: RegisterError<RL, RegisterRead<N>>;
 
-    type WriteErr: RegisterError<ML, RegisterWrite>;
+    type WriteErr: RegisterError<ML, RegisterWrite<N>>;
 
     type Timestamp;
 
@@ -39,7 +43,7 @@ pub trait LinRegisterClient<C, ML, RL> where
     spec fn inv(self) -> bool;
 
     fn read(&mut self, lin: Tracked<RL>) -> (r: Result<
-        ReadReturn<Self::Timestamp, RL::Completion>,
+        ReadReturn<N, Self::Timestamp, RL::Completion>,
         Self::ReadErr,
     >)
         requires
@@ -72,7 +76,7 @@ pub trait LinRegisterClient<C, ML, RL> where
     // lock/atomic-invariant-guarded token instead of a plain field -- a real restructuring of
     // the write path's proof, not a signature tweak, so it is left as a documented limitation
     // rather than forced through here.
-    fn write(&mut self, value: Option<u64>, lin: Tracked<ML>) -> (r: Result<
+    fn write(&mut self, value: Option<[u8; N]>, lin: Tracked<ML>) -> (r: Result<
         Tracked<ML::Completion>,
         Self::WriteErr,
     >)
@@ -99,21 +103,21 @@ pub trait LinRegisterClient<C, ML, RL> where
     ;
 }
 
-pub struct RegisterRead {
+pub struct RegisterRead<const N: usize> {
     /// resource location
     pub id: Ghost<Loc>,
 }
 
-pub struct RegisterWrite {
+pub struct RegisterWrite<const N: usize> {
     /// resource location
     pub id: Ghost<Loc>,
-    pub new_value: Option<u64>,
+    pub new_value: Option<[u8; N]>,
 }
 
-impl ReadOperation for RegisterRead {
-    type Resource = GhostVarAuth<Option<u64>>;
+impl<const N: usize> ReadOperation for RegisterRead<N> {
+    type Resource = GhostVarAuth<Option<[u8; N]>>;
 
-    type ExecResult = Option<u64>;
+    type ExecResult = Option<[u8; N]>;
 
     open spec fn requires(self, r: Self::Resource, e: Self::ExecResult) -> bool {
         &&& r.id() == self.id
@@ -121,25 +125,25 @@ impl ReadOperation for RegisterRead {
     }
 }
 
-pub struct OwnedReadPerm {
-    pub tracked register: GhostVar<Option<u64>>,
+pub struct OwnedReadPerm<const N: usize> {
+    pub tracked register: GhostVar<Option<[u8; N]>>,
 }
 
-impl ReadLinearizer<RegisterRead> for OwnedReadPerm {
-    type Completion = GhostVar<Option<u64>>;
+impl<const N: usize> ReadLinearizer<RegisterRead<N>> for OwnedReadPerm<N> {
+    type Completion = GhostVar<Option<[u8; N]>>;
 
     open spec fn namespaces(self) -> ISet<int> {
         ISet::empty()
     }
 
-    open spec fn pre(self, op: RegisterRead) -> bool {
+    open spec fn pre(self, op: RegisterRead<N>) -> bool {
         &&& op.id == self.register.id()
     }
 
     open spec fn post(
         self,
-        op: RegisterRead,
-        exec_res: Option<u64>,
+        op: RegisterRead<N>,
+        exec_res: Option<[u8; N]>,
         completion: Self::Completion,
     ) -> bool {
         &&& op.id == self.register.id()
@@ -150,20 +154,24 @@ impl ReadLinearizer<RegisterRead> for OwnedReadPerm {
 
     proof fn apply(
         tracked self,
-        op: RegisterRead,
-        tracked resource: &GhostVarAuth<Option<u64>>,
-        exec_res: &Option<u64>,
+        op: RegisterRead<N>,
+        tracked resource: &GhostVarAuth<Option<[u8; N]>>,
+        exec_res: &Option<[u8; N]>,
     ) -> (tracked result: Self::Completion) {
         resource.agree(&self.register);
         self.register
     }
 
-    proof fn peek(tracked &self, op: RegisterRead, tracked resource: &GhostVarAuth<Option<u64>>) {
+    proof fn peek(
+        tracked &self,
+        op: RegisterRead<N>,
+        tracked resource: &GhostVarAuth<Option<[u8; N]>>,
+    ) {
     }
 }
 
-impl MutOperation for RegisterWrite {
-    type Resource = GhostVarAuth<Option<u64>>;
+impl<const N: usize> MutOperation for RegisterWrite<N> {
+    type Resource = GhostVarAuth<Option<[u8; N]>>;
 
     type ExecResult = ();
 
@@ -189,23 +197,28 @@ impl MutOperation for RegisterWrite {
     }
 }
 
-pub struct OwnedWritePerm {
-    pub value: Option<u64>,
-    pub tracked register: GhostVar<Option<u64>>,
+pub struct OwnedWritePerm<const N: usize> {
+    pub value: Option<[u8; N]>,
+    pub tracked register: GhostVar<Option<[u8; N]>>,
 }
 
-impl MutLinearizer<RegisterWrite> for OwnedWritePerm {
-    type Completion = GhostVar<Option<u64>>;
+impl<const N: usize> MutLinearizer<RegisterWrite<N>> for OwnedWritePerm<N> {
+    type Completion = GhostVar<Option<[u8; N]>>;
 
     open spec fn namespaces(self) -> ISet<int> {
         ISet::empty()
     }
 
-    open spec fn pre(self, op: RegisterWrite) -> bool {
+    open spec fn pre(self, op: RegisterWrite<N>) -> bool {
         op.id == self.register.id()
     }
 
-    open spec fn post(self, op: RegisterWrite, exec_res: (), completion: Self::Completion) -> bool {
+    open spec fn post(
+        self,
+        op: RegisterWrite<N>,
+        exec_res: (),
+        completion: Self::Completion,
+    ) -> bool {
         &&& op.id == self.register.id()
         &&& op.id == completion.id()
         &&& op.new_value == completion@
@@ -213,8 +226,8 @@ impl MutLinearizer<RegisterWrite> for OwnedWritePerm {
 
     proof fn apply(
         tracked self,
-        op: RegisterWrite,
-        tracked resource: &mut GhostVarAuth<Option<u64>>,
+        op: RegisterWrite<N>,
+        tracked resource: &mut GhostVarAuth<Option<[u8; N]>>,
         new_state: (),
         exec_res: &(),
     ) -> (tracked result: Self::Completion) {
@@ -224,7 +237,11 @@ impl MutLinearizer<RegisterWrite> for OwnedWritePerm {
         register
     }
 
-    proof fn peek(tracked &self, op: RegisterWrite, tracked resource: &GhostVarAuth<Option<u64>>) {
+    proof fn peek(
+        tracked &self,
+        op: RegisterWrite<N>,
+        tracked resource: &GhostVarAuth<Option<[u8; N]>>,
+    ) {
     }
 }
 

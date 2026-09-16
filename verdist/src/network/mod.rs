@@ -18,6 +18,10 @@ pub mod io_uring_udp_muxed {
     pub use super::impls::io_uring_udp_muxed::*;
 }
 
+pub mod udp_ephemeral {
+    pub use super::impls::udp_ephemeral::*;
+}
+
 pub mod tcp {
     pub use super::impls::tcp::*;
 }

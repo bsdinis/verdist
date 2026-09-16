@@ -30,6 +30,18 @@ pub enum NetworkType {
     #[value(name = "udp_legacy")]
     UdpLegacy,
 
+    /// Wire-compatible with `Udp` (same client, same envelope-tagged protocol) but with a
+    /// dramatically simpler *server*: no persistent per-client `Channel` object at all, not even
+    /// `udp_muxed`'s demux table -- each datagram is received, handled, and replied to entirely
+    /// within one router thread, then completely forgotten (see
+    /// `verdist::network::udp_ephemeral`'s module doc for the soundness argument and what this
+    /// removes/changes). `--num-threads` is meaningless here -- request-handling parallelism is
+    /// `--num-router-threads` only, since there is no separate shard/worker-thread pool. Only
+    /// meaningful as `--network` for the *server*; as a client it behaves identically to `Udp`.
+    #[serde(rename = "udp_ephemeral")]
+    #[value(name = "udp_ephemeral")]
+    UdpEphemeral,
+
     /// Run with TCP connections over io_uring instead of blocking read/write syscalls (see
     /// `verdist::network::io_uring_tcp`'s design doc, `claude-files/io_uring_design.md`)
     #[serde(rename = "io_uring_tcp")]

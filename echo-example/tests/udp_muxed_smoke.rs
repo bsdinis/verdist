@@ -141,6 +141,10 @@ fn run_smoke_test(
     num_clients: u64,
     n_ops: u64,
 ) {
+    // `udp_ephemeral` never logs "accepted connection" -- there is no persistent per-client state
+    // (demux entry or otherwise) to bring into existence, by design (see `udp_ephemeral`'s module
+    // doc). Every other backend this harness drives does log it once per client.
+    let expect_accept_log = network != "udp_ephemeral";
     let mut server_args = vec![
         "--server-id".to_string(),
         "1".to_string(),
@@ -244,11 +248,16 @@ fn run_smoke_test(
     // Every client that got a connection accepted should have gotten *its own* -- no client's
     // traffic should have been silently folded into another's demux entry (which would show up
     // as fewer than `num_clients` "accepted connection" lines despite every client completing).
-    let accepted = server_stderr.matches("accepted connection").count() as u64;
-    assert_eq!(
-        accepted, num_clients,
-        "expected exactly {num_clients} implicit accepts, saw {accepted}\n--- server stderr ---\n{server_stderr}",
-    );
+    // Doesn't apply to `udp_ephemeral` (see `expect_accept_log` above): the no-cross-talk property
+    // there is instead fully established by the per-client "every op completed with the correct
+    // echoed value, no mismatch" checks above -- there is no separate accept event to also count.
+    if expect_accept_log {
+        let accepted = server_stderr.matches("accepted connection").count() as u64;
+        assert_eq!(
+            accepted, num_clients,
+            "expected exactly {num_clients} implicit accepts, saw {accepted}\n--- server stderr ---\n{server_stderr}",
+        );
+    }
 
     drop(server);
 }
@@ -282,4 +291,23 @@ fn udp_muxed_io_uring_single_socket_concurrent_clients() {
 #[test]
 fn udp_muxed_io_uring_reuseport_concurrent_clients() {
     run_smoke_test("127.0.0.1:16784".parse().unwrap(), "io_uring_udp", 4, false, 16, 20);
+}
+
+/// `udp_ephemeral` (`verdist::network::udp_ephemeral`): no persistent per-client `Channel` at all,
+/// each datagram is received/handled/replied-to and immediately forgotten. The property this
+/// harness checks (no cross-talk between concurrent clients, every op's echoed value correct) is
+/// exactly the one most at risk from a bug in that design -- e.g. two clients' one-shot channels
+/// somehow sharing a response, or a reply going to the wrong peer address.
+#[test]
+fn udp_ephemeral_single_socket_concurrent_clients() {
+    run_smoke_test("127.0.0.1:16785".parse().unwrap(), "udp_ephemeral", 1, false, 8, 20);
+}
+
+/// Same, but with several independent `SO_REUSEPORT`-sharing router threads -- unlike `udp_muxed`,
+/// flow stickiness across datagrams is *not* load-bearing here (no per-peer state persists between
+/// messages, see the module doc), so this also incidentally exercises that two consecutive
+/// datagrams from the same client landing on *different* router threads is fine.
+#[test]
+fn udp_ephemeral_reuseport_concurrent_clients() {
+    run_smoke_test("127.0.0.1:16786".parse().unwrap(), "udp_ephemeral", 4, false, 20, 50);
 }

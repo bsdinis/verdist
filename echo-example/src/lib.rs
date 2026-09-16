@@ -117,6 +117,7 @@ pub mod server {
     use echo::proto::Request;
     use echo::proto::Response;
     use echo::server::create_server;
+    use echo::server::create_service;
 
     use std::sync::Arc;
     use verdist::network::channel::Channel;
@@ -182,5 +183,17 @@ pub mod server {
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         verdist::network::udp_muxed::run_epoll(&server, raw_receivers);
+    }
+
+    /// `udp_ephemeral`'s driver has no `Listener`/`Channel`/shard machinery at all -- it takes the
+    /// bare `EchoService` directly (see `verdist::network::udp_ephemeral::run_ephemeral`'s doc) and
+    /// blocks forever running `num_router_threads`-many independent recv->handle->reply loops.
+    /// `--num-threads` has no meaning here; the only concurrency knob is `num_router_threads`.
+    pub fn run_server_ephemeral(server_id: u64, addr: std::net::SocketAddr, num_router_threads: usize) {
+        let service = create_service(server_id);
+        vlib::veprintln!("[server|{:>3}]: starting (ephemeral)", server_id);
+
+        verdist::network::udp_ephemeral::run_ephemeral(addr, service, num_router_threads)
+            .expect("run_ephemeral: error");
     }
 }

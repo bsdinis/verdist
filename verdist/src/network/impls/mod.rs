@@ -5,3 +5,4 @@ pub mod tcp;
 pub mod udp;
 pub mod udp_muxed;
 pub mod io_uring_udp_muxed;
+pub mod udp_ephemeral;

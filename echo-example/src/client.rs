@@ -46,6 +46,26 @@ fn main() {
             >(args, &connector)
             .expect("run_client: error");
         }
+        cli::NetworkType::UdpEphemeral => {
+            // Wire-identical to `Udp` from the client's point of view -- `udp_ephemeral` only
+            // changes the *server*'s internal driver, not the envelope-tagged wire protocol
+            // `udp_muxed`'s `MuxedConnector`/`MuxedServerChannel` already speak.
+            let connector = verdist::network::udp_muxed::MuxedConnector::new(
+                args.server_addr,
+                args.client_addr,
+                args.server_id,
+            )
+            .expect("failed to create connector");
+            echo_example::run_client::<
+                verdist::network::udp_muxed::MuxedServerChannel<
+                    echo::channel::ChannelInv,
+                    echo::proto::Response,
+                    echo::proto::Request,
+                >,
+                _,
+            >(args, &connector)
+            .expect("run_client: error");
+        }
         cli::NetworkType::UdpLegacy => {
             let connector = verdist::network::udp::UdpConnector::new(
                 args.server_addr,

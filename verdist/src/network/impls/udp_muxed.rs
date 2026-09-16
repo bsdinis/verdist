@@ -159,7 +159,7 @@ fn deserialize_plain<T>(buf: &[u8]) -> Result<T, std::io::Error> where for <'de>
 /// Serializes `v` into the thread-local scratch buffer and returns the encoded byte range,
 /// mirroring `udp.rs::TypedUdpSocket::send`'s reuse discipline exactly (see `SEND_BUF`'s doc).
 #[verifier::external_body]
-fn serialize_with<T: serde::Serialize, F: FnOnce(&[u8]) -> std::io::Result<()>>(
+pub(crate) fn serialize_with<T: serde::Serialize, F: FnOnce(&[u8]) -> std::io::Result<()>>(
     v: &T,
     send: F,
 ) -> std::io::Result<()> {
@@ -397,7 +397,7 @@ pub struct MuxedServerChannel<K, R, S> {
 
 impl<K, R, S> MuxedClientChannel<K, R, S> {
     #[verifier::external_body]
-    fn new(
+    pub(crate) fn new(
         pred: Ghost<K>,
         server_id: u64,
         client_id: u64,

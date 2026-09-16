@@ -52,6 +52,16 @@ fn main() {
                 echo_example::server::run_server(args.server_id, listener, num_threads);
             }
         }
+        cli::NetworkType::UdpEphemeral => {
+            if use_epoll {
+                eprintln!("server: --epoll has no effect on --network udp_ephemeral (each router thread already blocks in recv_from with no separate epoll driver); ignoring");
+            }
+            echo_example::server::run_server_ephemeral(
+                args.server_id,
+                args.server_addr,
+                args.num_router_threads,
+            );
+        }
         cli::NetworkType::UdpLegacy => {
             let listener =
                 verdist::network::udp::UdpListener::listen(args.server_addr, args.server_id)

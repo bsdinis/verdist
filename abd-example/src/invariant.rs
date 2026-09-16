@@ -16,7 +16,7 @@ use abd::invariants::StateInvariant;
 verus! {
 
 #[allow(unused, clippy::type_complexity)]
-pub fn get_invariant_state<ML, RL>(
+pub fn get_invariant_state<const N: usize, ML, RL>(
     server_ids: &Ghost<Set<u64>>,
     client_id: u64,
     client_perm: Tracked<PermissionU64>,
@@ -24,9 +24,9 @@ pub fn get_invariant_state<ML, RL>(
 ) -> (r: (
     Tracked<ClientCtrToken>,
     Tracked<RequestCtrToken>,
-    Tracked<Arc<StateInvariant<ML, RL>>>,
-    Tracked<RegisterView>,
-)) where ML: MutLinearizer<RegisterWrite>, RL: ReadLinearizer<RegisterRead>
+    Tracked<Arc<StateInvariant<N, ML, RL>>>,
+    Tracked<RegisterView<N>>,
+)) where ML: MutLinearizer<RegisterWrite<N>>, RL: ReadLinearizer<RegisterRead<N>>
     requires
         client_perm@.value() == 0,
         request_perm@.value() == 0,
@@ -46,7 +46,7 @@ pub fn get_invariant_state<ML, RL>(
     let tracked state_inv;
     let tracked view;
     proof {
-        let tracked (s, v) = abd::invariants::get_system_state::<ML, RL>(server_ids@);
+        let tracked (s, v) = abd::invariants::get_system_state::<N, ML, RL>(server_ids@);
         state_inv = s;
         view = v;
     }

@@ -43,7 +43,7 @@ fn main() {
                 .map(|server_conf| {
                     let (listener, connector) =
                         verdist::network::modelled::listen_channel(server_conf.id);
-                    server::spawn_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    server::spawn_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                         &server_ids,
                         server_conf.id,
                         listener,
@@ -53,7 +53,7 @@ fn main() {
                     connector
                 })
                 .collect::<Vec<_>>();
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            abd_example::run_client::<{ abd_example::VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
             let connectors = args
@@ -66,7 +66,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            abd_example::run_client::<{ abd_example::VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
             let connectors = args
@@ -79,7 +79,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            abd_example::run_client::<{ abd_example::VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::IoUringTcp => {
             let connectors = args
@@ -92,7 +92,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            abd_example::run_client::<{ abd_example::VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::IoUringUdp => {
             let connectors = args
@@ -109,7 +109,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            abd_example::run_client(args, &connectors).expect("run_client: error");
+            abd_example::run_client::<{ abd_example::VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
     }
 }

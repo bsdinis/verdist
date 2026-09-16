@@ -8,6 +8,10 @@ pub mod config;
 pub mod error;
 pub mod invariant;
 
+/// Register value size (bytes) this binary is built with -- see `abd_example::VALUE_SIZE`
+/// for the sizing rationale (kept in sync: both are sized against the UDP datagram ceiling).
+pub const VALUE_SIZE: usize = 4096;
+
 fn main() {
     // Opt-in only: silent with no `RUST_LOG` set (`vlib::vdebug!`/`vinfo!` short-circuit before
     // formatting anything either way, so this never costs anything during a real benchmark run);
@@ -47,7 +51,7 @@ fn main() {
                 .map(|server_conf| {
                     let (listener, connector) =
                         verdist::network::modelled::listen_channel(server_conf.id);
-                    server::spawn_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                    server::spawn_server::<{ VALUE_SIZE }, _, _, OwnedWritePerm<{ VALUE_SIZE }>, OwnedReadPerm<{ VALUE_SIZE }>>(
                         &server_ids,
                         server_conf.id,
                         listener,
@@ -58,7 +62,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            client::run_client(args, &connectors).expect("run_client: error");
+            client::run_client::<{ VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Udp => {
             let connectors = args
@@ -71,7 +75,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            client::run_client(args, &connectors).expect("run_client: error");
+            client::run_client::<{ VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::Tcp => {
             let connectors = args
@@ -84,7 +88,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            client::run_client(args, &connectors).expect("run_client: error");
+            client::run_client::<{ VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::IoUringTcp => {
             let connectors = args
@@ -97,7 +101,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            client::run_client(args, &connectors).expect("run_client: error");
+            client::run_client::<{ VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
         cli::NetworkType::IoUringUdp => {
             let connectors = args
@@ -114,7 +118,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>();
 
-            client::run_client(args, &connectors).expect("run_client: error");
+            client::run_client::<{ VALUE_SIZE }, _, _>(args, &connectors).expect("run_client: error");
         }
     }
 }
@@ -136,7 +140,7 @@ pub mod server {
 
     // Why is this unverified:
     // - major: verus does not support scoped threads (see verdist::service::Server::run)
-    pub fn spawn_server<L, C, ML, RL>(
+    pub fn spawn_server<const N: usize, L, C, ML, RL>(
         server_ids: &HashSet<u64>,
         server_id: u64,
         listener: L,
@@ -144,17 +148,17 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Send + Sync + 'static,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+        C: Channel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>
             + Send
             + Sync
             + 'static,
-        ML: MutLinearizer<RegisterWrite> + Send + 'static,
-        RL: ReadLinearizer<RegisterRead> + Send + 'static,
-        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
-        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
+        ML: MutLinearizer<RegisterWrite<N>> + Send + 'static,
+        RL: ReadLinearizer<RegisterRead<N>> + Send + 'static,
+        <ML as MutLinearizer<RegisterWrite<N>>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead<N>>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
+            create_server::<N, _, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         let server = Arc::new(server);
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
@@ -163,7 +167,7 @@ pub mod server {
         });
     }
 
-    pub fn run_server<L, C, ML, RL>(
+    pub fn run_server<const N: usize, L, C, ML, RL>(
         server_ids: &HashSet<u64>,
         server_id: u64,
         listener: L,
@@ -171,14 +175,14 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
-        ML: MutLinearizer<RegisterWrite> + Send,
-        RL: ReadLinearizer<RegisterRead> + Send,
-        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
-        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
+        C: Channel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>,
+        ML: MutLinearizer<RegisterWrite<N>> + Send,
+        RL: ReadLinearizer<RegisterRead<N>> + Send,
+        <ML as MutLinearizer<RegisterWrite<N>>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead<N>>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
+            create_server::<N, _, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run(raw_receivers);

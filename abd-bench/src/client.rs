@@ -21,56 +21,67 @@ use crate::invariant::fake_ghost;
 use crate::invariant::fake_tracked;
 use crate::invariant::get_invariant_state;
 
-fn connect<C, Conn>(connector: &Conn, client_id: u64) -> Result<BufChannel<C>, ConnectError>
+fn connect<const N: usize, C, Conn>(connector: &Conn, client_id: u64) -> Result<BufChannel<C>, ConnectError>
 where
     Conn: Connector<C>,
-    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
+    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response<N>, S = abd::proto::Request<N>>,
 {
     let channel = connector.connect(client_id, |_connector, _client_id| fake_ghost())?;
     Ok(BufChannel::new(channel))
 }
 
-fn connect_all<C, Conn>(
+fn connect_all<const N: usize, C, Conn>(
     connectors: &[Conn],
     client_id: u64,
 ) -> Result<Vec<BufChannel<C>>, ConnectError>
 where
     Conn: Connector<C>,
-    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
+    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response<N>, S = abd::proto::Request<N>>,
 {
     let mut v = Vec::with_capacity(connectors.len());
     for connector in connectors {
-        let conn = connect(connector, client_id)?;
+        let conn = connect::<N, _, _>(connector, client_id)?;
         v.push(conn);
     }
 
     Ok(v)
 }
 
-type ClientRunError =
-    Error<OwnedWritePerm, GhostVar<Option<u64>>, OwnedReadPerm, GhostVar<Option<u64>>>;
+type ClientRunError<const N: usize> =
+    Error<N, OwnedWritePerm<N>, GhostVar<Option<[u8; N]>>, OwnedReadPerm<N>, GhostVar<Option<[u8; N]>>>;
 
-pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<(), ClientRunError>
+/// Builds an `N`-byte register value carrying `v` in its leading bytes (little-endian,
+/// zero-padded/truncated to fit) -- not proof-bearing, just data construction for the
+/// benchmark's write payloads.
+fn value_from_u64<const N: usize>(v: u64) -> [u8; N] {
+    let mut bytes = [0u8; N];
+    let v_bytes = v.to_le_bytes();
+    let n = v_bytes.len().min(N);
+    bytes[..n].copy_from_slice(&v_bytes[..n]);
+    bytes
+}
+
+pub fn run_client<const N: usize, C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<(), ClientRunError<N>>
 where
     Conn: Connector<C> + Send + Sync,
     C: Channel<
         K = abd::channel::ChannelInv,
-        R = abd::proto::Response,
-        S = abd::proto::Request,
+        R = abd::proto::Response<N>,
+        S = abd::proto::Request<N>,
         Id = (u64, u64),
     >,
 {
     let (client_ctr, _) = PAtomicU64::new(0);
     let (request_ctr, _) = PAtomicU64::new(0);
     let (client_ctr_token, request_ctr_token, state_inv, _) =
-        get_invariant_state::<OwnedWritePerm, OwnedReadPerm>();
+        get_invariant_state::<N, OwnedWritePerm<N>, OwnedReadPerm<N>>();
 
-    let pool = connect_all(connectors, args.client_id)?;
+    let pool = connect_all::<N, _, _>(connectors, args.client_id)?;
     vlib::veprintln!("[client|{:>3}]: finished connecting\n", args.client_id);
     let pool = FlawlessPool::new(pool);
 
     // let tracked mut register_perm = register_perm.get();
-    let mut client = AbdPool::<_, OwnedWritePerm, OwnedReadPerm>::new(
+    let mut client = AbdPool::<N, _, OwnedWritePerm<N>, OwnedReadPerm<N>>::new(
         pool,
         args.client_id,
         client_ctr,
@@ -98,7 +109,7 @@ where
             }
             crate::cli::Operation::Write => {
                 let op_begin = std::time::Instant::now();
-                client.write(Some(n), fake_tracked()).expect("write error");
+                client.write(Some(value_from_u64::<N>(n)), fake_tracked()).expect("write error");
                 times.push(op_begin.elapsed());
                 n += 1;
             }

@@ -82,24 +82,38 @@ fn wait_until_bound(addr: SocketAddr, proto: &Proto, timeout: Duration) -> bool 
 /// `timeout`. A plain `Command::output()` (blocking, unbounded) would let a real hang in the
 /// client -- exactly one of the failure modes this test exists to catch -- wedge `cargo test`
 /// forever instead of failing the check.
-fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait().expect("failed to poll client process") {
-            Some(_status) => break,
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("abd_client did not exit within {timeout:?} (hung?)");
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+///
+/// Drains `child`'s stdout/stderr on a background thread via `wait_with_output()` (which reads
+/// both pipes concurrently with waiting, avoiding the classic pipe-deadlock: a child whose
+/// combined stdout+stderr exceeds the OS pipe buffer -- on Linux, 64 KiB -- blocks on its next
+/// write until *someone* reads, and nothing here reads until the child exits). With the
+/// register's value now a 4096-byte array logged via `vdebug!`'s `?v`/`%e` Debug/Display
+/// formatting instead of a bare `u64`, a handful of ops' worth of per-request debug logging
+/// comfortably exceeds that buffer (confirmed empirically: ~170 KB of combined output for just
+/// the 7 ops in `*_smoke.toml`, over 2.5x the pipe's capacity) -- a real, previously-latent
+/// deadlock this genericization change exposed, not the pre-existing flake this repo's `justfile`
+/// documents (that one is a true hang with no output backlog; this one is a starved reader).
+/// Polling `try_wait()` first (as this used to) never reads the pipes at all, so the child would
+/// reliably block forever on its 65 KiB-plus-th byte -- looking exactly like the flake until you
+/// check how much output was actually produced.
+fn wait_with_timeout(child: Child, timeout: Duration) -> Output {
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Errors (e.g. the receiver having already timed out and dropped) are fine to ignore --
+        // there's nothing more useful to do with them here.
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result.expect("failed to collect client output"),
+        Err(_) => {
+            // `child` itself was moved into the background thread above, so kill by PID rather
+            // than through a `Child` handle -- exact-PID `kill`, not a name/pattern-matching
+            // `pkill -f` (see `claude-docs/PROFILING.md` §2.7 for why the latter is unsafe).
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            panic!("abd_client did not exit within {timeout:?} (hung?)");
         }
     }
-    child
-        .wait_with_output()
-        .expect("failed to collect client output")
 }
 
 fn sample_config_path(name: &str) -> PathBuf {

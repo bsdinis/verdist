@@ -32,18 +32,37 @@ pub mod config;
 pub mod error;
 pub mod invariant;
 
+/// Register value size (bytes) this binary is built with. Sized well under the UDP
+/// datagram ceiling (`verdist::network::impls::udp::BUF_SIZE` = 65,507 bytes) once
+/// postcard/`Timestamp`/commitment framing overhead is accounted for, so a full-size
+/// value round-trips over every transport (TCP, UDP, and their io_uring variants)
+/// without fragmentation.
+pub const VALUE_SIZE: usize = 4096;
+
 use cli::ClientArgs;
 use error::Error;
 use invariant::get_invariant_state;
 
 verus! {
 
-fn connect<C, Conn>(connector: &Conn, client_id: u64) -> (r: Result<
+/// Builds an `N`-byte register value carrying `v` in its leading bytes (little-endian,
+/// zero-padded/truncated to fit), for the benchmark harness's write payloads. Not
+/// proof-bearing -- just data construction, no invariant depends on this encoding.
+#[verifier::external_body]
+fn value_from_usize<const N: usize>(v: u64) -> [u8; N] {
+    let mut bytes = [0u8; N];
+    let v_bytes = v.to_le_bytes();
+    let n = v_bytes.len().min(N);
+    bytes[..n].copy_from_slice(&v_bytes[..n]);
+    bytes
+}
+
+fn connect<const N: usize, C, Conn>(connector: &Conn, client_id: u64) -> (r: Result<
     BufChannel<C>,
     ConnectError,
 >) where
     Conn: Connector<C>,
-    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
+    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response<N>, S = abd::proto::Request<N>>,
 
     ensures
         r is Ok ==> r->Ok_0.spec_id() == (client_id, connector.spec_id()),
@@ -63,12 +82,12 @@ fn connect<C, Conn>(connector: &Conn, client_id: u64) -> (r: Result<
     Ok(BufChannel::new(channel))
 }
 
-fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
+fn connect_all<const N: usize, C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
     Vec<BufChannel<C>>,
     ConnectError,
 >) where
     Conn: Connector<C>,
-    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response, S = abd::proto::Request>,
+    C: Channel<Id = (u64, u64), K = ChannelInv, R = abd::proto::Response<N>, S = abd::proto::Request<N>>,
 
     requires
         forall|i: int, j: int|
@@ -104,22 +123,23 @@ fn connect_all<C, Conn>(connectors: &[Conn], client_id: u64) -> (r: Result<
     Ok(v)
 }
 
-type ClientRunError = Error<
-    OwnedWritePerm,
-    GhostVar<Option<u64>>,
-    OwnedReadPerm,
-    GhostVar<Option<u64>>,
+type ClientRunError<const N: usize> = Error<
+    N,
+    OwnedWritePerm<N>,
+    GhostVar<Option<[u8; N]>>,
+    OwnedReadPerm<N>,
+    GhostVar<Option<[u8; N]>>,
 >;
 
-pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
+pub fn run_client<const N: usize, C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
     (),
-    ClientRunError,
+    ClientRunError<N>,
 > where
     Conn: Connector<C> + Send + Sync,
     C: Channel<
         K = abd::channel::ChannelInv,
-        R = abd::proto::Response,
-        S = abd::proto::Request,
+        R = abd::proto::Response<N>,
+        S = abd::proto::Request<N>,
         Id = (u64, u64),
     >,
 
@@ -138,11 +158,12 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
     let server_ids = Ghost(args.servers@.dom());
     #[allow(unused)]
     let (client_ctr_token, request_ctr_token, state_inv, register_perm) = get_invariant_state::<
-        OwnedWritePerm,
-        OwnedReadPerm,
+        N,
+        OwnedWritePerm<N>,
+        OwnedReadPerm<N>,
     >(&server_ids, args.client_id, client_ctr_perm, request_ctr_perm);
 
-    let channels_vec = connect_all(connectors, args.client_id)?;
+    let channels_vec = connect_all::<N, _, _>(connectors, args.client_id)?;
     vlib::veprintln!("[client|{:>3}]: finished connecting\n", args.client_id);
     let pool = FlawlessPool::new(channels_vec);
     assert(pool.spec_len() == connectors.len());
@@ -164,7 +185,7 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
         });
 
     let tracked mut register_perm = register_perm.get();
-    let mut client = AbdPool::<_, OwnedWritePerm, OwnedReadPerm>::new(
+    let mut client = AbdPool::<N, _, OwnedWritePerm<N>, OwnedReadPerm<N>>::new(
         pool,
         args.client_id,
         client_ctr,
@@ -232,7 +253,7 @@ pub fn run_client<C, Conn>(args: ClientArgs, connectors: &[Conn]) -> Result<
         }
         #[allow(unused_assignments)]
         if (last_was_read && remaining_writes > 0) || remaining_reads == 0 {
-            let value = Some(remaining_writes);
+            let value = Some(value_from_usize::<N>(remaining_writes));
             let tracked write_perm = OwnedWritePerm { register: perm, value };
             let write_view = match client.write(value, Tracked(write_perm)) {
                 Ok(comp) => {
@@ -298,7 +319,7 @@ pub mod server {
 
     // Why is this unverified:
     // - major: verus does not support scoped threads (see verdist::service::Server::run)
-    pub fn spawn_server<L, C, ML, RL>(
+    pub fn spawn_server<const N: usize, L, C, ML, RL>(
         server_ids: &HashSet<u64>,
         server_id: u64,
         listener: L,
@@ -306,17 +327,17 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Send + Sync + 'static,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>
+        C: Channel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>
             + Send
             + Sync
             + 'static,
-        ML: MutLinearizer<RegisterWrite> + Send + 'static,
-        RL: ReadLinearizer<RegisterRead> + Send + 'static,
-        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
-        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
+        ML: MutLinearizer<RegisterWrite<N>> + Send + 'static,
+        RL: ReadLinearizer<RegisterRead<N>> + Send + 'static,
+        <ML as MutLinearizer<RegisterWrite<N>>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead<N>>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
+            create_server::<N, _, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         let server = Arc::new(server);
         std::thread::spawn(move || {
             vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
@@ -325,7 +346,7 @@ pub mod server {
         });
     }
 
-    pub fn run_server<L, C, ML, RL>(
+    pub fn run_server<const N: usize, L, C, ML, RL>(
         server_ids: &HashSet<u64>,
         server_id: u64,
         listener: L,
@@ -333,14 +354,14 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: Listener<C> + Sync,
-        C: Channel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
-        ML: MutLinearizer<RegisterWrite> + Send,
-        RL: ReadLinearizer<RegisterRead> + Send,
-        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
-        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
+        C: Channel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>,
+        ML: MutLinearizer<RegisterWrite<N>> + Send,
+        RL: ReadLinearizer<RegisterRead<N>> + Send,
+        <ML as MutLinearizer<RegisterWrite<N>>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead<N>>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
+            create_server::<N, _, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run(raw_receivers);
@@ -350,7 +371,7 @@ pub mod server {
     /// blocking, see §9/§10 of Performance.md) instead of `Server::run`'s backoff-based polling.
     /// Only usable with fd-backed networks (TCP/UDP) -- the in-process modelled network has no
     /// real fd, so it keeps using `run_server`/`spawn_server`.
-    pub fn run_server_epoll<L, C, ML, RL>(
+    pub fn run_server_epoll<const N: usize, L, C, ML, RL>(
         server_ids: &HashSet<u64>,
         server_id: u64,
         listener: L,
@@ -358,14 +379,14 @@ pub mod server {
         backend: abd::server::RegisterBackend,
     ) where
         L: RawFdListener<C> + Sync,
-        C: RawFdChannel<R = Request, S = Response, Id = (u64, u64), K = ChannelInv>,
-        ML: MutLinearizer<RegisterWrite> + Send,
-        RL: ReadLinearizer<RegisterRead> + Send,
-        <ML as MutLinearizer<RegisterWrite>>::Completion: Send,
-        <RL as ReadLinearizer<RegisterRead>>::Completion: Send,
+        C: RawFdChannel<R = Request<N>, S = Response<N>, Id = (u64, u64), K = ChannelInv>,
+        ML: MutLinearizer<RegisterWrite<N>> + Send,
+        RL: ReadLinearizer<RegisterRead<N>> + Send,
+        <ML as MutLinearizer<RegisterWrite<N>>>::Completion: Send,
+        <RL as ReadLinearizer<RegisterRead<N>>>::Completion: Send,
     {
         let (server, raw_receivers) =
-            create_server::<_, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
+            create_server::<N, _, _, ML, RL>(server_ids, server_id, listener, num_threads, backend);
         vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
 
         server.run_epoll(raw_receivers);

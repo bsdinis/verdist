@@ -30,7 +30,7 @@ fn main() {
             let listener = verdist::network::udp::UdpListener::listen(args.addr(), args.server_id)
                 .expect("failed to create listener");
             if args.epoll {
-                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server_epoll::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -38,7 +38,7 @@ fn main() {
                     backend,
                 );
             } else {
-                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -51,7 +51,7 @@ fn main() {
             let listener = verdist::network::tcp::TcpListener::listen(args.addr(), args.server_id)
                 .expect("failed to create listener");
             if args.epoll {
-                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server_epoll::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -59,7 +59,7 @@ fn main() {
                     backend,
                 );
             } else {
-                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -75,7 +75,7 @@ fn main() {
             )
             .expect("failed to create listener");
             if args.epoll {
-                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server_epoll::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -83,7 +83,7 @@ fn main() {
                     backend,
                 );
             } else {
-                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -99,7 +99,7 @@ fn main() {
             )
             .expect("failed to create listener");
             if args.epoll {
-                abd_example::server::run_server_epoll::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server_epoll::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,
@@ -107,7 +107,7 @@ fn main() {
                     backend,
                 );
             } else {
-                abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+                abd_example::server::run_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                     &server_ids,
                     args.server_id,
                     listener,

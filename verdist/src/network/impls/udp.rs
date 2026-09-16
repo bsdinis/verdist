@@ -1,3 +1,18 @@
+//! **Deprecated: superseded by `network::impls::udp_muxed`.** `UdpListener`/`UdpConnector` below
+//! implement UDP "connection setup" as a hand-rolled request/reply rendezvous handshake modeled on
+//! TCP's connect/accept -- a dedicated per-client socket is bound at accept time, and the client's
+//! `connect()` sends its rendezvous request exactly once with **no retransmission**, which is a
+//! real, reproducible liveness bug under high fan-out (a lost request or reply leaves that client
+//! spinning forever with no recovery path -- see the cluster investigation this crate's git
+//! history/session notes describe root-causing this to). `network::impls::udp_muxed`'s
+//! `MuxedListener`/`MuxedConnector` replace this with a connectionless design (no handshake at
+//! all -- a peer's first datagram *is* the accept, demultiplexed by source address on a shared
+//! socket) that has no equivalent bug by construction, since there is no handshake to lose.
+//!
+//! This file is kept only for reference/comparison (e.g. `--network udp_legacy` in
+//! `echo-example`/`abd-example`, still selectable for benchmarking against the new backend) -- it
+//! is not the implementation `--network udp` selects by default going forward, and is not the
+//! place to build new UDP features. New UDP work belongs in `udp_muxed.rs`.
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::net::SocketAddr;

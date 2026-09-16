@@ -1,3 +1,13 @@
+//! **Deprecated: superseded by `network::impls::io_uring_udp_muxed`.** Like `network::impls::udp`
+//! (see that file's top doc), `IoUringUdpListener`/`IoUringUdpConnector` below still implement UDP
+//! "connection setup" as a hand-rolled, no-retransmission rendezvous handshake over a dedicated
+//! per-client socket -- the same real liveness bug under high fan-out, just duplicated onto an
+//! io_uring-backed per-connection socket instead of a blocking one. `io_uring_udp_muxed.rs`
+//! replaces this with the connectionless, `RecvMsg`-demultiplexed design described in
+//! `udp_muxed.rs`'s top doc. Kept only for reference/comparison (`--network io_uring_udp_legacy`),
+//! not the implementation `--network io_uring_udp` selects by default going forward, and not the
+//! place to build new UDP+io_uring features.
+//!
 //! `IoUringUdp*` -- a new, additive `Channel`/`Listener`/`Connector` variant for UDP built on
 //! `io_uring` instead of blocking `recv`/`send` syscalls (see `network::impls::udp` for the
 //! existing, unmodified blocking-syscall version this sits alongside; nothing in that file was

@@ -18,6 +18,14 @@ pub enum NetworkType {
     /// Run with UDP connections
     Udp,
 
+    /// Run with UDP connections, but with no rendezvous handshake: the server demultiplexes a
+    /// single (or, with `--num-router-threads` > 1, several `SO_REUSEPORT`-shared) socket by
+    /// source address instead of provisioning a dedicated per-client socket at connect time (see
+    /// `verdist::network::udp_muxed`).
+    #[serde(rename = "udp_muxed")]
+    #[value(name = "udp_muxed")]
+    UdpMuxed,
+
     /// Run with TCP connections over io_uring instead of blocking read/write syscalls (see
     /// `verdist::network::io_uring_tcp`'s design doc, `claude-files/io_uring_design.md`)
     #[serde(rename = "io_uring_tcp")]
@@ -96,6 +104,13 @@ pub struct ServerArgs {
     /// --epoll; omitting --epoll already means this.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_epoll: bool,
+
+    /// (udp_muxed only) Number of independent `SO_REUSEPORT`-sharing router sockets/threads to
+    /// bind, each demultiplexing its own share of inbound traffic (see
+    /// `verdist::network::udp_muxed`). `1` (the default) binds a single socket with no
+    /// `SO_REUSEPORT` at all -- behavior is unaffected for every other `--network` value.
+    #[arg(long, default_value_t = 1)]
+    pub num_router_threads: usize,
 
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,

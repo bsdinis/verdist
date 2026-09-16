@@ -520,6 +520,24 @@ impl<S, L, C> Server<S, L, C> where
         self.service.id()
     }
 
+    /// Exposes shard `idx`'s `ShardLoad` handle so a driver *outside* this module can still call
+    /// the existing, unmodified `poll_shard`/`poll_shard_epoll` from its own worker-thread loop
+    /// instead of duplicating `Server`'s ownership-transfer/dispatch machinery -- e.g.
+    /// `network::impls::udp_muxed`'s `crossbeam_channel::Select`-based `--epoll` driver, for a
+    /// backend whose channels have no real per-connection fd to register with `mio`. Read-only,
+    /// and sound for the same reason every other per-shard method here is: whichever thread owns
+    /// shard `idx`'s `connected`/`cursor` is the only thread that ever calls `poll_shard` (and
+    /// therefore this accessor) for that index, by convention -- this doesn't change that.
+    pub fn shard_load(&self, idx: usize) -> (r: &ShardLoad)
+        requires
+            idx < self.spec_num_shards(),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        &self.shard_loads[idx]
+    }
+
     /// Picks which shard a newly-accepted connection should be routed to: fills already-active
     /// shards up to `MIN_CONNS_PER_SHARD_BEFORE_SPREADING` connections each, in shard-index
     /// order, before spreading further connections onto later shards, falling back to a plain

@@ -169,4 +169,18 @@ pub mod server {
 
         server.run_epoll(raw_receivers);
     }
+
+    /// Same role as `run_server_epoll`, but for `udp_muxed`'s backends specifically -- see
+    /// `verdist::network::udp_muxed::run_epoll`'s doc for why this backend needs its own driver
+    /// (no real per-channel fd to register with `mio`) rather than `Server::run_epoll` itself.
+    pub fn run_server_epoll_udp_muxed(
+        server_id: u64,
+        listener: verdist::network::udp_muxed::MuxedListener<Request, Response>,
+        num_threads: usize,
+    ) {
+        let (server, raw_receivers) = create_server::<_, _>(server_id, listener, num_threads);
+        vlib::veprintln!("[server|{:>3}]: starting", server.server_id());
+
+        verdist::network::udp_muxed::run_epoll(&server, raw_receivers);
+    }
 }

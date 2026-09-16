@@ -36,16 +36,29 @@
 //!   `recv`), so establishing a client's channel sends *nothing* -- the client's very first real
 //!   request is also the first datagram the server ever sees from it.
 //!
-//! Known, deliberate limitations (see the planning session for why these are follow-ups rather
-//! than blockers):
-//! - No `RawFdChannel`/`RawFdListener` impl, so `--epoll`/`Server::run_epoll` is not available for
-//!   this backend yet -- only `Server::run`'s busy-backoff driver works. A muxed channel has no
-//!   private fd (the fd belongs to its router thread's shared socket), so naively implementing
-//!   `raw_fd()` to return that shared fd would make `mio` register the same fd from every shard,
-//!   defeating `scan_ready`'s whole point (it would then treat *every* channel as ready whenever
-//!   the shared socket has anything ready). Resolving this needs shard threads to wait on their
-//!   per-channel `crossbeam_channel::Receiver` instead of per-fd epoll readiness -- flagged as a
-//!   follow-up, not attempted here.
+//! `--epoll` support: a muxed channel has no private fd (the fd belongs to its router thread's
+//! shared socket, not to any individual channel), so it cannot honestly implement
+//! `RawFdChannel`/`RawFdListener` -- naively returning the shared fd from `raw_fd()` would make
+//! `mio` register the *same* fd from every shard, defeating `Server::scan_ready`'s whole point (it
+//! would then treat every channel as ready whenever the shared socket has anything ready at all).
+//! So `--epoll` for this backend does **not** go through `verdist::service::Server::run_epoll` --
+//! instead, `run_epoll` (below, this module) is a bespoke driver built directly on `Server`'s
+//! already-public `poll_accept`/`poll_shard`/`shard_load` methods (the same ones the plain
+//! busy-backoff `Server::run` driver uses), that blocks each shard's worker thread on
+//! `crossbeam_channel::Select` over that shard's raw-connection handoff receiver plus every
+//! currently-connected channel's inbox, instead of either busy-backoff or real fd readiness. This
+//! needed one small, additive accessor on `Server` (`shard_load`) since `poll_shard` takes a
+//! `&ShardLoad` the caller has no other way to obtain -- everything else re-uses `Server` as-is.
+//!
+//! Known, deliberate limitations:
+//! - `run_epoll` spawns no background-maintenance thread (`Service::has_background_work`/
+//!   `background_tick`, which `Server::run`/`run_epoll` do support): `Service` is a private field
+//!   of `Server`, unreachable from this module, so there is no way to check
+//!   `has_background_work()` from here without a further `Server` accessor. Harmless for `echo`
+//!   (no background work) and for `abd`'s `Locked` register backend; `abd`'s `Lockfree` backend
+//!   *would* silently lose its reclaim pass under this driver -- not currently wired to
+//!   `udp_muxed` at all, but flagged here so a future combination of the two doesn't get this
+//!   wrong silently.
 //! - No idle-peer eviction: a shared, unconnected socket cannot surface an async "peer
 //!   unreachable" signal the way a connected per-client socket could (see `udp.rs`'s
 //!   `ClientChannel`, whose dedicated socket can at least in principle observe that), so a peer
@@ -377,6 +390,16 @@ impl<K, R, S> MuxedClientChannel<K, R, S> {
     ) -> Self {
         MuxedClientChannel { pred, server_id, client_id, socket, peer_addr, inbox, _marker: PhantomData }
     }
+
+    /// Exposes the channel's inbox receiver so `run_epoll` (below, outside `verus! {}`) can
+    /// register it with a `crossbeam_channel::Select` -- not part of the `Channel` trait itself
+    /// (no other backend has an equivalent receiver to expose, and ordinary `try_recv()` remains
+    /// how every backend, including this one, actually consumes a message). Carries no
+    /// ghost/invariant-relevant content of its own -- same rationale as `Listener::Raw`'s doc.
+    #[verifier::external_body]
+    pub fn ready_receiver(&self) -> &crossbeam_channel::Receiver<R> {
+        &self.inbox
+    }
 }
 
 impl<K, R, S> MuxedServerChannel<K, R, S> {
@@ -601,3 +624,74 @@ impl<K, R, S, A> Connector<MuxedServerChannel<K, R, S>> for MuxedConnector<A> wh
 }
 
 } // verus!
+
+/// How long each shard's `crossbeam_channel::Select` blocks before giving up and calling
+/// `poll_shard` anyway -- same role as `verdist::service::EPOLL_FALLBACK_MILLIS` (a safety net
+/// against a missed wakeup/race, not the primary wake mechanism: real work wakes this `Select`
+/// promptly, since it is rebuilt over the shard's *current* connection set every iteration).
+const EPOLL_FALLBACK_MILLIS: u64 = 100;
+
+/// `--epoll` driver for `udp_muxed` -- see this module's top doc for why this can't go through
+/// `verdist::service::Server::run_epoll` (no real per-channel fd to register with `mio`). Same
+/// unverifiable-for-structural-reasons category as `Server::run`/`run_epoll` themselves (scoped
+/// threads; `vstd::thread::spawn` only wraps the `'static`-owned case) -- not a new exception.
+///
+/// Thread topology mirrors `Server::run`/`run_epoll` exactly (one accept thread, one worker thread
+/// per shard); only what each worker thread blocks on differs. A worker thread rebuilds a
+/// `crossbeam_channel::Select` over (this shard's raw-connection handoff receiver, plus every
+/// currently-connected channel's inbox) every iteration and calls `Select::ready_timeout` --
+/// deliberately `ready_timeout`, not `select_timeout`: it reports *which* operand is ready without
+/// requiring the caller to *complete* it (`crossbeam_channel::SelectedOperation` panics on drop if
+/// not completed, which would mean consuming -- and having to somewhere re-stash -- the very
+/// message `poll_shard`'s ordinary `try_recv()` path is about to consume anyway). This call's only
+/// job is deciding *when* to invoke the unmodified `Server::poll_shard`, never *what* it receives.
+pub fn run_epoll<S, K, R, Resp>(
+    server: &crate::service::Server<S, MuxedListener<R, Resp>, MuxedClientChannel<K, R, Resp>>,
+    raw_receivers: Vec<crossbeam_channel::Receiver<MuxedRaw<R>>>,
+) where
+    S: crate::service::Service<Request = R, Response = Resp, ChanInv = K> + Sync,
+    K: ChannelInvariant<K, (u64, u64), R, Resp>,
+    R: Send + 'static,
+    for<'de> R: serde::Deserialize<'de>,
+    Resp: Clone + serde::Serialize,
+    // `MuxedListener<R, Resp>`'s `_marker: PhantomData<Resp>` field means `Server<..>: Sync`
+    // (needed for `&Server<..>` to cross the `std::thread::scope` closure boundary below) requires
+    // `Resp: Sync` too -- a real, harmless bound (every `Resp` this crate actually instantiates is
+    // plain data), not a design flaw, but see `Server::_marker`'s own doc for why a *field*
+    // designed this way would avoid needing it; not worth restructuring `MuxedListener` over.
+    Resp: Sync,
+{
+    std::thread::scope(|scope| {
+        scope.spawn(|| while server.poll_accept() {});
+        for (shard, raw_rx) in raw_receivers.into_iter().enumerate() {
+            let shard_load = server.shard_load(shard);
+            scope.spawn(move || {
+                let mut connected: Vec<MuxedClientChannel<K, R, Resp>> = Vec::new();
+                let mut cursor: usize = 0;
+                let mut drop_scratch: std::collections::HashSet<(u64, u64)> =
+                    std::collections::HashSet::new();
+                loop {
+                    let mut sel = crossbeam_channel::Select::new();
+                    sel.recv(&raw_rx);
+                    for channel in &connected {
+                        sel.recv(channel.ready_receiver());
+                    }
+                    // Result deliberately ignored either way: `Ok(_)` means something looked
+                    // ready (go handle it); `Err(_)` means the fallback timeout elapsed with
+                    // nothing ready (go check anyway, same as `poll_shard_epoll`'s identical
+                    // fallback-timeout rationale) -- `poll_shard` below is correct, just
+                    // potentially-idle work, in either case.
+                    let _ = sel.ready_timeout(Duration::from_millis(EPOLL_FALLBACK_MILLIS));
+                    server.poll_shard(
+                        &raw_rx,
+                        &mut connected,
+                        &mut cursor,
+                        &mut drop_scratch,
+                        shard_load,
+                        shard,
+                    );
+                }
+            });
+        }
+    });
+}

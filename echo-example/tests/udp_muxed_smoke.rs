@@ -84,20 +84,32 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
 /// client both exits successfully and actually completed every op with the correct echoed value
 /// (not just a zero exit status -- see `io_uring_network_smoke.rs`'s identical "belt and braces"
 /// rationale).
-fn run_smoke_test(addr: SocketAddr, num_router_threads: usize, num_clients: u64, n_ops: u64) {
+#[allow(clippy::too_many_arguments)]
+fn run_smoke_test(
+    addr: SocketAddr,
+    network: &str,
+    num_router_threads: usize,
+    epoll: bool,
+    num_clients: u64,
+    n_ops: u64,
+) {
+    let mut server_args = vec![
+        "--server-id".to_string(),
+        "1".to_string(),
+        "--server-addr".to_string(),
+        addr.to_string(),
+        "--network".to_string(),
+        network.to_string(),
+        "--num-threads".to_string(),
+        "4".to_string(),
+        "--num-router-threads".to_string(),
+        num_router_threads.to_string(),
+    ];
+    if epoll {
+        server_args.push("--epoll".to_string());
+    }
     let server = Command::new(env!("CARGO_BIN_EXE_echo_server"))
-        .args([
-            "--server-id",
-            "1",
-            "--server-addr",
-            &addr.to_string(),
-            "--network",
-            "udp",
-            "--num-threads",
-            "4",
-            "--num-router-threads",
-            &num_router_threads.to_string(),
-        ])
+        .args(&server_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -126,7 +138,7 @@ fn run_smoke_test(addr: SocketAddr, num_router_threads: usize, num_clients: u64,
                     "--server-addr",
                     &addr.to_string(),
                     "--network",
-                    "udp",
+                    network,
                 ])
                 // Per-op completion logging is silent by default -- force it on so the content
                 // check below has something to look at (same as `io_uring_network_smoke.rs`).
@@ -186,10 +198,19 @@ fn run_smoke_test(addr: SocketAddr, num_router_threads: usize, num_clients: u64,
 
 #[test]
 fn udp_muxed_single_socket_concurrent_clients() {
-    run_smoke_test("127.0.0.1:16780".parse().unwrap(), 1, 8, 20);
+    run_smoke_test("127.0.0.1:16780".parse().unwrap(), "udp", 1, false, 8, 20);
 }
 
 #[test]
 fn udp_muxed_reuseport_concurrent_clients() {
-    run_smoke_test("127.0.0.1:16781".parse().unwrap(), 4, 16, 20);
+    run_smoke_test("127.0.0.1:16781".parse().unwrap(), "udp", 4, false, 16, 20);
+}
+
+/// `--epoll` for `udp_muxed` (`verdist::network::udp_muxed::run_epoll`'s
+/// `crossbeam_channel::Select`-based driver -- see that function's doc for why this backend
+/// can't use `Server::run_epoll` directly). Combined with `--num-router-threads 2` so this also
+/// exercises the epoll driver alongside `SO_REUSEPORT` fan-out, not just the single-socket case.
+#[test]
+fn udp_muxed_epoll_concurrent_clients() {
+    run_smoke_test("127.0.0.1:16782".parse().unwrap(), "udp", 2, true, 20, 100);
 }

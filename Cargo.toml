@@ -32,6 +32,7 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rand = "0.10.1"
 rand_distr = "0.6.0"
 serde = { version = "1.0", features = ["derive"] }
+socket2 = { version = "0.5", features = ["all"] }
 toml = "0.8"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }

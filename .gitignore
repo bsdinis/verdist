@@ -3,6 +3,10 @@
 debug/
 target/
 
+# Sandbox workaround: the real ~/.cargo/registry is read-only here, so a local writable
+# CARGO_HOME is used instead (see the jj-workspace fork's report for this session).
+.cargo-home/
+
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
 Cargo.lock

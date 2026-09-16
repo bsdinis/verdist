@@ -10,6 +10,10 @@ pub mod udp {
     pub use super::impls::udp::*;
 }
 
+pub mod udp_muxed {
+    pub use super::impls::udp_muxed::*;
+}
+
 pub mod tcp {
     pub use super::impls::tcp::*;
 }

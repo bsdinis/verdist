@@ -14,6 +14,10 @@ pub mod udp_muxed {
     pub use super::impls::udp_muxed::*;
 }
 
+pub mod io_uring_udp_muxed {
+    pub use super::impls::io_uring_udp_muxed::*;
+}
+
 pub mod tcp {
     pub use super::impls::tcp::*;
 }

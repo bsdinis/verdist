@@ -109,9 +109,9 @@ thread_local! {
 /// helpers), Verus never needing to see it at all is strictly simpler than either hand-rolling the
 /// impls or fighting the derive-macro crash, and changes nothing about what's trusted vs. checked.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct MuxedEnvelope<R> {
-    client_id: u64,
-    body: R,
+pub(crate) struct MuxedEnvelope<R> {
+    pub(crate) client_id: u64,
+    pub(crate) body: R,
 }
 
 /// Kept outside `verus! {}` alongside `MuxedEnvelope` itself, for the same reason: a signature
@@ -120,7 +120,7 @@ struct MuxedEnvelope<R> {
 /// Verus checks a function's signature independently of whether its body is trusted. Called only
 /// from `router_thread_body`, which is itself `#[verifier::external_body]` and declared inside
 /// `verus! {}` alongside every other real backend's accept-path logic in this crate.
-fn deserialize_envelope<R>(buf: &[u8]) -> Result<MuxedEnvelope<R>, std::io::Error> where
+pub(crate) fn deserialize_envelope<R>(buf: &[u8]) -> Result<MuxedEnvelope<R>, std::io::Error> where
     for <'de>R: serde::Deserialize<'de>,
  {
     postcard::from_bytes::<MuxedEnvelope<R>>(buf).map_err(
@@ -132,14 +132,14 @@ verus! {
 
 /// Same real ceiling as `udp.rs::BUF_SIZE` -- see that constant's doc for why this is not a
 /// tunable choice.
-const BUF_SIZE: usize = 65_507;
+pub(crate) const BUF_SIZE: usize = 65_507;
 
 /// Same rationale as `udp.rs::RECV_TIMEOUT_MILLIS`: a bounded blocking recv so a router thread (or
 /// a client's blocking `recv`) can be polled cooperatively rather than either spinning at 100% or
 /// blocking forever with no way to notice anything else.
-const RECV_TIMEOUT_MILLIS: u64 = 2;
+pub(crate) const RECV_TIMEOUT_MILLIS: u64 = 2;
 
-fn is_recv_timeout(e: &std::io::Error) -> bool {
+pub(crate) fn is_recv_timeout(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut
 }
 
@@ -190,10 +190,10 @@ fn serialize_with<T: serde::Serialize, F: FnOnce(&[u8]) -> std::io::Result<()>>(
 #[verifier::external_body]
 #[verifier::reject_recursive_types(R)]
 pub struct MuxedRaw<R> {
-    client_id: u64,
-    inbox: crossbeam_channel::Receiver<R>,
-    socket: Arc<UdpSocket>,
-    peer_addr: SocketAddr,
+    pub(crate) client_id: u64,
+    pub(crate) inbox: crossbeam_channel::Receiver<R>,
+    pub(crate) socket: Arc<UdpSocket>,
+    pub(crate) peer_addr: SocketAddr,
 }
 
 /// A UDP listener with no rendezvous handshake -- see this module's top doc. Owns nothing directly
@@ -204,9 +204,9 @@ pub struct MuxedRaw<R> {
 #[verifier::reject_recursive_types(R)]
 #[verifier::reject_recursive_types(S)]
 pub struct MuxedListener<R, S> {
-    id: u64,
-    new_conns: crossbeam_channel::Receiver<(u64, MuxedRaw<R>)>,
-    _marker: PhantomData<S>,
+    pub(crate) id: u64,
+    pub(crate) new_conns: crossbeam_channel::Receiver<(u64, MuxedRaw<R>)>,
+    pub(crate) _marker: PhantomData<S>,
 }
 
 /// Body of one router thread: owns exactly one socket and one private (non-shared, unlocked) demux
@@ -232,32 +232,49 @@ fn router_thread_body<R>(
                 continue;
             },
         };
-        let envelope: MuxedEnvelope<R> = match deserialize_envelope(&buf[..n]) {
-            Ok(env) => env,
-            Err(e) => {
-                vlib::veprintln!("[udp_muxed]: warning: failed to decode datagram from {addr}: {e:?}");
-                continue;
-            },
-        };
-        if let Some(tx) = demux.get(&addr) {
-            // Known peer: forward straight to its inbox. If the receiving worker thread has
-            // already dropped this channel (send fails), there is nothing left to route to --
-            // drop the datagram and leave the stale demux entry in place (see this module's top
-            // doc: idle-peer eviction is a deliberately unaddressed follow-up, not attempted here).
-            let _ = tx.send(envelope.body);
-            continue;
-        }
-        // Unknown peer: this *is* the implicit accept, with zero prior network round trips.
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let _ = tx.send(envelope.body);
-        demux.insert(addr, tx);
-        let raw = MuxedRaw { client_id: envelope.client_id, inbox: rx, socket: socket.clone(), peer_addr: addr };
-        if new_conns_tx.send((envelope.client_id, raw)).is_err() {
+        if !handle_datagram(&mut demux, addr, &buf[..n], &socket, &new_conns_tx) {
             // The `MuxedListener` (and its `new_conns` receiver) was dropped -- nothing left to
             // report new connections to, so this router thread has no further purpose.
             return;
         }
     }
+}
+
+/// Shared demux step for a just-received datagram, factored out so
+/// `io_uring_udp_muxed.rs`'s `RecvMsg`-based router thread (which obtains `(payload, addr)`
+/// differently -- an io_uring completion instead of a blocking `recv_from`) doesn't have to
+/// duplicate the demultiplexing logic itself, only how the datagram is obtained. Returns `false`
+/// if `new_conns_tx` is disconnected (the owning `MuxedListener` was dropped) -- the caller should
+/// stop in that case, same as `router_thread_body`'s own `return` on that condition.
+#[verifier::external_body]
+pub(crate) fn handle_datagram<R>(
+    demux: &mut HashMap<SocketAddr, crossbeam_channel::Sender<R>>,
+    addr: SocketAddr,
+    payload: &[u8],
+    socket: &Arc<UdpSocket>,
+    new_conns_tx: &crossbeam_channel::Sender<(u64, MuxedRaw<R>)>,
+) -> bool where for <'de>R: serde::Deserialize<'de> {
+    let envelope: MuxedEnvelope<R> = match deserialize_envelope(payload) {
+        Ok(env) => env,
+        Err(e) => {
+            vlib::veprintln!("[udp_muxed]: warning: failed to decode datagram from {addr}: {e:?}");
+            return true;
+        },
+    };
+    if let Some(tx) = demux.get(&addr) {
+        // Known peer: forward straight to its inbox. If the receiving worker thread has already
+        // dropped this channel (send fails), there is nothing left to route to -- drop the
+        // datagram and leave the stale demux entry in place (see this module's top doc: idle-peer
+        // eviction is a deliberately unaddressed follow-up, not attempted here).
+        let _ = tx.send(envelope.body);
+        return true;
+    }
+    // Unknown peer: this *is* the implicit accept, with zero prior network round trips.
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let _ = tx.send(envelope.body);
+    demux.insert(addr, tx);
+    let raw = MuxedRaw { client_id: envelope.client_id, inbox: rx, socket: socket.clone(), peer_addr: addr };
+    new_conns_tx.send((envelope.client_id, raw)).is_ok()
 }
 
 impl<R, S> MuxedListener<R, S> where for <'de>R: serde::Deserialize<'de>, R: Send + 'static {
@@ -318,7 +335,7 @@ impl<R, S> MuxedListener<R, S> where for <'de>R: serde::Deserialize<'de>, R: Sen
 /// `#[verifier::external_body]`: same trust-boundary shape as every other real-socket-touching
 /// function in this file, just via a different (still foreign, still unverified either way) crate.
 #[verifier::external_body]
-fn bind_reuseport(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+pub(crate) fn bind_reuseport(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     let domain = if addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 };
     let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     socket.set_reuse_port(true)?;
@@ -330,9 +347,9 @@ fn bind_reuseport(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 #[verifier::external_body]
 #[verifier::reject_recursive_types(A)]
 pub struct MuxedConnector<A: ToSocketAddrs> {
-    listening_addr: A,
-    local_ip: IpAddr,
-    server_id: u64,
+    pub(crate) listening_addr: A,
+    pub(crate) local_ip: IpAddr,
+    pub(crate) server_id: u64,
 }
 
 impl<A: ToSocketAddrs> MuxedConnector<A> {

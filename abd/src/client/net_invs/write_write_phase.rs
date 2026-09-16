@@ -42,11 +42,11 @@ pub ghost struct WritePred<C: Channel<K = ChannelInv>> {
 }
 
 impl<C: Channel<K = ChannelInv>> WritePred<C> {
-    pub open spec fn new(
+    pub open spec fn new<const N: usize>(
         state: StatePredicate,
         channels: Map<C::Id, C>,
         client_id: u64,
-        request: RequestProof,
+        request: RequestProof<N>,
     ) -> WritePred<C> {
         WritePred {
             server_locs: state.server_locs,
@@ -73,7 +73,8 @@ impl<C: Channel<K = ChannelInv>> WritePred<C> {
 }
 
 #[allow(dead_code)]
-pub struct WriteAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
+#[verifier::reject_recursive_types(N)]
+pub struct WriteAccumulator<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     // EXEC state
     /// Received replies
     replies: BTreeSet<C::Id>,
@@ -86,19 +87,19 @@ pub struct WriteAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     /// channels of the pool this accumulator is working with
     channels: Ghost<Map<C::Id, C>>,
     /// write request proof
-    request: Tracked<RequestProof>,
+    request: Tracked<RequestProof<N>>,
 }
 
-impl<C> InvariantPredicate<WritePred<C>, WriteAccumulator<C>> for WritePred<C> where
+impl<const N: usize, C> InvariantPredicate<WritePred<C>, WriteAccumulator<N, C>> for WritePred<C> where
     C: Channel<K = ChannelInv, Id = (u64, u64)>,
  {
-    open spec fn inv(pred: WritePred<C>, v: WriteAccumulator<C>) -> bool {
+    open spec fn inv(pred: WritePred<C>, v: WriteAccumulator<N, C>) -> bool {
         pred == v.constant()
     }
 }
 
-pub open spec fn request_inv<C: Channel<K = ChannelInv>>(
-    request: RequestProof,
+pub open spec fn request_inv<const N: usize, C: Channel<K = ChannelInv>>(
+    request: RequestProof<N>,
     pred: WritePred<C>,
 ) -> bool {
     &&& request.id() == pred.request_map_id
@@ -119,11 +120,11 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
     &&& c_inv.server_locs == pred.server_locs
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<N, C> {
     pub fn new(
         servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
-        request: Tracked<RequestProof>,
+        request: Tracked<RequestProof<N>>,
         #[allow(unused_variables)]
         pred: Ghost<WritePred<C>>,
     ) -> (r: Self)
@@ -400,9 +401,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         #[allow(unused_variables)]
-        request: &Tracked<RequestProof>,
+        request: &Tracked<RequestProof<N>>,
         id: (u64, u64),
-        resp: Response,
+        resp: Response<N>,
     )
         requires
             resp.server_id() == id.1,
@@ -491,7 +492,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
         replies.insert(id);
     }
 
-    fn insert_write(&mut self, id: (u64, u64), resp: Response)
+    fn insert_write(&mut self, id: (u64, u64), resp: Response<N>)
         requires
             WritePred::inv(old(self).constant(), *old(self)),
             old(self).client_id() == id.0,
@@ -522,12 +523,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> WriteAccumulator<C> {
     }
 }
 
-impl<C> ReplyAccumulator<C, WritePred<C>> for WriteAccumulator<C> where
-    C: Channel<Id = (u64, u64), R = Response, K = ChannelInv>,
+impl<const N: usize, C> ReplyAccumulator<C, WritePred<C>> for WriteAccumulator<N, C> where
+    C: Channel<Id = (u64, u64), R = Response<N>, K = ChannelInv>,
  {
     #[allow(unused_variables)]
     #[verifier::exec_allows_no_decreases_clause]
-    fn insert(&mut self, pred: Ghost<WritePred<C>>, id: (u64, u64), reply: Response)
+    fn insert(&mut self, pred: Ghost<WritePred<C>>, id: (u64, u64), reply: Response<N>)
         ensures
             final(self).channels() == old(self).channels(),
     {

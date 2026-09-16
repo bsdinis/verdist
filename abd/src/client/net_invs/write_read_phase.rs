@@ -40,11 +40,11 @@ pub ghost struct GetTimestampPred<C: Channel<K = ChannelInv>> {
 }
 
 impl<C: Channel<K = ChannelInv>> GetTimestampPred<C> {
-    pub open spec fn new(
+    pub open spec fn new<const N: usize>(
         state: StatePredicate,
         channels: Map<C::Id, C>,
         client_id: u64,
-        request: RequestProof,
+        request: RequestProof<N>,
     ) -> GetTimestampPred<C> {
         GetTimestampPred {
             server_locs: state.server_locs,
@@ -59,7 +59,8 @@ impl<C: Channel<K = ChannelInv>> GetTimestampPred<C> {
 }
 
 #[allow(dead_code)]
-pub struct GetTimestampAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
+#[verifier::reject_recursive_types(N)]
+pub struct GetTimestampAccumulator<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     // EXEC state
     /// The max response seen
     /// This is the value that will ultimately be returned
@@ -78,19 +79,19 @@ pub struct GetTimestampAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> 
     /// channels of the pool this accumulator is working with
     channels: Ghost<Map<C::Id, C>>,
     /// get timestamp request proof
-    request: Tracked<RequestProof>,
+    request: Tracked<RequestProof<N>>,
 }
 
-impl<C> InvariantPredicate<GetTimestampPred<C>, GetTimestampAccumulator<C>> for GetTimestampPred<
+impl<const N: usize, C> InvariantPredicate<GetTimestampPred<C>, GetTimestampAccumulator<N, C>> for GetTimestampPred<
     C,
 > where C: Channel<K = ChannelInv, Id = (u64, u64)> {
-    open spec fn inv(pred: GetTimestampPred<C>, v: GetTimestampAccumulator<C>) -> bool {
+    open spec fn inv(pred: GetTimestampPred<C>, v: GetTimestampAccumulator<N, C>) -> bool {
         pred == v.constant()
     }
 }
 
-pub open spec fn request_inv(
-    request: RequestProof,
+pub open spec fn request_inv<const N: usize>(
+    request: RequestProof<N>,
     request_map_id: Loc,
     client_id: u64,
     request_id: u64,
@@ -110,11 +111,11 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
     &&& c_inv.server_locs == pred.server_locs
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<N, C> {
     pub fn new(
         servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
-        request: Tracked<RequestProof>,
+        request: Tracked<RequestProof<N>>,
         #[allow(unused_variables)]
         pred: Ghost<GetTimestampPred<C>>,
     ) -> (r: Self)
@@ -546,9 +547,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
         #[allow(unused_variables)]
-        request: &Tracked<RequestProof>,
+        request: &Tracked<RequestProof<N>>,
         id: (u64, u64),
-        resp: Response,
+        resp: Response<N>,
     )
         requires
             resp.server_id() == id.1,
@@ -680,7 +681,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
         Self::update_max_resp_and_quorum(max_resp, agree_with_max, replies, &*servers, r, id);
     }
 
-    fn insert_get_timestamp(&mut self, id: (u64, u64), resp: Response)
+    fn insert_get_timestamp(&mut self, id: (u64, u64), resp: Response<N>)
         requires
             GetTimestampPred::inv(old(self).constant(), *old(self)),
             old(self).client_id() == id.0,
@@ -713,12 +714,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> GetTimestampAccumulator<C> {
     }
 }
 
-impl<C> ReplyAccumulator<C, GetTimestampPred<C>> for GetTimestampAccumulator<C> where
-    C: Channel<Id = (u64, u64), R = Response, K = ChannelInv>,
+impl<const N: usize, C> ReplyAccumulator<C, GetTimestampPred<C>> for GetTimestampAccumulator<N, C> where
+    C: Channel<Id = (u64, u64), R = Response<N>, K = ChannelInv>,
  {
     #[allow(unused_variables)]
     #[verifier::exec_allows_no_decreases_clause]
-    fn insert(&mut self, pred: Ghost<GetTimestampPred<C>>, id: (u64, u64), reply: Response)
+    fn insert(&mut self, pred: Ghost<GetTimestampPred<C>>, id: (u64, u64), reply: Response<N>)
         ensures
             final(self).channels() == old(self).channels(),
     {

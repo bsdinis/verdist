@@ -19,18 +19,19 @@ verus! {
 /// The only way an ABD read fails is when a quorum is known to be unatainable
 /// This happens when a connection reset happens
 /// In this case, the error is exposed to the client
-pub enum ReadError<RL, RC> {
+#[verifier::reject_recursive_types(N)]
+pub enum ReadError<const N: usize, RL, RC> {
     // The first read quorum failed
     FailedFirstQuorum {
         obtained: usize,
         required: usize,
-        lincomp: Tracked<MaybeReadLinearized<RL, RC>>,
+        lincomp: Tracked<MaybeReadLinearized<N, RL, RC>>,
     },
     // The writeback phase of the read failed
     FailedSecondQuorum {
         obtained: usize,
         required: usize,
-        lincomp: Tracked<MaybeReadLinearized<RL, RC>>,
+        lincomp: Tracked<MaybeReadLinearized<N, RL, RC>>,
     },
 }
 
@@ -39,13 +40,14 @@ pub enum ReadError<RL, RC> {
 /// The only way an ABD write fails is when a quorum is known to be unatainable
 /// This happens when a connection reset happens
 /// In this case, the error is exposed to the client
-pub enum WriteError<ML, MC> {
+#[verifier::reject_recursive_types(N)]
+pub enum WriteError<const N: usize, ML, MC> {
     // The first phase of the write failed
     // In this case the write never physicially started, so we can get the MaybeLinearized
     FailedFirstQuorum {
         obtained: usize,
         required: usize,
-        lincomp: Tracked<MaybeWriteLinearized<ML, MC>>,
+        lincomp: Tracked<MaybeWriteLinearized<N, ML, MC>>,
     },
     // The second phase of the write failed
     // In this case the write is physically ongoing, so we can only return a token into the queue
@@ -53,12 +55,12 @@ pub enum WriteError<ML, MC> {
         obtained: usize,
         required: usize,
         timestamp: Timestamp,
-        token: Tracked<LinWriteToken<ML>>,
-        commitment: Tracked<WriteCommitment>,
+        token: Tracked<LinWriteToken<N, ML>>,
+        commitment: Tracked<WriteCommitment<N>>,
     },
 }
 
-impl<ML> WriteError<ML, ML::Completion> where ML: MutLinearizer<RegisterWrite> {
+impl<const N: usize, ML> WriteError<N, ML, ML::Completion> where ML: MutLinearizer<RegisterWrite<N>> {
     pub open spec fn inv(self) -> bool {
         match self {
             WriteError::FailedFirstQuorum { lincomp, .. } => { lincomp@.inv() },
@@ -71,18 +73,18 @@ impl<ML> WriteError<ML, ML::Completion> where ML: MutLinearizer<RegisterWrite> {
     }
 }
 
-impl<RL, RC> std::error::Error for ReadError<RL, RC> {
+impl<const N: usize, RL, RC> std::error::Error for ReadError<N, RL, RC> {
 
 }
 
-impl<ML, MC> std::error::Error for WriteError<ML, MC> {
+impl<const N: usize, ML, MC> std::error::Error for WriteError<N, ML, MC> {
 
 }
 
-impl<RL> RegisterError<RL, RegisterRead> for ReadError<RL, RL::Completion> where
-    RL: ReadLinearizer<RegisterRead>,
+impl<const N: usize, RL> RegisterError<RL, RegisterRead<N>> for ReadError<N, RL, RL::Completion> where
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    open spec fn err_ensures(self, op: RegisterRead, lin: RL) -> bool {
+    open spec fn err_ensures(self, op: RegisterRead<N>, lin: RL) -> bool {
         &&& self is FailedFirstQuorum ==> ({
             &&& self->FailedFirstQuorum_lincomp@.lin() == lin
             &&& self->FailedFirstQuorum_lincomp@.op() == op
@@ -94,10 +96,10 @@ impl<RL> RegisterError<RL, RegisterRead> for ReadError<RL, RL::Completion> where
     }
 }
 
-impl<ML> RegisterError<ML, RegisterWrite> for WriteError<ML, ML::Completion> where
-    ML: MutLinearizer<RegisterWrite>,
+impl<const N: usize, ML> RegisterError<ML, RegisterWrite<N>> for WriteError<N, ML, ML::Completion> where
+    ML: MutLinearizer<RegisterWrite<N>>,
  {
-    open spec fn err_ensures(self, op: RegisterWrite, lin: ML) -> bool {
+    open spec fn err_ensures(self, op: RegisterWrite<N>, lin: ML) -> bool {
         &&& self.inv()
         &&& self is FailedFirstQuorum ==> ({
             &&& self->lincomp@.lin() == lin
@@ -111,7 +113,7 @@ impl<ML> RegisterError<ML, RegisterWrite> for WriteError<ML, ML::Completion> whe
 }
 
 } // verus!
-impl<RL, RC> std::fmt::Debug for ReadError<RL, RC> {
+impl<const N: usize, RL, RC> std::fmt::Debug for ReadError<N, RL, RC> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadError::FailedFirstQuorum {
@@ -132,7 +134,7 @@ impl<RL, RC> std::fmt::Debug for ReadError<RL, RC> {
     }
 }
 
-impl<RL, RC> std::fmt::Display for ReadError<RL, RC> {
+impl<const N: usize, RL, RC> std::fmt::Display for ReadError<N, RL, RC> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadError::FailedFirstQuorum { obtained, required, .. } => {
@@ -145,7 +147,7 @@ impl<RL, RC> std::fmt::Display for ReadError<RL, RC> {
     }
 }
 
-impl<ML, MC> std::fmt::Debug for WriteError<ML, MC> {
+impl<const N: usize, ML, MC> std::fmt::Debug for WriteError<N, ML, MC> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriteError::FailedFirstQuorum {
@@ -166,7 +168,7 @@ impl<ML, MC> std::fmt::Debug for WriteError<ML, MC> {
     }
 }
 
-impl<ML, MC> std::fmt::Display for WriteError<ML, MC> {
+impl<const N: usize, ML, MC> std::fmt::Display for WriteError<N, ML, MC> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriteError::FailedFirstQuorum { obtained, required, .. } => {

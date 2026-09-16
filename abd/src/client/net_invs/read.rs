@@ -28,7 +28,8 @@ use vstd::resource::Loc;
 verus! {
 
 #[allow(unused_variables, dead_code)]
-pub ghost struct ReadPred<C: Channel<K = ChannelInv>> {
+#[verifier::reject_recursive_types(N)]
+pub ghost struct ReadPred<const N: usize, C: Channel<K = ChannelInv>> {
     pub server_locs: Map<u64, Loc>,
     pub orig_servers: ServerUniverseLb,
     pub commitment_id: Loc,
@@ -41,14 +42,14 @@ pub ghost struct ReadPred<C: Channel<K = ChannelInv>> {
     pub wb_request_id: Option<u64>,
 }
 
-impl<C: Channel<K = ChannelInv>> ReadPred<C> {
+impl<const N: usize, C: Channel<K = ChannelInv>> ReadPred<N, C> {
     pub open spec fn new(
         state: StatePredicate,
         channels: Map<C::Id, C>,
         old_watermark: MonotonicTimestampResource,
         client_id: u64,
-        get_request: RequestProof,
-    ) -> ReadPred<C> {
+        get_request: RequestProof<N>,
+    ) -> ReadPred<N, C> {
         ReadPred {
             server_locs: state.server_locs,
             orig_servers: get_request.get().servers(),
@@ -76,11 +77,12 @@ impl<C: Channel<K = ChannelInv>> ReadPred<C> {
 }
 
 #[allow(dead_code)]
-pub struct ReadAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
+#[verifier::reject_recursive_types(N)]
+pub struct ReadAccumulator<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     // EXEC state
     /// The max response from the first round
     /// This is the value that will ultimately be returned
-    max_resp: Option<GetResponse>,
+    max_resp: Option<GetResponse<N>>,
     /// The set of servers that we know are >= max_resp.timestamp()
     agree_with_max: BTreeSet<u64>,
     /// Received get replies
@@ -103,23 +105,23 @@ pub struct ReadAccumulator<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
     /// channels of the pool this accumulator is working with
     channels: Ghost<Map<C::Id, C>>,
     /// get request proof
-    get_request: Tracked<RequestProof>,
+    get_request: Tracked<RequestProof<N>>,
     /// write-back request proof
-    wb_request: Tracked<Option<RequestProof>>,
+    wb_request: Tracked<Option<RequestProof<N>>>,
 }
 
-impl<C> InvariantPredicate<ReadPred<C>, ReadAccumulator<C>> for ReadPred<C> where
+impl<const N: usize, C> InvariantPredicate<ReadPred<N, C>, ReadAccumulator<N, C>> for ReadPred<N, C> where
     C: Channel<K = ChannelInv, Id = (u64, u64)>,
  {
-    open spec fn inv(pred: ReadPred<C>, v: ReadAccumulator<C>) -> bool {
+    open spec fn inv(pred: ReadPred<N, C>, v: ReadAccumulator<N, C>) -> bool {
         pred == v.constant()
     }
 }
 
-pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
-    request: RequestProof,
+pub open spec fn get_request_inv<const N: usize, C: Channel<K = ChannelInv>>(
+    request: RequestProof<N>,
     servers: ServerUniverseLb,
-    k: ReadPred<C>,
+    k: ReadPred<N, C>,
 ) -> bool {
     &&& request.id() == k.request_map_id
     &&& request.key().0 == k.client_id
@@ -129,9 +131,9 @@ pub open spec fn get_request_inv<C: Channel<K = ChannelInv>>(
     &&& request.req_type() is Get
 }
 
-pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
+pub open spec fn channel_inv<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>>(
     c_inv: ChannelInv,
-    k: ReadPred<C>,
+    k: ReadPred<N, C>,
 ) -> bool {
     &&& c_inv.commitment_id == k.commitment_id
     &&& c_inv.request_map_id == k.request_map_id
@@ -139,11 +141,11 @@ pub open spec fn channel_inv<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
     &&& c_inv.server_locs == k.server_locs
 }
 
-pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>(
+pub open spec fn construct_requires<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>>(
     servers: ServerUniverseLb,
     server_tokens: GhostPersistentSubmap<u64, Loc>,
-    get_request: RequestProof,
-    k: ReadPred<C>,
+    get_request: RequestProof<N>,
+    k: ReadPred<N, C>,
 ) -> bool {
     &&& k.server_locs == servers.locs()
     &&& k.server_tokens_id == server_tokens.id()
@@ -161,13 +163,13 @@ pub open spec fn construct_requires<C: Channel<K = ChannelInv, Id = (u64, u64)>>
         }
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<N, C> {
     pub fn new(
         servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
-        get_request: Tracked<RequestProof>,
+        get_request: Tracked<RequestProof<N>>,
         #[allow(unused_variables)]
-        read_pred: Ghost<ReadPred<C>>,
+        read_pred: Ghost<ReadPred<N, C>>,
     ) -> (r: Self)
         requires
             construct_requires(servers@, server_tokens@, get_request@, read_pred@),
@@ -205,7 +207,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         &&& server_tokens <= servers.locs()
     }
 
-    closed spec fn channel_inv(channels: Map<C::Id, C>, k: ReadPred<C>) -> bool {
+    closed spec fn channel_inv(channels: Map<C::Id, C>, k: ReadPred<N, C>) -> bool {
         forall|c_id| #[trigger]
             channels.contains_key(c_id) ==> {
                 let c = channels[c_id];
@@ -220,9 +222,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     closed spec fn request_inv(
-        get_request: RequestProof,
-        wb_request: Option<RequestProof>,
-        max_resp: Option<GetResponse>,
+        get_request: RequestProof<N>,
+        wb_request: Option<RequestProof<N>>,
+        max_resp: Option<GetResponse<N>>,
     ) -> bool {
         &&& get_request.req_type() is Get
         &&& wb_request is Some ==> {
@@ -260,7 +262,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         agree_with_max: Set<u64>,
         get_replies: Set<C::Id>,
         wb_replies: Set<C::Id>,
-        max_resp: Option<GetResponse>,
+        max_resp: Option<GetResponse<N>>,
     ) -> bool {
         &&& agree_with_max.is_empty() <==> get_replies.is_empty()
         &&& max_resp is None <==> agree_with_max.is_empty()
@@ -272,14 +274,14 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         get_replies: Set<C::Id>,
         wb_replies: Set<C::Id>,
         servers: ServerUniverseLb,
-        max_resp: Option<GetResponse>,
+        max_resp: Option<GetResponse<N>>,
     ) -> bool {
         &&& Self::agree_with_max_aux_inv(agree_with_max, get_replies, wb_replies, max_resp)
         &&& agree_with_max <= servers.dom()
     }
 
     closed spec fn max_resp_inv(
-        max_resp: GetResponse,
+        max_resp: GetResponse<N>,
         servers: ServerUniverseLb,
         agree_with_max: Set<u64>,
         get_replies: Set<C::Id>,
@@ -346,7 +348,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     // SPEC
-    pub open spec fn constant(self) -> ReadPred<C> {
+    pub open spec fn constant(self) -> ReadPred<N, C> {
         ReadPred {
             server_locs: self.server_locs(),
             orig_servers: self.orig_servers(),
@@ -418,7 +420,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         self.agree_with_max@
     }
 
-    pub closed spec fn spec_max_resp(&self) -> GetResponse
+    pub closed spec fn spec_max_resp(&self) -> GetResponse<N>
         recommends
             !self.spec_get_replies().is_empty(),
     {
@@ -513,7 +515,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         req_servers: ServerUniverseLb,
         min_timestamp: Timestamp,
         agree_with_max: Set<u64>,
-        max_resp: &Option<GetResponse>,
+        max_resp: &Option<GetResponse<N>>,
         server_id: u64,
         tracked lb: MonotonicTimestampResource,
     )
@@ -566,7 +568,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         req_servers: ServerUniverseLb,
         min_timestamp: Timestamp,
         agree_with_max: Set<u64>,
-        max_resp: GetResponse,
+        max_resp: GetResponse<N>,
         server_id: u64,
         tracked lb: MonotonicTimestampResource,
     )
@@ -673,7 +675,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         Tracked(lbs)
     }
 
-    pub fn max_resp(&self) -> (r: &GetResponse)
+    pub fn max_resp(&self) -> (r: &GetResponse<N>)
         requires
             !self.spec_get_replies().is_empty(),
         ensures
@@ -698,7 +700,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         agree_with_max: &mut BTreeSet<u64>,
         wb_replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
-        max_resp: &Option<GetResponse>,
+        max_resp: &Option<GetResponse<N>>,
         #[allow(unused_variables)]
         get_replies: &BTreeSet<C::Id>,
         id: (u64, u64),
@@ -737,12 +739,12 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 
     fn update_max_resp_and_quorum(
-        max_resp: &mut Option<GetResponse>,
+        max_resp: &mut Option<GetResponse<N>>,
         agree_with_max: &mut BTreeSet<u64>,
         get_replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
         wb_replies: &BTreeSet<C::Id>,
-        resp: GetResponse,
+        resp: GetResponse<N>,
         id: (u64, u64),
     )
         requires
@@ -815,7 +817,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
 
     #[allow(clippy::too_many_arguments)]
     fn insert_get_aux(
-        max_resp: &mut Option<GetResponse>,
+        max_resp: &mut Option<GetResponse<N>>,
         agree_with_max: &mut BTreeSet<u64>,
         get_replies: &mut BTreeSet<C::Id>,
         #[allow(unused_variables)]
@@ -828,9 +830,9 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         #[allow(unused_variables)]
         commitment_id: &Ghost<Loc>,
         #[allow(unused_variables)]
-        get_request: &Tracked<RequestProof>,
+        get_request: &Tracked<RequestProof<N>>,
         id: (u64, u64),
-        resp: Response,
+        resp: Response<N>,
     )
         requires
             resp.server_id() == id.1,
@@ -1008,7 +1010,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         }
     }
 
-    fn insert_get(&mut self, id: (u64, u64), resp: Response)
+    fn insert_get(&mut self, id: (u64, u64), resp: Response<N>)
         requires
             ReadPred::inv(old(self).constant(), *old(self)),
             old(self).client_id() == id.0,
@@ -1065,7 +1067,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     fn set_wb_request(
         &mut self,
         #[allow(unused_variables)]
-        wb_request: Tracked<RequestProof>,
+        wb_request: Tracked<RequestProof<N>>,
     )
         requires
             old(self).wb_request_id() is None,
@@ -1095,7 +1097,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         #[allow(unused_variables)]
         servers: &mut Tracked<ServerUniverseLb>,
         server_tokens: &mut Tracked<GhostPersistentSubmap<u64, Loc>>,
-        max_resp: &Option<GetResponse>,
+        max_resp: &Option<GetResponse<N>>,
         #[allow(unused_variables)]
         get_replies: &BTreeSet<C::Id>,
         #[allow(unused_variables)]
@@ -1103,11 +1105,11 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         #[allow(unused_variables)]
         commitment_id: &Ghost<Loc>,
         #[allow(unused_variables)]
-        wb_request: &Tracked<Option<RequestProof>>,
+        wb_request: &Tracked<Option<RequestProof<N>>>,
         #[allow(unused_variables)]
-        get_request: &Tracked<RequestProof>,
+        get_request: &Tracked<RequestProof<N>>,
         id: (u64, u64),
-        resp: Response,
+        resp: Response<N>,
     )
         requires
             wb_request@ is Some,
@@ -1287,7 +1289,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
         }
     }
 
-    fn insert_write(&mut self, id: (u64, u64), resp: Response)
+    fn insert_write(&mut self, id: (u64, u64), resp: Response<N>)
         requires
             ReadPred::inv(old(self).constant(), *old(self)),
             old(self).wb_request_id() is Some,
@@ -1343,29 +1345,31 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumulator<C> {
     }
 }
 
-pub struct ReadAccumGetPhase<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
-    inner: ReadAccumulator<C>,
+#[verifier::reject_recursive_types(N)]
+pub struct ReadAccumGetPhase<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> {
+    inner: ReadAccumulator<N, C>,
 }
 
-pub struct ReadAccumWbPhase<C: Channel<K = ChannelInv, Id = (u64, u64)>> {
-    inner: ReadAccumulator<C>,
+#[verifier::reject_recursive_types(N)]
+pub struct ReadAccumWbPhase<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> {
+    inner: ReadAccumulator<N, C>,
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> InvariantPredicate<
-    ReadPred<C>,
-    ReadAccumGetPhase<C>,
-> for ReadPred<C> {
-    open spec fn inv(pred: ReadPred<C>, v: ReadAccumGetPhase<C>) -> bool {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> InvariantPredicate<
+    ReadPred<N, C>,
+    ReadAccumGetPhase<N, C>,
+> for ReadPred<N, C> {
+    open spec fn inv(pred: ReadPred<N, C>, v: ReadAccumGetPhase<N, C>) -> bool {
         pred == v.constant()
     }
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumGetPhase<C> {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumGetPhase<N, C> {
     pub fn new(
         servers: Tracked<ServerUniverseLb>,
         server_tokens: Tracked<GhostPersistentSubmap<u64, Loc>>,
-        get_request: Tracked<RequestProof>,
-        read_pred: Ghost<ReadPred<C>>,
+        get_request: Tracked<RequestProof<N>>,
+        read_pred: Ghost<ReadPred<N, C>>,
     ) -> (r: Self)
         requires
             construct_requires(servers@, server_tokens@, get_request@, read_pred@),
@@ -1392,11 +1396,11 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumGetPhase<C> {
         self.inner.spec_get_replies()
     }
 
-    pub closed spec fn constant(self) -> ReadPred<C> {
+    pub closed spec fn constant(self) -> ReadPred<N, C> {
         self.inner.constant()
     }
 
-    pub fn destruct(self) -> (r: ReadAccumulator<C>)
+    pub fn destruct(self) -> (r: ReadAccumulator<N, C>)
         ensures
             r.constant() == self.constant(),
             r.wb_request_id() is None,
@@ -1412,15 +1416,15 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumGetPhase<C> {
     }
 }
 
-impl<C> ReplyAccumulator<C, ReadPred<C>> for ReadAccumGetPhase<C> where
-    C: Channel<Id = (u64, u64), R = Response, K = ChannelInv>,
+impl<const N: usize, C> ReplyAccumulator<C, ReadPred<N, C>> for ReadAccumGetPhase<N, C> where
+    C: Channel<Id = (u64, u64), R = Response<N>, K = ChannelInv>,
  {
     fn insert(
         &mut self,
         #[allow(unused_variables)]
-        pred: Ghost<ReadPred<C>>,
+        pred: Ghost<ReadPred<N, C>>,
         id: (u64, u64),
-        reply: Response,
+        reply: Response<N>,
     )
         ensures
             final(self).constant() == old(self).constant(),
@@ -1456,8 +1460,8 @@ impl<C> ReplyAccumulator<C, ReadPred<C>> for ReadAccumGetPhase<C> where
     }
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
-    pub fn new(mut accum: ReadAccumulator<C>, wb_request: Tracked<RequestProof>) -> (r: Self)
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<N, C> {
+    pub fn new(mut accum: ReadAccumulator<N, C>, wb_request: Tracked<RequestProof<N>>) -> (r: Self)
         requires
             accum.wb_request_id() is None,
             !accum.spec_get_replies().is_empty(),
@@ -1493,7 +1497,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
         self.inner.wb_request_id()->Some_0
     }
 
-    pub closed spec fn spec_max_resp(self) -> GetResponse {
+    pub closed spec fn spec_max_resp(self) -> GetResponse<N> {
         self.inner.spec_max_resp()
     }
 
@@ -1508,7 +1512,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
         self.inner.spec_agree_with_max()
     }
 
-    pub closed spec fn constant(self) -> ReadPred<C> {
+    pub closed spec fn constant(self) -> ReadPred<N, C> {
         self.inner.constant()
     }
 
@@ -1516,7 +1520,7 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
         self.inner.spec_wb_replies()
     }
 
-    pub fn destruct(self) -> (r: ReadAccumulator<C>)
+    pub fn destruct(self) -> (r: ReadAccumulator<N, C>)
         ensures
             r.constant() == self.constant(),
             r.spec_wb_replies() == self.replies(),
@@ -1531,33 +1535,34 @@ impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> ReadAccumWbPhase<C> {
     }
 }
 
-pub ghost struct ReadWbPred<C: Channel<K = ChannelInv>> {
+#[verifier::reject_recursive_types(N)]
+pub ghost struct ReadWbPred<const N: usize, C: Channel<K = ChannelInv>> {
     #[allow(unused)]
-    pub read_pred: ReadPred<C>,
+    pub read_pred: ReadPred<N, C>,
     #[allow(unused)]
-    pub max_resp: GetResponse,
+    pub max_resp: GetResponse<N>,
 }
 
-impl<C: Channel<K = ChannelInv, Id = (u64, u64)>> InvariantPredicate<
-    ReadWbPred<C>,
-    ReadAccumWbPhase<C>,
-> for ReadWbPred<C> {
-    open spec fn inv(pred: ReadWbPred<C>, v: ReadAccumWbPhase<C>) -> bool {
+impl<const N: usize, C: Channel<K = ChannelInv, Id = (u64, u64)>> InvariantPredicate<
+    ReadWbPred<N, C>,
+    ReadAccumWbPhase<N, C>,
+> for ReadWbPred<N, C> {
+    open spec fn inv(pred: ReadWbPred<N, C>, v: ReadAccumWbPhase<N, C>) -> bool {
         &&& pred.read_pred == v.constant()
         &&& pred.max_resp == v.spec_max_resp()
     }
 }
 
-impl<C> ReplyAccumulator<C, ReadWbPred<C>> for ReadAccumWbPhase<C> where
-    C: Channel<Id = (u64, u64), R = Response, K = ChannelInv>,
+impl<const N: usize, C> ReplyAccumulator<C, ReadWbPred<N, C>> for ReadAccumWbPhase<N, C> where
+    C: Channel<Id = (u64, u64), R = Response<N>, K = ChannelInv>,
  {
     #[verifier::exec_allows_no_decreases_clause]
     fn insert(
         &mut self,
         #[allow(unused_variables)]
-        pred: Ghost<ReadWbPred<C>>,
+        pred: Ghost<ReadWbPred<N, C>>,
         id: (u64, u64),
-        reply: Response,
+        reply: Response<N>,
     )
         ensures
             final(self).constant() == old(self).constant(),

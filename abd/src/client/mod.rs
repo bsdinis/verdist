@@ -58,25 +58,26 @@ use std::sync::Arc;
 verus! {
 
 #[allow(dead_code)]
-pub struct AbdPool<Pool, ML, RL> where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+#[verifier::reject_recursive_types(N)]
+pub struct AbdPool<const N: usize, Pool, ML, RL> where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pool: Pool,
     id: u64,
     register_id: Ghost<Loc>,
-    state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+    state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
     client_ctr_token: Tracked<ClientCtrToken>,
     client_ctr: PAtomicU64,
     request_ctr_token: Tracked<RequestCtrToken>,
     request_ctr: PAtomicU64,
 }
 
-impl<Pool, C, ML, RL> AbdPool<Pool, ML, RL> where
+impl<const N: usize, Pool, C, ML, RL> AbdPool<N, Pool, ML, RL> where
     Pool: ConnectionPool<C = C>,
-    C: Channel<R = Response, S = Request, Id = (u64, u64), K = ChannelInv>,
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+    C: Channel<R = Response<N>, S = Request<N>, Id = (u64, u64), K = ChannelInv>,
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
     pub fn new(
         pool: Pool,
@@ -85,7 +86,7 @@ impl<Pool, C, ML, RL> AbdPool<Pool, ML, RL> where
         client_ctr_token: Tracked<ClientCtrToken>,
         request_ctr: PAtomicU64,
         request_ctr_token: Tracked<RequestCtrToken>,
-        state_inv: Tracked<Arc<StateInvariant<ML, RL>>>,
+        state_inv: Tracked<Arc<StateInvariant<N, ML, RL>>>,
     ) -> (r: Self)
         requires
             pool.spec_len() > 0,
@@ -187,16 +188,16 @@ impl<Pool, C, ML, RL> AbdPool<Pool, ML, RL> where
     }
 }
 
-impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> where
+impl<const N: usize, Pool, C, ML, RL> LinRegisterClient<N, C, ML, RL> for AbdPool<N, Pool, ML, RL> where
     Pool: ConnectionPool<C = C>,
-    C: Channel<R = Response, S = Request, Id = (u64, u64), K = ChannelInv>,
+    C: Channel<R = Response<N>, S = Request<N>, Id = (u64, u64), K = ChannelInv>,
     C::Id: Eq + Hash,
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
  {
-    type ReadErr = error::ReadError<RL, RL::Completion>;
+    type ReadErr = error::ReadError<N, RL, RL::Completion>;
 
-    type WriteErr = error::WriteError<ML, ML::Completion>;
+    type WriteErr = error::WriteError<N, ML, ML::Completion>;
 
     type Timestamp = Timestamp;
 
@@ -219,8 +220,8 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
     }
 
     fn read(&mut self, Tracked(lin): Tracked<RL>) -> (r: Result<
-        (Option<u64>, Timestamp, Tracked<RL::Completion>),
-        error::ReadError<RL, RL::Completion>,
+        (Option<[u8; N]>, Timestamp, Tracked<RL::Completion>),
+        error::ReadError<N, RL, RL::Completion>,
     >) {
         proof {
             broadcast use crate::proto::GetRequest::lemma_spec_eq;
@@ -229,10 +230,10 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
 
         }
 
-        let tracked op = RegisterRead { id: Ghost(self.register_loc()) };
+        let tracked op = RegisterRead::<N> { id: Ghost(self.register_loc()) };
         // NOTE: IMPORTANT: We need to add the linearizer to the queue at this point -- see
         // discussion on `write`
-        let proph_val = Prophecy::<Option<u64>>::new();
+        let proph_val = Prophecy::<Option<[u8; N]>>::new();
         let tracked token;
         let tracked server_lbs;
         let tracked server_tokens_lb;
@@ -411,7 +412,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     replies_servers.lemma_leq_retains_unanimity_auth(state.servers, replies.quorum(), max_ts);
                     state.servers.lemma_quorum_lb(replies.quorum(), max_ts);
 
-                    let tracked (mut register, _view) = GhostVarAuth::<Option<u64>>::new(None);
+                    let tracked (mut register, _view) = GhostVarAuth::<Option<[u8; N]>>::new(None);
                     let tracked watermark = state.linearization_queue.apply_linearizers_up_to(
                             &mut state.register,
                             max_ts,
@@ -553,7 +554,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                 assert(state.servers.unanimous_quorum(wb_replies.quorum(), max_ts));
                 state.servers.lemma_quorum_lb(wb_replies.quorum(), max_ts);
 
-                let tracked (mut register, _view) = GhostVarAuth::<Option<u64>>::new(None);
+                let tracked (mut register, _view) = GhostVarAuth::<Option<[u8; N]>>::new(None);
                 let tracked watermark = state.linearization_queue.apply_linearizers_up_to(
                         &mut state.register,
                         max_ts,
@@ -576,9 +577,9 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
         Ok((value, max_ts, Tracked(comp)))
     }
 
-    fn write(&mut self, value: Option<u64>, Tracked(lin): Tracked<ML>) -> (r: Result<
+    fn write(&mut self, value: Option<[u8; N]>, Tracked(lin): Tracked<ML>) -> (r: Result<
         Tracked<ML::Completion>,
-        error::WriteError<ML, ML::Completion>,
+        error::WriteError<N, ML, ML::Completion>,
     >) {
         proof {
             broadcast use crate::proto::GetTimestampRequest::lemma_spec_eq;
@@ -586,7 +587,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
             broadcast use ServerUniverseLb::lemma_eq_timestamp_trans;
 
         }
-        let tracked op = RegisterWrite { id: Ghost(self.register_loc()), new_value: value };
+        let tracked op = RegisterWrite::<N> { id: Ghost(self.register_loc()), new_value: value };
         // NOTE: IMPORTANT: We need to add the linearizer to the queue at this point
         //
         // Imagine if we added this after the read quorum is achieved
@@ -965,7 +966,7 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
                     state.linearization_queue.lemma_write_token(&token);
                     state.commitments.agree_commitment(&commitment);
 
-                    let tracked (mut register, _view) = GhostVarAuth::<Option<u64>>::new(None);
+                    let tracked (mut register, _view) = GhostVarAuth::<Option<[u8; N]>>::new(None);
                     let tracked resource = state.linearization_queue.apply_linearizers_up_to(&mut state.register, exec_ts);
 
                     if exec_ts > old_watermark {
@@ -992,30 +993,30 @@ impl<Pool, C, ML, RL> LinRegisterClient<C, ML, RL> for AbdPool<Pool, ML, RL> whe
     }
 }
 
-pub proof fn lemma_inv<Pool, C, ML, RL>(c: AbdPool<Pool, ML, RL>) where
+pub proof fn lemma_inv<const N: usize, Pool, C, ML, RL>(c: AbdPool<N, Pool, ML, RL>) where
     Pool: ConnectionPool<C = C>,
-    C: Channel<R = Response, S = Request, Id = (u64, u64), K = ChannelInv>,
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+    C: Channel<R = Response<N>, S = Request<N>, Id = (u64, u64), K = ChannelInv>,
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
 
     ensures
         c._inv() <==> c.inv(),
 {
 }
 
-pub proof fn lemma_watermark_contradiction<ML, RL>(
-    tracked token_res: Result<LinWriteToken<ML>, InsertError<ML, RL>>,
+pub proof fn lemma_watermark_contradiction<const N: usize, ML, RL>(
+    tracked token_res: Result<LinWriteToken<N, ML>, InsertError<ML, RL>>,
     timestamp: Timestamp,
     old_watermark: Timestamp,
     lin: ML,
-    op: RegisterWrite,
+    op: RegisterWrite<N>,
     orig_servers: ServerUniverseLb,
     servers: ServerUniverseLb,
     write_token_id: Loc,
     quorum: Quorum,
-) -> (tracked tok: LinWriteToken<ML>) where
-    ML: MutLinearizer<RegisterWrite>,
-    RL: ReadLinearizer<RegisterRead>,
+) -> (tracked tok: LinWriteToken<N, ML>) where
+    ML: MutLinearizer<RegisterWrite<N>>,
+    RL: ReadLinearizer<RegisterRead<N>>,
 
     requires
         servers.valid_quorum(quorum),

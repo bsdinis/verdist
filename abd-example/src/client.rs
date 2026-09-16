@@ -75,10 +75,11 @@ fn main() {
             // same disambiguation once that second impl existed), so type inference alone is
             // ambiguous even though abd-example doesn't wire up the io_uring variant itself.
             abd_example::run_client::<
+                { abd_example::VALUE_SIZE },
                 verdist::network::udp_muxed::MuxedServerChannel<
                     abd::channel::ChannelInv,
-                    abd::proto::Response,
-                    abd::proto::Request,
+                    abd::proto::Response<{ abd_example::VALUE_SIZE }>,
+                    abd::proto::Request<{ abd_example::VALUE_SIZE }>,
                 >,
                 _,
             >(args, &connectors)

@@ -39,7 +39,7 @@ fn main() {
                 args.num_router_threads,
             )
             .expect("failed to create listener");
-            abd_example::server::run_server::<_, _, OwnedWritePerm, OwnedReadPerm>(
+            abd_example::server::run_server::<{ abd_example::VALUE_SIZE }, _, _, OwnedWritePerm<{ abd_example::VALUE_SIZE }>, OwnedReadPerm<{ abd_example::VALUE_SIZE }>>(
                 &server_ids,
                 args.server_id,
                 listener,
